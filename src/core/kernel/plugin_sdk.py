@@ -224,6 +224,7 @@ class PluginLoader:
 
         # 校验 manifest
         self._validate_manifest(manifest)
+        self._validate_sandbox_policy(manifest)
 
         # 创建沙箱环境
         sandbox_config = self._create_sandbox(manifest)
@@ -340,6 +341,15 @@ class PluginLoader:
         if granted_dangerous:
             raise ValueError(f"插件请求危险权限: {granted_dangerous}")
 
+
+    def _validate_sandbox_policy(self, manifest: PluginManifest) -> None:
+        """校验沙箱策略"""
+        if not manifest.sandbox:
+            return
+        required_denied = {"fs", "child_process", "network"}
+        missing = required_denied - set(manifest.denied_apis)
+        if missing:
+            raise ValueError(f"插件沙箱策略缺失禁用 API: {missing}")
     def _create_sandbox(self, manifest: PluginManifest) -> Dict[str, Any]:
         """创建沙箱环境"""
         runtime = manifest.runtime

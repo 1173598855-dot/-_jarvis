@@ -1,0 +1,22 @@
+{
+  "name": "plugin-template",
+  "version": "1.0.0",
+  "description": "Template plugin for XiaoYi plugin development.",
+  "author": "XiaoYi",
+  "permissions": [
+    "system_config",
+    "file_read",
+    "event_bus"
+  ],
+  "denied_apis": [
+    "fs",
+    "child_process",
+    "network"
+  ],
+  "runtime": "native",
+  "sandbox": true,
+  "entry_point": "plugin.py",
+  "dependencies": [],
+  "api_version": "1.0.0",
+  "plugin_id": "plugin-template"
+}

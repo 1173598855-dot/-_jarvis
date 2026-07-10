@@ -1,0 +1,20 @@
+{
+  "name": "event-logger",
+  "version": "1.0.0",
+  "description": "Logs plugin lifecycle events.",
+  "author": "XiaoYi",
+  "permissions": [
+    "event_bus"
+  ],
+  "denied_apis": [
+    "fs",
+    "child_process",
+    "network"
+  ],
+  "runtime": "native",
+  "sandbox": true,
+  "entry_point": "plugin.py",
+  "dependencies": [],
+  "api_version": "1.0.0",
+  "plugin_id": "event-logger"
+}
