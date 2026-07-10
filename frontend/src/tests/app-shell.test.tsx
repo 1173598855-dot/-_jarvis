@@ -20,6 +20,10 @@ import { readFileSync } from 'node:fs';
 import { App } from '../App';
 
 const componentsCss = readFileSync('src/styles/components.css', 'utf8');
+const frontendSources = import.meta.glob(
+  ['../**/*.{ts,tsx}', '!../tests/**'],
+  { query: '?raw', import: 'default', eager: true },
+) as Record<string, string>;
 
 const apiMocks = vi.hoisted(() => ({
   system: vi.fn(),
@@ -150,5 +154,14 @@ describe('application shell structure', () => {
     expect(componentsCss).toContain('@media (max-width: 1279px)');
     expect(componentsCss).toContain('@media (max-width: 767px)');
     expect(componentsCss).toContain('height: 100dvh');
+  });
+
+  it('contains no legacy HTML widget rendering or letter-only controls', () => {
+    const source = Object.values(frontendSources).join('\n');
+
+    expect(source).not.toContain('.innerHTML =');
+    expect(source).not.toContain('class GithubDashboardWidget');
+    expect(source).not.toContain('class TokenUsageWidget');
+    expect(source).not.toMatch(/class=["']icon-button["'][^>]*>\s*[RC]\s*</);
   });
 });
