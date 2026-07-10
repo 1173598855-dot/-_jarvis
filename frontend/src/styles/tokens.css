@@ -1,0 +1,45 @@
+:root {
+  color-scheme: dark;
+
+  --color-bg: #0a0d10;
+  --color-rail: #0f1419;
+  --color-surface: #151b21;
+  --color-surface-elevated: #1b232b;
+  --color-surface-inset: #0c1116;
+  --color-border: #2c353d;
+  --color-border-soft: rgba(143, 155, 165, 0.16);
+  --color-text: #edf2f4;
+  --color-muted: #8f9ba5;
+  --color-subtle: #66737d;
+  --color-accent: #42c8bd;
+  --color-accent-strong: #75ded5;
+  --color-success: #56c984;
+  --color-warning: #e6ad54;
+  --color-error: #eb6975;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-overlay: 0 20px 48px rgba(0, 0, 0, 0.42);
+  --duration-fast: 140ms;
+
+  /* Compatibility aliases removed with the legacy Widget stylesheet. */
+  --bg: var(--color-bg);
+  --rail: var(--color-rail);
+  --surface: var(--color-surface);
+  --surface-2: var(--color-surface-elevated);
+  --surface-3: #222c35;
+  --line: var(--color-border);
+  --line-soft: var(--color-border-soft);
+  --text: var(--color-text);
+  --muted: var(--color-muted);
+  --subtle: var(--color-subtle);
+  --accent: var(--color-accent);
+  --accent-strong: var(--color-accent-strong);
+  --purple: #8e91c9;
+  --green: var(--color-success);
+  --amber: var(--color-warning);
+  --red: var(--color-error);
+  --shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+  --radius: var(--radius-lg);
+}

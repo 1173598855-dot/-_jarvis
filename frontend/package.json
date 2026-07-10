@@ -12,9 +12,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@kobalte/core": "^0.13.12",
     "chart.js": "^4.5.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "lucide-solid": "^1.24.0",
     "solid-js": "^1.9.0",
     "systeminformation": "^5.31.15"
   },
