@@ -6,7 +6,7 @@
 
 **最后更新**：2026-07-10
 
-**最新迭代**：Iteration 92
+**最新迭代**：Iteration 93
 
 ## 项目目标
 
@@ -26,8 +26,8 @@
 
 | 层 | 入口 | 职责 |
 |---|---|---|
-| Solid.js 前端 | `frontend/src/main.tsx` | Dashboard 与 Widget 展示 |
-| Express 服务 | `frontend/server.js` | 前端 API、Ollama/SSE、系统和 Git 数据 |
+| Solid.js 前端 | `frontend/src/main.tsx` | 六视图指挥中心、共享轮询资源与响应式应用壳 |
+| Express 服务 | `frontend/server.js` | Ollama/SSE、真实系统与 Token 遥测、Git 数据、Core API 桥接 |
 | Python HTTP 服务 | `src/main.py` | 标准库 HTTP API，默认端口 8080 |
 | FastAPI 服务 | `src/main_fastapi.py` | 更完整的异步 API 与角色调度入口 |
 | Kernel | `src/core/kernel/` | Ollama、终端、插件、事件总线 |
@@ -66,11 +66,12 @@
 ## 当前规模
 
 - `src/`：11 个 Python 文件；服务端源代码统一使用 Python。
-- `frontend/src/`：18 个 TypeScript/TSX 文件。
-- `tests/`：35 个 Python 测试文件；规范聚合套件 113 个用例。
+- `frontend/src/`：38 个 TypeScript/TSX 文件。
+- `tests/`：35 个 Python 文件；规范聚合套件 113 个用例。
+- 前端验证：Vitest 61 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
-- `docs/reports/`：滚动保留最近 10 份审计报告，最新为 `AUDIT_REPORT_92.md`。
+- `docs/reports/`：滚动保留最近 10 份审计报告，最新为 `AUDIT_REPORT_93.md`。
 
 ## 阶段状态
 
@@ -80,10 +81,10 @@
 | Phase 6 | 已有交付 | `PHASE6_INSTALLATION_REPORT.md` |
 | Phase 7 | 进行中 | 19 个技能已落地，市场清单仍是历史快照 |
 | Phase 8 | 进行中 | Plugin SDK、沙箱策略、2 个插件目录 |
-| Phase 9 | 已有交付 | Solid.js Dashboard |
-| Phase 10 | 进行中 | Widget 基础接口和多种监控组件 |
+| Phase 9 | 已重构 | Solid.js 六视图指挥中心与响应式导航 |
+| Phase 10 | 已重构 | 真实系统/Token 遥测、状态栏和运行趋势图 |
 | Phase 11 | 进行中 | Python 编排器、角色注册与 TypeScript 多代理协议 |
-| Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest |
+| Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest/Playwright |
 
 ## 启动方式
 
@@ -120,6 +121,7 @@ npm run dev
 # 前端测试与构建
 cd frontend
 npm test -- --run
+npm run test:e2e
 npm run typecheck
 npm run build
 ```

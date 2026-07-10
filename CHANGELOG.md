@@ -1,3 +1,53 @@
+## Iteration #93 - 2026-07-10
+
+**Protocol**: J.A.R.V.I.S. command center redesign, truthful telemetry, and browser verification
+**Status**: Complete
+
+### Achievements
+
+**Runtime and data foundation**
+- Added a typed frontend API client, abortable Ollama SSE client, unified polling resources, and consistent backend error handling.
+- Replaced placeholder system and Token metrics with `systeminformation` data and counts accumulated from real Ollama responses.
+- Added an Express Core API bridge for capabilities, memory, plugins, and events while keeping unavailable features explicit.
+
+**Command center UI**
+- Rebuilt the Solid.js frontend as six Chinese work views: chat, runtime, repository, local models, memory, and plugins/tools.
+- Added a graphite design-token system, Kobalte primitives, Lucide icons, Chart.js trends, loading/error/empty/stale states, tooltips, confirmation dialogs, and toasts.
+- Shipped a stable `216px / flexible / 320px` desktop shell, status drawer below 1280px, and bottom navigation below 768px.
+- Removed the legacy Dashboard, Widget engine, and `innerHTML` rendering path.
+
+**Browser quality and performance**
+- Added Playwright desktop/mobile projects with deterministic API and SSE fixtures, all-six-view navigation, streaming chat, overflow checks, traces, and screenshots.
+- Changed Lucide to direct icon imports and prebuilt CommonJS Markdown dependencies, reducing development module requests and fixing lazy-view loading.
+- Aligned visible H1 labels with navigation names and verified the implementation against the accepted interface concept.
+
+### Verification
+- `python tests/run_all.py`: 113/113 passed
+- `python -m unittest discover -s tests -p "test_*.py"`: 880/880 passed
+- `python -m compileall -q src tests`: passed
+- `cd frontend; npm test -- --run`: 61/61 passed
+- `cd frontend; npm run test:e2e`: 5 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+
+### Files Changed
+- `AGENTS.md`
+- `CHANGELOG.md`
+- `README.md`
+- `docs/SETUP.md`
+- `docs/reports/AUDIT_REPORT_93.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `frontend/e2e/`
+- `frontend/package.json`
+- `frontend/playwright.config.ts`
+- `frontend/server.js`
+- `frontend/server/`
+- `frontend/src/`
+- `frontend/vite.config.ts`
+
+---
+
 ## Iteration #92 - 2026-07-10
 
 **Protocol**: Repository cleanup, ownership consolidation, and baseline preparation
@@ -277,32 +327,6 @@
 - `tests/run_all.py`
 - `tests/test_run_all_coverage.py`
 - `docs/reports/AUDIT_REPORT_84.md`
-- `CHANGELOG.md`
-
----
-
-## Iteration #83 - 2026-07-10
-
-**Protocol**: Phase 12 (verification)
-**Status**: Complete
-
-### Achievements
-
-**Aggregate runner timeout and JSON reporting**
-- Updated `tests/run_all.py` to run the suite on a background thread, honor `timeout`, and report `timeout_expired` in the JSON output.
-- Added coverage in `tests/test_run_all_coverage.py` for timeout reporting and JSON report fields.
-
-### Metrics
-- `python tests/test_run_all_coverage.py`: passed
-- `python tests/run_all.py`: 106/106 passed
-- `python tests/test_iteration_ledger.py`: passed
-- `python -m unittest discover -s tests -p "test_*.py"`: 784 tests passed
-- `npm test --silent`: 3/3 passed
-
-### Files Changed
-- `tests/run_all.py`
-- `tests/test_run_all_coverage.py`
-- `docs/reports/AUDIT_REPORT_83.md`
 - `CHANGELOG.md`
 
 ---
