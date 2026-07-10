@@ -1,93 +1,58 @@
-﻿import { Component, createSignal, onCleanup, onMount } from 'solid-js';
-import { ChatWidget } from './components/ChatWidget';
-import { GitWidget } from './components/GitWidget';
-import { OllamaMonitorWidget } from './components/OllamaMonitorWidget';
-import { SystemMonitorWidget } from './components/SystemMonitorWidget';
-import { TokenWidget } from './components/TokenWidget';
-import { GithubIntelligenceWidget } from './components/GithubIntelligenceWidget';
-import { TokenUsageDashboardWidget } from './components/TokenUsageDashboardWidget';
+import {
+  Match,
+  Suspense,
+  Switch,
+  createSignal,
+  lazy,
+  type Component,
+} from 'solid-js';
+import { RuntimeResourcesProvider } from './app/runtime-resources';
+import type { ViewId } from './app/navigation';
+import { AppShell } from './components/layout/AppShell';
+import { ToastProvider } from './components/ui/ToastHost';
 
-const navItems = ['Chat', 'Telemetry', 'Repository', 'Models', 'Memory', 'Tools'];
+const ChatView = lazy(() => import('./views/ChatView').then((module) => ({
+  default: module.ChatView,
+})));
+const RuntimeView = lazy(() => import('./views/RuntimeView').then((module) => ({
+  default: module.RuntimeView,
+})));
+const RepositoryView = lazy(() => import('./views/RepositoryView').then((module) => ({
+  default: module.RepositoryView,
+})));
+const ModelsView = lazy(() => import('./views/ModelsView').then((module) => ({
+  default: module.ModelsView,
+})));
+const MemoryView = lazy(() => import('./views/MemoryView').then((module) => ({
+  default: module.MemoryView,
+})));
+const PluginsView = lazy(() => import('./views/PluginsView').then((module) => ({
+  default: module.PluginsView,
+})));
 
 export const App: Component = () => {
-  const [time, setTime] = createSignal('');
-  let intervalId: number | undefined;
+  const [activeView, setActiveView] = createSignal<ViewId>('chat');
 
-  onMount(() => {
-    const updateClock = () => {
-      setTime(new Intl.DateTimeFormat('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).format(new Date()));
-    };
-    updateClock();
-    intervalId = window.setInterval(updateClock, 1000);
-  });
-
-  onCleanup(() => {
-    if (intervalId) window.clearInterval(intervalId);
-  });
+  const view = () => (
+    <Suspense fallback={<div class="view-loading" aria-label="正在加载视图" />}>
+      <Switch>
+        <Match when={activeView() === 'chat'}><ChatView /></Match>
+        <Match when={activeView() === 'runtime'}><RuntimeView /></Match>
+        <Match when={activeView() === 'repository'}><RepositoryView /></Match>
+        <Match when={activeView() === 'models'}><ModelsView /></Match>
+        <Match when={activeView() === 'memory'}><MemoryView /></Match>
+        <Match when={activeView() === 'plugins'}><PluginsView /></Match>
+      </Switch>
+    </Suspense>
+  );
 
   return (
-    <div class="app-shell">
-      <aside class="side-rail" aria-label="JARVIS navigation">
-        <div class="brand-lockup">
-          <div class="brand-mark">J</div>
-          <div>
-            <div class="brand-name">J.A.R.V.I.S.</div>
-            <div class="brand-subtitle">Local AI OS</div>
-          </div>
-        </div>
-
-        <nav class="nav-list">
-          {navItems.map((item) => (
-            <button class={`nav-item ${item === 'Chat' ? 'active' : ''}`} type="button">
-              <span class="nav-glyph" aria-hidden="true" />
-              <span>{item}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div class="rail-footer">
-          <div class="rail-label">Protocol</div>
-          <div class="rail-value">Phase 10-11</div>
-          <div class="rail-label">Runtime</div>
-          <div class="rail-value">Solid + Express</div>
-        </div>
-      </aside>
-
-      <main class="workspace">
-        <header class="topbar">
-          <div>
-            <h1>Command Center</h1>
-            <p>Local model chat, system telemetry, and repository state in one control surface.</p>
-          </div>
-          <div class="topbar-actions">
-            <span class="status-pill online">
-              <span class="status-dot" />
-              Local model online
-            </span>
-            <span class="clock-readout">{time()}</span>
-          </div>
-        </header>
-
-        <section class="content-grid" aria-label="JARVIS dashboard">
-          <div class="primary-column">
-            <ChatWidget />
-            <GithubIntelligenceWidget />
-            <TokenWidget />
-            <TokenUsageDashboardWidget />
-          </div>
-
-          <aside class="telemetry-column" aria-label="Telemetry">
-            <OllamaMonitorWidget />
-            <SystemMonitorWidget />
-            <GitWidget />
-          </aside>
-        </section>
-      </main>
-    </div>
+    <ToastProvider>
+      <RuntimeResourcesProvider>
+        <AppShell activeView={activeView()} onNavigate={setActiveView}>
+          {view()}
+        </AppShell>
+      </RuntimeResourcesProvider>
+    </ToastProvider>
   );
 };
