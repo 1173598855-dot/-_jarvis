@@ -112,3 +112,20 @@ describe('Ollama streaming chat proxy', () => {
     expect(body).toContain('data: [DONE]');
   });
 });
+
+describe('System telemetry', () => {
+  test('reports truthful cross-platform metrics with source metadata', async () => {
+    const response = await fetch(`http://127.0.0.1:${API_PORT}/api/system/stats`);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.meta).toMatchObject({
+      source: 'systeminformation',
+    });
+    expect(['ready', 'degraded']).toContain(body.meta.status);
+    expect(body.meta.unavailable_fields).toBeInstanceOf(Array);
+    expect(body.cpu.usage === null || typeof body.cpu.usage === 'number').toBe(true);
+    expect(body.memory.usage === null || typeof body.memory.usage === 'number').toBe(true);
+    expect(body.disk.usage === null || typeof body.disk.usage === 'number').toBe(true);
+  });
+});

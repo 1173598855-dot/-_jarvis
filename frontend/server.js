@@ -6,12 +6,12 @@
 
 import express from 'express';
 import cors from 'cors';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import os from 'os';
 import fs from 'fs';
+import { readSystemStats } from './server/system-metrics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -259,60 +259,16 @@ app.post('/api/ollama/chat/stream', (req, res) => {
   streamOllamaChat(res, { model, messages });
 });
 
-app.get('/api/system/stats', (req, res) => {
+app.get('/api/system/stats', async (req, res) => {
   try {
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-
-    // Cross-platform disk usage detection
-    let diskTotal = 0, diskUsed = 0, diskFree = 0;
-    try {
-      if (process.platform === 'win32') {
-        const result = spawnSync('wmic', ['logicaldisk', 'get', 'size,freespace,caption'], { encoding: 'utf8' });
-        const lines = result.stdout.split('\n').filter(l => l.trim() && !l.includes('Caption'));
-        for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 3) {
-            const [, freeStr, sizeStr] = parts;
-            const size = parseInt(sizeStr);
-            const free = parseInt(freeStr);
-            if (!isNaN(size) && !isNaN(free)) {
-              diskTotal += size;
-              diskFree += free;
-              diskUsed += size - free;
-            }
-          }
-        }
-      } else {
-        const result = spawnSync('df', ['-B1', '/'], { encoding: 'utf8' });
-        const parts = result.stdout.split('\n')[1]?.trim().split(/\s+/) || [];
-        if (parts.length >= 6) {
-          diskTotal = parseInt(parts[1]) || 0;
-          diskUsed = parseInt(parts[2]) || 0;
-          diskFree = parseInt(parts[3]) || 0;
-        }
-      }
-    } catch {
-      // disk detection failed, leave as zeros
-    }
-
-    res.json({
-      cpu: {
-        usage: 0,
-        cores: os.cpus().length,
-        model: os.cpus()[0]?.model || 'Unknown',
-      },
-      memory: {
-        total: totalMem,
-        used: totalMem - freeMem,
-        free: freeMem,
-        usage: Math.round(((totalMem - freeMem) / totalMem) * 100),
-      },
-      disk: { total: diskTotal, used: diskUsed, free: diskFree, usage: diskTotal > 0 ? Math.round((diskUsed / diskTotal) * 100) : 0 },
-      network: { interfaces: [] },
-    });
+    res.json(await readSystemStats());
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: {
+        code: 'SYSTEM_STATS_FAILED',
+        message: err.message,
+      },
+    });
   }
 });
 
