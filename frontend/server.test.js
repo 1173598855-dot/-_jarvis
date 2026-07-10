@@ -6,9 +6,11 @@ import http from 'http';
 
 const API_PORT = 19999;
 const OLLAMA_PORT = 19998;
+const CORE_PORT = 19997;
 
 let apiProcess;
 let ollamaServer;
+let coreServer;
 
 function waitForHealth() {
   const deadline = Date.now() + 8000;
@@ -57,6 +59,40 @@ beforeAll(async () => {
 
   await new Promise((resolve) => ollamaServer.listen(OLLAMA_PORT, '127.0.0.1', resolve));
 
+  coreServer = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+
+    if (req.url === '/api/health') {
+      res.end(JSON.stringify({ status: 'healthy' }));
+      return;
+    }
+    if (req.url === '/api/plugins') {
+      res.end(JSON.stringify({
+        plugins: [{
+          id: 'event-logger',
+          name: 'Event Logger',
+          version: '1.0.0',
+          status: 'enabled',
+          permissions: ['events'],
+        }],
+      }));
+      return;
+    }
+    if (req.url === '/api/memory/entries') {
+      res.end(JSON.stringify({ entries: [] }));
+      return;
+    }
+    if (req.url?.startsWith('/api/events')) {
+      res.end(JSON.stringify({ events: [] }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ detail: 'not found' }));
+  });
+
+  await new Promise((resolve) => coreServer.listen(CORE_PORT, '127.0.0.1', resolve));
+
   apiProcess = spawn('node', ['server.js'], {
     cwd: process.cwd(),
     env: {
@@ -64,6 +100,7 @@ beforeAll(async () => {
       PORT: String(API_PORT),
       OLLAMA_HOST: '127.0.0.1',
       OLLAMA_PORT: String(OLLAMA_PORT),
+      JARVIS_CORE_API_URL: `http://127.0.0.1:${CORE_PORT}`,
       JARVIS_ALLOWED_ORIGINS: 'https://jarvis.local',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -78,6 +115,9 @@ afterAll(async () => {
   }
   if (ollamaServer) {
     await new Promise((resolve) => ollamaServer.close(resolve));
+  }
+  if (coreServer) {
+    await new Promise((resolve) => coreServer.close(resolve));
   }
 });
 
@@ -144,5 +184,29 @@ describe('System telemetry', () => {
     expect(body.cpu.usage === null || typeof body.cpu.usage === 'number').toBe(true);
     expect(body.memory.usage === null || typeof body.memory.usage === 'number').toBe(true);
     expect(body.disk.usage === null || typeof body.disk.usage === 'number').toBe(true);
+  });
+});
+
+describe('Core API bridge', () => {
+  test('reports capability availability and proxies plugins', async () => {
+    const capabilitiesResponse = await fetch(
+      `http://127.0.0.1:${API_PORT}/api/capabilities`,
+    );
+    const capabilities = await capabilitiesResponse.json();
+    expect(capabilitiesResponse.status).toBe(200);
+    expect(capabilities.core_api).toEqual({
+      configured: true,
+      available: true,
+      base_url: `http://127.0.0.1:${CORE_PORT}`,
+    });
+
+    const pluginsResponse = await fetch(
+      `http://127.0.0.1:${API_PORT}/api/plugins`,
+    );
+    const plugins = await pluginsResponse.json();
+    expect(pluginsResponse.status).toBe(200);
+    expect(plugins.plugins).toEqual([
+      expect.objectContaining({ id: 'event-logger', status: 'enabled' }),
+    ]);
   });
 });

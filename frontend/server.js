@@ -11,6 +11,7 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { createCoreApiClient } from './server/core-api.js';
 import { readSystemStats } from './server/system-metrics.js';
 import { createTokenUsageStore } from './server/token-usage.js';
 
@@ -23,6 +24,9 @@ const allowedOrigins = (process.env.JARVIS_ALLOWED_ORIGINS || '*')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const coreApi = createCoreApiClient({
+  baseUrl: process.env.JARVIS_CORE_API_URL || '',
+});
 const tokenUsage = createTokenUsageStore();
 
 // ============================================================
@@ -177,6 +181,31 @@ function runPythonScript(scriptName, args = []) {
   });
 }
 
+function sendCoreError(res, error, capability) {
+  const code = error.code || 'CORE_API_UNAVAILABLE';
+  res.status(code === 'CORE_API_NOT_CONFIGURED' ? 503 : 502).json({
+    error: {
+      code,
+      message: error.message || 'Core API 未连接',
+    },
+    capability,
+  });
+}
+
+async function proxyCoreRequest(req, res, capability) {
+  try {
+    const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+    const result = await coreApi.request(req.originalUrl, {
+      method: req.method,
+      headers: hasBody ? { 'Content-Type': 'application/json' } : undefined,
+      body: hasBody ? JSON.stringify(req.body || {}) : undefined,
+    });
+    res.status(result.status).json(result.body);
+  } catch (error) {
+    sendCoreError(res, error, capability);
+  }
+}
+
 // ============================================================
 // API 端点
 // ============================================================
@@ -280,6 +309,10 @@ app.get('/api/system/stats', async (req, res) => {
   }
 });
 
+app.get('/api/capabilities', async (req, res) => {
+  res.json({ core_api: await coreApi.status() });
+});
+
 app.post('/api/terminal/execute', async (req, res) => {
   const { command, args = [], timeout = 30 } = req.body;
   if (!command) return res.status(400).json({ error: '缺少 command 参数' });
@@ -292,32 +325,27 @@ app.post('/api/terminal/execute', async (req, res) => {
   }
 });
 
-app.get('/api/plugins', (req, res) => {
-  res.json({ plugins: [] });
+app.get('/api/plugins', async (req, res) => {
+  await proxyCoreRequest(req, res, 'plugins');
 });
 
 app.get('/api/memory/entries', async (req, res) => {
-  try {
-    const result = await runPythonScript('brain/context_compressor.py', ['list']);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  await proxyCoreRequest(req, res, 'memory');
 });
 
 app.post('/api/memory/store', async (req, res) => {
-  const { type = 'user', title, content, tags = [] } = req.body;
-  try {
-    const result = await runPythonScript('brain/context_compressor.py', ['store', type, title, content, ...tags]);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  await proxyCoreRequest(req, res, 'memory');
 });
 
-app.get('/api/events', (req, res) => {
-  res.json({ events: [] });
+app.get('/api/events', async (req, res) => {
+  await proxyCoreRequest(req, res, 'events');
 });
+
+for (const action of ['load', 'enable', 'disable']) {
+  app.post(`/api/plugins/${action}`, async (req, res) => {
+    await proxyCoreRequest(req, res, 'plugins');
+  });
+}
 
 // ============================================================
 // Git 仓库状态
