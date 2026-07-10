@@ -1,5 +1,7 @@
 import * as AlertDialog from '@kobalte/core/alert-dialog';
 import { createSignal } from 'solid-js';
+import { Dynamic } from 'solid-js/web';
+import type { LucideIcon } from 'lucide-solid';
 
 export interface ConfirmDialogProps {
   title: string;
@@ -7,6 +9,7 @@ export interface ConfirmDialogProps {
   triggerLabel: string;
   confirmLabel: string;
   cancelLabel?: string;
+  triggerIcon?: LucideIcon;
   onConfirm(): void;
   tone?: 'default' | 'danger';
 }
@@ -21,7 +24,9 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
   return (
     <AlertDialog.Root open={open()} onOpenChange={setOpen}>
       <AlertDialog.Trigger class="icon-button" aria-label={props.triggerLabel}>
-        {props.triggerLabel}
+        {props.triggerIcon
+          ? <Dynamic component={props.triggerIcon} size={18} strokeWidth={1.8} aria-hidden="true" />
+          : props.triggerLabel}
       </AlertDialog.Trigger>
       <AlertDialog.Portal>
         <AlertDialog.Overlay class="dialog-overlay" />
