@@ -37,12 +37,12 @@
 - "找出重复代码、死代码、低性能模式"
 - "评估 TypeScript/Python 代码质量：类型安全、错误处理、测试覆盖"
 
-### 第五步：生成 PROJECT_ANALYSIS.md
+### 第五步：生成 docs/reports/PROJECT_ANALYSIS.md
 
 使用 `Write` 工具创建报告，必须包含：
 
 ```markdown
-# PROJECT_ANALYSIS.md
+# docs/reports/PROJECT_ANALYSIS.md
 
 ## 项目信息
 - 项目名称：[名称]
@@ -90,7 +90,7 @@
 
 ## 输出物
 
-- `PROJECT_ANALYSIS.md`（使用 `Write` 创建在项目根目录）
+- `docs/reports/PROJECT_ANALYSIS.md`（使用 `Write` 创建在报告目录）
 - 返回扫描摘要给主代理
 
 ---

@@ -1,115 +1,167 @@
-# 小奕 J.A.R.V.I.S. — 自主演进引擎
+﻿# XiaoYi J.A.R.V.I.S.
 
-**版本**: v2.0  
-**状态**: 🟢 运行中  
-**架构评分**: 65/100
+XiaoYi J.A.R.V.I.S. is a local autonomous-evolution engine for multi-agent orchestration, local model access, plugin/runtime isolation, memory compression, and a Solid.js monitoring dashboard.
 
----
+The project is evolving through the protocol in [docs/protocols](docs/protocols). Iteration history is tracked in [CHANGELOG.md](CHANGELOG.md), with detailed reports organized in the [report index](docs/reports/README.md).
 
-## 项目结构
+## Current Stack
 
-```
-贾维斯/
-├── README.md                    ← 本文件
-├── CLAUDE.md                    ← Claude Code 项目上下文
-├── .gitignore
-├── pyproject.toml               ← Python 项目配置
-│
-├── docs/                        ← 文档中心
-│   ├── protocols/
-│   │   └── JARVIS_核心指令.md    ← v5.0 单一源协议
-│   ├── reports/                 ← 迭代审计报告
-│   │   ├── PROJECT_ANALYSIS.md
-│   │   ├── AUDIT_REPORT_1.md
-│   │   ├── AUDIT_REPORT_2.md
-│   │   ├── GITHUB_LEARNING_REPORT.md
-│   │   └── LOCAL_ENVIRONMENT.md
-│   └── deprecated/              ← 已废弃的历史文档
-│       ├── 小奕_终极内核指令_JARVIS版.md
-│       └── 小奕_JARVIS协议_真实API映射版.md
-│
-├── skills/                      ← Claude Skills（8 个）
-│   ├── jarvis-orchestrator/
-│   ├── project-scanner/
-│   ├── github-learner/
-│   ├── security-auditor/
-│   ├── ui-enforcer/
-│   ├── audit-reporter/
-│   ├── memory-keeper/
-│   └── environment-probe/
-│
-├── src/                         ← 源代码
-│   ├── main.py                  ← REST API 服务器入口
-│   ├── types/
-│   │   └── index.ts             ← 30+ 接口定义
-│   ├── core/
-│   │   ├── kernel/              ← 核心层
-│   │   │   ├── ollama_manager.py
-│   │   │   ├── terminal_executor.py
-│   │   │   ├── event_bus.py
-│   │   │   └── plugin_sdk.py
-│   │   └── brain/               ← 智能层
-│   │       ├── context_compressor.py
-│   │       ├── multi_agent_protocol.py
-│   │       ├── ollama-monitor-widget.ts
-│   │       └── system-monitor-widget.ts
-│   └── widget-engine/
-│       └── base-widget.ts
-│
-├── tests/                       ← 测试套件
-│   └── run_all.py               ← 22 用例，100% 通过
-│
-├── plugins/                     ← 插件目录（待填充）
-│
-└── artifacts/                   ← Cowork Artifacts
-    └── jarvis-dashboard.html    ← JARVIS 监控面板
+| Layer | Implementation |
+|------|----------------|
+| Frontend | Solid.js + Vite dashboard |
+| Node backend | Express API and Ollama SSE adapter |
+| Python backend | Python HTTPServer in `src/main.py` |
+| FastAPI backend | Alternative API surface in `src/main_fastapi.py` |
+| Core kernel | Ollama manager, terminal executor, plugin SDK, event bus |
+| Brain layer | Context compressor, orchestrator, role registry, agent factory |
+| Tests | Python unittest/pytest-compatible files, Vitest frontend tests |
+| Plugins | Plugin SDK with `plugins/` directory for installable components |
+
+## Repository Map
+
+```text
+.
++-- CHANGELOG.md
++-- docs/
+|   +-- protocols/
+|   +-- reports/
++-- frontend/
+|   +-- server.js
+|   +-- src/
++-- plugins/
+|   +-- plugin-template/
++-- skills/
++-- src/
+|   +-- main.py
+|   +-- main_fastapi.py
+|   +-- core/
++-- tests/
 ```
 
-## 快速启动
+## Developer Setup
 
-```bash
-# 启动 REST API 服务器
+Use the full setup guide in [docs/SETUP.md](docs/SETUP.md).
+
+Quick Python setup:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+Quick frontend setup:
+
+```powershell
+cd frontend
+npm install
+```
+
+## Run Services
+
+Python HTTPServer:
+
+```powershell
 python src/main.py
+```
 
-# 运行测试
+FastAPI:
+
+```powershell
+.\venv\Scripts\python.exe -m uvicorn src.main_fastapi:app --host 127.0.0.1 --port 8080
+```
+
+Express backend:
+
+```powershell
+cd frontend
+node server.js
+```
+
+Vite frontend:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+## Runtime Configuration
+
+`JARVIS_ALLOWED_ORIGINS` controls CORS for the Python HTTPServer, FastAPI server, and Express backend.
+
+```powershell
+$env:JARVIS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+```
+
+When unset, development servers keep wildcard CORS compatibility. When set, only matching request origins receive `Access-Control-Allow-Origin`.
+
+## Plugin Setup
+
+Plugins live under `plugins/`. Each plugin needs a `manifest.json` and an `activate(api)` entry point. The project ships `plugin-template` as a starting point.
+
+```powershell
+# discover plugins from plugins/
+python -c "from core.kernel.plugin_sdk import PluginLoader; print(PluginLoader().discover())"
+
+# load and enable via FastAPI
+Invoke-RestMethod -Uri http://127.0.0.1:8080/api/plugins/load -Method Post -Body ('{"plugin_id":"' + (Get-Content plugins\plugin-template\manifest.json | ConvertFrom-Json).plugin_id + '"}' | ConvertTo-Json) -ContentType 'application/json'
+Invoke-RestMethod -Uri http://127.0.0.1:8080/api/plugins/enable -Method Post -Body ('{"plugin_id":"' + (Get-Content plugins\plugin-template\manifest.json | ConvertFrom-Json).plugin_id + '"}' | ConvertTo-Json) -ContentType 'application/json'
+```
+
+## Verification
+
+Core Python smoke suite:
+
+```powershell
 python tests/run_all.py
 ```
 
-## API 端点
+FastAPI endpoint suite:
 
-服务器启动后访问 `http://localhost:8080`：
+```powershell
+.\venv\Scripts\python.exe tests/test_main_fastapi_extended.py
+```
 
-| 端点 | 方法 | 功能 |
-|------|------|------|
-| `/api/health` | GET | 健康检查 |
-| `/api/system/stats` | GET | 系统统计 |
-| `/api/ollama/status` | GET | Ollama 状态 |
-| `/api/ollama/models` | GET | 已安装模型 |
-| `/api/ollama/chat` | POST | 聊天请求 |
-| `/api/terminal/execute` | POST | 终端命令执行 |
-| `/api/plugins` | GET | 插件列表 |
-| `/api/memory/entries` | GET | 记忆列表 |
-| `/api/memory/store` | POST | 存储记忆 |
-| `/api/events` | GET | 事件历史 |
+Configuration and documentation guards:
 
-## 组件来源
+```powershell
+python tests/test_project_config.py
+python tests/test_docs_setup.py
+python tests/test_readme.py
+```
 
-| 组件 | 萃取自 | 状态 |
-|------|--------|------|
-| Ollama 管理器 | AnythingLLM | ✅ |
-| 终端执行器 | Open Interpreter | ✅ |
-| 事件总线 | EventEmitter2 | ✅ |
-| 多 Agent 协议 | AutoGen | ✅ |
-| 上下文压缩器 | Mem0 | ✅ |
-| Widget 引擎 | 自研 | ✅ |
+Frontend server and build:
 
-## 迭代进度
+```powershell
+cd frontend
+npm test -- server.test.js
+npm run typecheck
+npm run build
+```
 
-| 迭代 | 架构评分 | 代码行数 | 测试用例 |
-|------|---------|---------|---------|
-| Iter 1 | 35 | 1,495 | 10 |
-| Iter 2 | 65 | 2,500+ | 22 |
+## Key API Surfaces
 
----
+| Endpoint | Service | Purpose |
+|----------|---------|---------|
+| `/api/health` | Python / FastAPI / Express | Health check |
+| `/api/system/stats` | Python / FastAPI / Express | Local system statistics |
+| `/api/ollama/status` | Python / FastAPI / Express | Ollama availability |
+| `/api/ollama/chat` | Python / FastAPI / Express | Non-streaming chat |
+| `/api/ollama/chat/stream` | Python / FastAPI / Express | SSE chat stream |
+| `/api/terminal/execute` | Python / FastAPI / Express | Guarded terminal execution |
+| `/api/plugins` | Python / FastAPI / Express | Plugin inventory |
+| `/api/plugins/load` | Python / FastAPI / Express | Load plugin |
+| `/api/plugins/enable` | Python / FastAPI / Express | Enable plugin |
+| `/api/plugins/disable` | Python / FastAPI / Express | Disable plugin |
+| `/api/memory/entries` | Python / FastAPI / Express | Memory entries |
+| `/api/memory/store` | Python / FastAPI / Express | Store memory |
+| `/api/events` | Python / FastAPI / Express | Event history |
+| `/api/orchestrator/agents` | Python / FastAPI / Express | Registered agent list |
+| `/api/orchestrator/history` | Python / FastAPI / Express | Task history |
+| `/api/orchestrator/dispatch` | Python / FastAPI / Express | Dispatch task |
+| `/api/roles/*` | FastAPI | Role-driven dispatch |
 
-*由小奕 JARVIS 自主演进引擎维护*
+## Notes
+
+- The working tree currently contains many historical generated files and uncommitted iteration artifacts.
+- Audit reports are append-only iteration evidence, not a substitute for tests.
+- Prefer `rg` for repository search and the documented verification commands before claiming an iteration is complete.

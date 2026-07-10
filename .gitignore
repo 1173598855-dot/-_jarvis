@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.bak
+
+# Node.js
+node_modules/
+dist/
+build/
+.vite/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test/runtime scratch
+.test-*/
+.test-*.json
+test_write.tmp
+
+# Git
+.git_broken/
+
+# JARVIS generated state
+.auto-memory/
+artifacts/
+
+# Machine-local Compound Engineering preferences
+.compound-engineering/*.local.yaml

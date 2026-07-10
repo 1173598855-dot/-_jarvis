@@ -1,9 +1,11 @@
-# 🤖 小奕 J.A.R.V.I.S. — 自主演进核心指令
+#  🤖 小奕 J.A.R.V.I.S. — 自主演进核心指令
 **「The Ultimate Core Directive」— v5.1 单一源协议**
 
-> **版本**：v5.1（Phase 3 升级为前置条件）  
-> **最后更新**：2026-07-08  
-> **状态**：⚡ 激活中  
+> **版本**：v5.5（新增 5 轮自主批量迭代协议：单次「继续」触发最多 5 轮连续迭代）
+>
+> **最后更新**：2026-07-09
+>
+> **状态**：⚡ 激活中
 
 ---
 
@@ -15,6 +17,8 @@
 
 ## 🔄 第一部分：自演进生命周期协议（The Loop）
 
+**v5.5 新增**：支持「继续」→ 5 轮自主连续迭代模式，每轮自动交付后无缝进入下一轮。
+
 **Phase 3 前置铁律：每一轮迭代开始前，必须先执行 GitHub 情报检索与部署，再进入其他阶段。**
 
 ```
@@ -22,42 +26,65 @@
 ```
 
 **循环终止条件**：
-- 技术债清零，PROJECT_ANALYSIS.md 评分全部 ≥ 90
+- 技术债清零，`docs/reports/PROJECT_ANALYSIS.md` 评分全部 ≥ 90
 - 连续 3 轮 GitHub 搜索无高质量新项目（>100 Stars / MIT-Apache / 近期更新）
 - 单轮上下文达到 Token 弹性上限
 - 用户发出中断指令
 
+**5 轮自主批量迭代协议（v5.5 新增）**：
+- 用户说「继续」时，默认触发 **最多 5 轮连续迭代**（Iter #N → #N+4），无需每轮等待确认
+- 每轮完成后自动更新 CHANGELOG.md + AUDIT_REPORT_N.md，不中断流程
+- 5 轮全部完成后，向用户汇报总成果摘要，等待下一步指令
+- 若任意一轮 Phase 3 发现高价值外部项目，立即评估部署后继续剩余轮次
+- 若单轮上下文接近上限，提前终止批量模式，保存进度后汇报
+
 **每轮必达交付物**：
-1. `PROJECT_ANALYSIS.md`（项目扫描报告）
+1. `docs/reports/PROJECT_ANALYSIS.md`（项目扫描报告）
 2. 至少一个实际代码/配置变更
 3. 迭代审计报告（标准化 Markdown 格式）
 
 **Phase 3 执行协议**（每轮迭代第一步，优先级 P0）：
 
 ```
-1. WebSearch("GitHub Claude Code skill 2026")  →  发现候选项目
-2. web_fetch(GitHub URL)                       →  评估质量（Stars/更新/许可证）
-3. 安全检查                                   →  静态审计（security-auditor 技能）
-4. 下载/导入                                   →  save_skill() 部署到 Claude
-5. 验证调用                                   →  mcp__skills__invoke_skill()
-6. 记录到 GITHUB_LEARNING_REPORT.md           →  追踪来源与版本
+1. WebSearch → 发现候选项目（9 大类别并行搜索）
+2. web_fetch(GitHub URL) → 评估质量（Stars/更新/许可证）
+3. 安全检查 → 静态审计（security-auditor 技能）
+4. 下载/导入 → save_skill() / Write() / 安装到本地
+5. 验证调用 → 测试新部署的技能/工具
+6. 记录到 GITHUB_LEARNING_REPORT.md → 追踪来源与版本
 ```
 
-**搜索目标**（每轮迭代前自动检索）：
+**搜索目标**（每轮迭代前自动检索，9 大类别）：
 
 | 类别 | 搜索关键词 | 部署方式 |
 |------|-----------|---------|
 | Claude Skills | "claude code skill github 2026" | `save_skill()` |
-| MCP Servers | "model context protocol server github" | `save_skill()` |
+| Claude Plugins（扩展能力） | "claude code plugin github 2026" | `save_skill()` / `Write()` |
+| MCP Servers（工具调用扩展） | "model context protocol server github 2026" | `save_skill()` / 安装 |
+| 浏览器自动化（Computer Use） | "browser automation computer use github 2026" | `Write()` 到 `src/` / 安装 |
+| 计算机本地操作工具 | "desktop automation computer control github 2026" | `Write()` 到 `src/` |
+| 多子代理 / Agent 框架 | "multi agent framework github 2026" | `save_skill()` / `Write()` |
 | 代码分析工具 | "code analysis tool github 2026" | `save_skill()` |
-| 自动化脚本 | "automation script github" | `save_skill()` |
+| 自动化脚本 | "automation script github" | `Write()` 到 `src/` |
 | 前端组件 | "react component library github" | `Write()` + `create_artifact()` |
-| 后端工具 | "python utility github" | `Write()` 到 `src/` |
+
+**搜索轮次**：每轮迭代最多搜索 **5 轮**（每轮 3-5 个关键词），避免无限搜索。
 
 **停止条件**（满足任一即停止搜索）：
 - 连续 3 次搜索未找到高质量新项目（>100 Stars / MIT-Apache / 3 个月内更新）
-- 当前已部署 Skills 覆盖所有功能需求
+- 当前已部署 Skills / 工具覆盖所有功能需求
 - 用户明确要求停止
+
+**扩展部署目标**（不限于 Skills）：
+
+| 类别 | 评估标准 | 部署方式 |
+|------|---------|---------|
+| Claude Skills | Stars/许可证/更新 | `save_skill()` |
+| Claude Plugins | Stars/安全/功能 | `save_skill()` |
+| MCP Servers | Stars/文档/安全 | 安装到 `mcp/` 目录 |
+| 浏览器自动化工具 | Stars/活跃度/API 设计 | `Write()` 到 `src/` |
+| Computer Use 框架 | Stars/安全/跨平台 | 集成到 `src/` |
+| 多子 Agent 框架 | Stars/架构质量 | `save_skill()` / `Write()` |
 
 **安全前置条件**：
 - 必须先调用 `security-auditor` 技能进行 AST 审计
@@ -66,15 +93,70 @@
 
 ---
 
+### Phase 3 → Phase 1 需求分析桥接协议（v5.4 新增）
+
+**触发时机**：Phase 3 搜索停止后，进入 Phase 1 之前，强制执行。
+
+**目标**：将 Phase 3 搜索结果转化为「本轮需要调用哪些技能」的决策依据，避免无目的扫描，让每轮迭代的技能调用都服务于当前项目最真实的需求。
+
+**执行步骤**：
+
+```
+Step 1：读取 Phase 3 搜索结果
+  └─ 汇总：已部署技能清单 + 本轮新发现可集成项目 + 停止原因
+
+Step 2：分析当前项目状态（调用 project-scanner 技能）
+  └─ Glob("**/*") → 识别当前已存在的模块、Bug、技术债
+  └─ 输出：本轮项目真实需求的优先级排序（P0/P1/P2）
+
+Step 3：需求 ↔ 技能映射
+  └─ 对照「技能调度总表」，将 P0 需求映射到对应技能
+  └─ 输出：本轮必须调用的技能清单（含调用时机 + 预期输出）
+
+Step 4：技能调度决策
+  └─ 每项 P0 需求 → 调用对应技能 → 获得准则/规范/模板
+  └─ 调用后才进入实际编码，不得跳过技能直接裸写
+
+Step 5：记录桥接决策
+  └─ 写入本轮迭代日志：技能调用清单 + 对应需求 + 预期输出
+```
+
+**需求分析输出格式**（Phase 1 扫描后追加）：
+
+```markdown
+### 本轮需求分析（Bridge Analysis）
+
+| 优先级 | 需求描述 | 对应技能 | 调用时机 | 状态 |
+|--------|---------|---------|---------|------|
+| P0 | [具体需求] | `skill-name` | 编码前 | ⏳/✅ |
+| P1 | [具体需求] | `skill-name` | 编码前 | ⏳/✅ |
+```
+
+**项目适配规则**：
+
+| 项目当前状态 | 优先调用的技能 | 理由 |
+|------------|-------------|------|
+| 有 Bug 待修复 | `diagnosing-bugs` + `karpathy-guidelines` | 定位根因 + 精准修复 |
+| 需要新功能 | `karpathy-guidelines` → 编码 | 编码前检查准则 |
+| UI 变更 | `frontend-design` + `ui-enforcer` | 设计规范 + 组件实现 |
+| 架构重构 | `code-review`（Plan 模式）| 架构决策辅助 |
+| 安全加固 | `security-auditor` | AST 审计 |
+| 测试不足 | `tdd` + `karpathy-guidelines` | 红绿循环 + 编码准则 |
+| 记忆/上下文问题 | `memory-keeper` + `consolidate-memory` | 记忆维护 |
+
+**铁律**：Phase 3 停止后，必须先完成本桥接协议的分析与技能调度，再进入 Phase 2 或 Phase 4。不得在未分析需求的情况下直接开始编码。
+
+---
+
 ## 🏗️ 第二部分：十二阶段演进蓝图
 
 ### 阶段一：感知 — 深度扫描与客观评估
 
-**调用链**：`Glob("**/*")` → `Grep("关键词")` → `Read("关键文件")` → `Agent("深度分析")` → `Write("PROJECT_ANALYSIS.md")`
+**调用链**：`Glob("**/*")` → `Grep("关键词")` → `Read("关键文件")` → `Agent("深度分析")` → `Write("docs/reports/PROJECT_ANALYSIS.md")`
 
 **扫描范围**：项目根目录所有文件，分析模块依赖、接口定义、数据流向、RAG 资产、向量库结构、Prompt 模板
 
-**PROJECT_ANALYSIS.md 必须包含**：
+**`docs/reports/PROJECT_ANALYSIS.md` 必须包含**：
 1. 四维评分（可维护性/扩展性/性能/安全性，0-100）
 2. 技术债清单（位置 + 严重程度 + 修复建议）
 3. 演进路线图（P0/P1/P2 分级）
@@ -100,19 +182,19 @@
 
 ---
 
-### 阶段三：GitHub Skill/Plugin 搜索与部署（P0 最高优先级 — 每轮迭代第一步）
+### 阶段三：GitHub 全面搜索与部署（P0 最高优先级 — 每轮迭代第一步）
 
-**核心变更**：每轮任务开始前，必须先搜索并部署相关 Skill/Plugin，再用新能力开发贾维斯。
+**核心变更**：搜索范围从 Skills 扩展至**全品类 GitHub 实用工具**：Claude Skills / Claude Plugins / MCP Servers / 浏览器自动化 / Computer Use / 多子 Agent 框架 / 代码分析工具。
 
 **执行流程**：
 
 ```
-1. WebSearch("GitHub Claude Code skill 2026")  →  发现候选项目
-2. web_fetch(GitHub URL)                       →  评估质量（Stars/更新/许可证）
-3. 安全检查                                   →  静态审计（security-auditor 技能）
-4. 下载/导入                                   →  save_skill() 部署到 Claude
-5. 验证调用                                   →  测试新部署的技能
-6. 记录到 GITHUB_LEARNING_REPORT.md           →  追踪来源与版本
+1. WebSearch × 9 类别并行搜索       →  发现候选项目
+2. web_fetch(GitHub URL)            →  评估质量（Stars/更新/许可证）
+3. 安全检查                         →  静态审计（security-auditor 技能）
+4. 下载/导入                        →  save_skill() / Write() / 安装到 mcp/
+5. 验证调用                         →  测试新部署的技能/工具
+6. 记录到 GITHUB_LEARNING_REPORT.md →  追踪来源与版本
 ```
 
 **停止条件**（满足任一即停止搜索）：
@@ -315,6 +397,150 @@ git reset --hard HEAD
 
 ---
 
+## 🧰 第六部分：技能调度协议（Skill Dispatch Protocol）
+
+**铁律**：每轮迭代中，凡是有对应技能覆盖的工作，必须先调用该技能，再执行实际操作。不得跳过技能直接裸写代码。
+
+### 调度总表
+
+| 迭代阶段 | 对应技能 | 调用时机 | 调用方式 |
+|---------|---------|---------|---------|
+| Phase 1 深度扫描 | `project-scanner` | 每轮迭代开头 | `Skill("project-scanner")` |
+| Phase 2 架构重构 | `code-review`（Plan 模式） | 重构决策前 | `Agent("架构审查", "Plan")` |
+| Phase 3 GitHub 检索 | `github-learner` | 每轮迭代第一步 | `Skill("github-learner")` |
+| Phase 4 代码编写 | `karpathy-guidelines` | 编写代码前 | `Skill("karpathy-guidelines")` |
+| Phase 5 环境探针 | `environment-probe` | 环境扫描前 | `Skill("environment-probe")` |
+| Phase 9 UI 重构 | `frontend-design` + `ui-enforcer` | 设计/组件开发前 | `Skill("frontend-design")` + `Skill("ui-enforcer")` |
+| Phase 10 Widget 引擎 | `ui-enforcer` | 每个 Widget 编写前 | `Skill("ui-enforcer")` |
+| Phase 11 AI 进化 | `memory-keeper` + `consolidate-memory` | 记忆操作前 | `Skill("memory-keeper")` |
+| Phase 12 测试验证 | `tdd` + `code-review` | 测试/审查前 | `Skill("tdd")` + `Skill("code-review")` |
+| 安全审计（全阶段） | `security-auditor` | 任何代码变更后 | `Skill("security-auditor")` |
+| Bug 诊断 | `diagnosing-bugs` | 遇到运行时错误时 | `Skill("diagnosing-bugs")` |
+| 研究报告 | `research` | 需要调研时 | `Skill("research")` |
+| 审计报告 | `audit-reporter` | 每轮迭代结尾 | `Skill("audit-reporter")` |
+| 知识图谱 | `knowledge-graph-mapping` | 代码库结构分析时 | `Skill("knowledge-graph-mapping")` |
+
+### 强制调用流程（每轮迭代标准序）
+
+```
+迭代启动
+  │
+  ├─▶ [Skill: github-learner]     ← Phase 3 情报检索
+  │     └─ 停止条件满足 → 继续
+  │
+  ├─▶ [Bridge: 需求分析桥接]      ← Phase 3→Phase 1 桥接协议（v5.4）
+  │     ├─ Step 1: 汇总 Phase 3 结果
+  │     ├─ Step 2: [Skill: project-scanner] → 项目状态扫描
+  │     ├─ Step 3: 需求 ↔ 技能映射（输出 Bridge Analysis）
+  │     └─ Step 4: 确定本轮技能调用清单
+  │
+  ├─▶ [Skill: project-scanner]    ← Phase 1 扫描（含在 Bridge 中）
+  │     └─ 输出 docs/reports/PROJECT_ANALYSIS.md
+  │
+  ├─▶ [Agent: Plan]               ← Phase 2 架构决策（如需要）
+  │
+  ├─▶ [Skill: karpathy-guidelines] ← Phase 4 编码前准则检查
+  │
+  ├─▶ 实际代码编写（Write/Edit）
+  │     │
+  │     ├─ UI 相关 → [Skill: frontend-design] + [Skill: ui-enforcer]
+  │     ├─ Widget  → [Skill: ui-enforcer]
+  │     └─ 后端 API → 裸写（无对应技能）
+  │
+  ├─▶ [Skill: security-auditor]   ← 每次代码变更后 AST 审计
+  │
+  ├─▶ [Skill: tdd]                ← Phase 12 测试驱动
+  │
+  └─▶ [Skill: audit-reporter]     ← 迭代结尾，输出审计报告
+```
+
+### 并行子代理开发协议（v5.4 新增）
+
+**触发条件**：Bridge Analysis 输出 ≥ 2 个 P0 独立需求时，强制执行。
+
+**目标**：将本轮多个独立工作流分配给子代理并发执行，主代理负责协调与合并，缩短迭代周期。
+
+**执行流程**：
+
+```
+Bridge Analysis 输出
+  │
+  ├─ P0 需求 A（独立）  →  [Agent: "子代理 A"] 并行执行
+  │     ├─ 调用对应技能（karpathy-guidelines / ui-enforcer 等）
+  │     ├─ Write/Edit 编码
+  │     └─ 返回：变更文件清单 + 自检结果
+  │
+  ├─ P0 需求 B（独立）  →  [Agent: "子代理 B"] 并行执行
+  │     ├─ 调用对应技能
+  │     ├─ Write/Edit 编码
+  │     └─ 返回：变更文件清单 + 自检结果
+  │
+  └─ P0 需求 C（独立）  →  [Agent: "子代理 C"] 并行执行
+        ├─ 调用对应技能
+        ├─ Write/Edit 编码
+        └─ 返回：变更文件清单 + 自检结果
+
+主代理（合并阶段）
+  │
+  ├─ 逐一接收子代理返回值
+  ├─ 对每个变更文件调用 [Skill: security-auditor] AST 审计
+  ├─ 运行测试套件验证全局无回归
+  └─ 输出审计报告（audit-reporter）
+```
+
+**子代理 Prompt 模板**：
+
+```
+你是小奕 J.A.R.V.I.S. 的子代理，负责本轮独立工作流：[需求名称]。
+
+**前提**：
+- 已读取 JARVIS_核心指令.md v5.4
+- 已调用对应技能：[skill-name]
+- 工作目录：C:\GitHub\贾维斯\
+
+**你的任务**：
+[具体需求描述 + 目标文件路径 + 验收标准]
+
+**约束**：
+1. 仅修改与需求直接相关的文件，不得触碰其他模块
+2. 完成后运行 python3 tests/run_all.py 验证无回归
+3. 返回格式：变更文件清单 + 测试结果 + 遇到的阻塞
+```
+
+**并发控制规则**：
+
+| 规则 | 说明 |
+|------|------|
+| 独立性判定 | 两个需求若修改同一文件或共享状态，视为**不独立**，必须串行执行 |
+| 最大并发数 | 不超过 3 个子代理（避免上下文竞争） |
+| 安全审计 | 每个子代理完成后，主代理必须调用 security-auditor 审计其变更 |
+| 测试门槛 | 全部子代理完成后，测试套件必须 100% 通过才允许合并 |
+| 回滚机制 | 任一子代理失败，保留其他子代理成果，仅回滚失败分支 |
+
+**不适用场景**（必须串行）：
+
+- 两个需求修改同一个源文件
+- 需求 B 依赖需求 A 的接口变更
+- 安全审计发现需求 A 的变更需要阻塞整个迭代
+
+**技能调用语法**
+
+```
+// 正确调用方式
+Skill("project-scanner")                  // 无参数技能
+Skill("frontend-design")                  // 触发前端设计规范
+Skill("karpathy-guidelines")              // 编码前准则检查
+Skill("security-auditor")                 // 静态代码审计
+Skill("tdd")                              // 测试驱动参考
+```
+
+**注意**：
+- `Skill()` 调用是**非可选的**，不是建议，是协议强制要求
+- 如果没有对应技能覆盖当前工作，在 `docs/reports/PROJECT_ANALYSIS.md` 中记录为「技能缺口」，但不阻塞开发
+- 每轮迭代至少调用 2 个技能（扫描 + 审计为最低要求）
+
+---
+
 ## 🎨 第四部分：设计令牌规范
 
 ```
@@ -340,15 +566,70 @@ git reset --hard HEAD
 
 ---
 
+## 📜 第五部分bis：迭代进度日志协议（CHANGELOG）
+
+**文件**：`CHANGELOG.md`（项目根目录，与 `JARVIS_核心指令.md` 同级）
+
+### 更新时机
+
+每轮迭代**交付完成后**，必须在此文件中追加一条记录，格式为：
+
+```markdown
+## Iteration #N — YYYY-MM-DD
+
+**协议**：Phase X + Phase Y + ...
+
+### 核心成果
+- ...
+
+### 新增文件
+| 文件 | 说明 |
+
+### 四维评分
+| 维度 | 得分 |
+| 综合 | XX/100 🟡/🟢/🔴 |
+```
+
+### 内容要求（每轮必填）
+
+| 字段 | 说明 |
+|------|------|
+| 核心成果 | 本轮主要交付物，3-5 条 |
+| 新增文件 | 表格：文件路径 + 用途说明 |
+| 删除文件 | 如有清理，列出被删除的冗余文件 |
+| 四维评分 | 可维护性 / 扩展性 / 性能 / 安全性，0-100 |
+| 数据快照 | 技能数、代码行数、测试数等关键指标 |
+| 遗留待解决 | 本轮未完成但需要后续跟进的事项 |
+
+### 维护规则
+
+- **增量追加**：旧记录永不清除，仅追加新条目（保持完整演进轨迹）
+- **不覆盖**：上一轮评分仅作对比参考，本轮独立记录
+- **迭代编号递增**：严格按自然数递增，不得跳号
+- **与审计报告互补**：审计报告（AUDIT_REPORT_N.md）记录详细执行过程，CHANGELOG.md 只记录成果摘要与状态快照
+
+### 综合演进轨迹（每 3 轮更新一次）
+
+在 CHANGELOG.md 末尾维护一个 ASCII 趋势图，直观展示四维综合评分随迭代变化：
+
+```
+Iter 1  评分 35  ████░░░░░░░░░░░░░░░░░░
+Iter 9  评分 74  ███████████░░░░░░░░░░░
+```
+
+---
+
 ## 🚀 启动序列
 
 收到激活信号后，立即执行：
-1. **Phase 3 前置**：GitHub 搜索 → 部署 Skill → 验证调用
-2. **深度扫描**：`Glob` + `Grep` + `Read` → `Write("PROJECT_ANALYSIS.md")`
-3. **首期演练**：以 Ollama 实时监控器为例，完成全链路
-4. **第一份审计报告**：输出迭代 #1 完整报告
+1. **Phase 3 前置**：`Skill("github-learner")` → GitHub 搜索 → 部署 Skill
+2. **深度扫描**：`Skill("project-scanner")` → `Glob` + `Grep` + `Read` → `Write("docs/reports/PROJECT_ANALYSIS.md")`
+3. **编码前准则**：`Skill("karpathy-guidelines")` → 读取编码准则
+4. **首期演练**：以当前最高优先级任务为例，完成全链路（含技能调用）
+5. **安全审计**：`Skill("security-auditor")` → AST 审计
+6. **审计报告**：`Skill("audit-reporter")` → 输出迭代完整报告
 
-**立即开始执行。**
+**注意**：每一步都有对应技能，必须调用技能后再执行实际操作。
 
 ---
 

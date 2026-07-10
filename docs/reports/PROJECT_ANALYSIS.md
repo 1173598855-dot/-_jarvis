@@ -1,134 +1,109 @@
-# PROJECT_ANALYSIS.md
-**小奕 J.A.R.V.I.S. 自主演进引擎 — 项目深度扫描报告**
+# 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-08  
-**扫描工具**：Glob + Grep + Read + Agent(Explore) × 3 并行  
-**项目路径**：`C:\GitHub\贾维斯\`
+**扫描时间**：2026-07-10
 
----
+**扫描范围**：`C:\GitHub\贾维斯\`
 
-## 📊 四维评分矩阵（更新于 Iteration 5, 2026-07-08）
+**依据**：实际文件树、Git 状态、配置、服务入口与测试结果
 
-| 维度 | 得分 | 评估 |
-|------|------|------|
-| **可维护性** | 55/100 | 🟡 中等改善 — 代码结构清晰，但三份协议文档仍重叠 80%+，已合并为单一源 |
-| **扩展性** | 65/100 | 🟡 中等改善 — 插件 SDK、Widget 引擎骨架已建立，14 个技能可调用 |
-| **性能** | 30/100 | 🔴 仍严重 — Dashboard 硬编码假数据未接入真实数据管道 |
-| **安全性** | 60/100 | 🟡 中等 — 终端执行器安全白名单已实现，但 Dashboard CSP/ARIA 缺失 |
+## 结论
 
-**综合健康度**：52/100 — 🟡 从设计规范进入工程实施阶段
+项目已收敛为清晰的双运行时结构：`src/` 只承载 Python 服务与核心逻辑，`frontend/src/` 承载全部 TypeScript、Solid.js 组件和共享前端契约。旧迭代流水、一次性生成器、重复工作稿、缓存和无效 WSL 虚拟环境已清理。
 
----
+当前工程重点从“清理历史堆积”转为三项长期工作：统一三套 API 的响应契约、迁移 FastAPI 生命周期钩子、为真实多代理执行建立端到端验证。
 
-## 📁 项目结构
+## 当前规模
 
-```
-C:\GitHub\贾维斯\
-├── 小奕_终极内核指令_JARVIS版.md      (608 行, v3.0 概念协议)
-├── 小奕_JARVIS协议_真实API映射版.md    (524 行, v4.0 API 映射)
-├── jarvis-dashboard.html              (466 行, 监控面板)
-├── skills/
-│   ├── jarvis-orchestrator/SKILL.md   (303 行, 核心编排)
-│   ├── project-scanner/SKILL.md       (108 行)
-│   ├── github-learner/SKILL.md        (106 行)
-│   ├── security-auditor/SKILL.md      (142 行)
-│   ├── ui-enforcer/SKILL.md           (152 行)
-│   ├── audit-reporter/SKILL.md        (158 行)
-│   ├── memory-keeper/SKILL.md         (116 行)
-│   └── environment-probe/SKILL.md     (150 行)
-```
+| 范围 | 盘点结果 |
+|---|---:|
+| `src/` Python | 11 文件，约 3,503 行 |
+| `src/` TypeScript | 0 文件 |
+| `frontend/src/` | 18 个 TS/TSX 文件，约 1,212 行 |
+| `tests/` Python | 35 文件，约 7,546 行 |
+| 规范 Python 聚合套件 | 113 个用例 |
+| 完整 Python discovery | 880 个用例 |
+| 前端 Vitest | 11 个用例 |
+| 本地 Skill | 19 个 |
+| Plugin | 2 个 |
+| 滚动审计报告 | 10 份（Iteration 83-92） |
 
-**总计**：11 个文件，0 行可执行源代码，纯文档 + 技能定义集合
+## 运行架构
 
----
+| 服务 | 默认端口 | 职责 |
+|---|---:|---|
+| Vite | 5173 | Solid.js 开发服务器 |
+| Express | 9999 | Dashboard API、Ollama SSE、系统与 Git 数据 |
+| Python HTTPServer | 8080 | 标准库兼容 API |
+| FastAPI | 8080 | 插件、角色和多代理 API |
 
-## 🔧 技术债清单
+Python HTTPServer 与 FastAPI 是替代入口，不能同时监听 8080。Express 与 Python 两侧存在重叠端点，后续应由共享契约测试约束。
 
-### P0 — 立即修复
+## 模块地图
 
-| # | 位置 | 类型 | 严重程度 | 描述 | 修复建议 |
-|---|------|------|---------|------|---------|
-| T1 | 根目录 × 3 文件 | 内容重复 | **极高** | 三份协议文档重叠 80%+，维护成本极高 | 统一为单源文档 |
-| T2 | jarvis-dashboard.html | 设计错误 | **高** | `color-scheme: light` 与深色背景矛盾 | 改为 `dark` |
-| T3 | jarvis-dashboard.html | 硬编码假数据 | **高** | 所有图表数据为静态 mockData | 接入真实数据管道 |
-| T4 | jarvis-dashboard.html | 无错误处理 | **高** | DOM 操作无 null 检查，无 try/catch | 添加错误边界 |
-| T5 | jarvis-orchestrator/SKILL.md | 危险命令 | **高** | `git clean -fd && git reset --hard HEAD` 不可逆 | 添加安全警告 + stash 中间步骤 |
-| T6 | security-auditor/SKILL.md | 沙箱漏洞 | **高** | 推荐 vm2（已存在 CVE 漏洞） | 替换为 worker_threads |
-| T7 | 全部 SKILL.md | 版本不一致 | **中** | 版本号混乱（v1.0 / v4.0 并存） | 统一版本管理 |
-| T8 | jarvis-dashboard.html | CDN 单点依赖 | **中** | Chart.js 仅从 jsdelivr CDN 加载 | 添加本地 fallback |
-| T9 | 全部 | 无 Git 初始化 | **中** | 无版本控制，无法回滚 | 执行 `git init` + .gitignore |
-| T10 | 全部 | 无 CLAUDE.md | **中** | 新会话缺乏项目上下文 | 创建项目上下文文件 |
+```text
+frontend/src/
+  App.tsx
+  components/*Widget.tsx
+  core/brain/*-widget.ts
+  core/brain/multi-agent-protocol.ts
+  widget-engine/base-widget.ts
 
-### P1 — 近期修复
-
-| # | 位置 | 类型 | 严重程度 | 描述 |
-|---|------|------|---------|------|
-| T11 | jarvis-dashboard.html | 无障碍缺失 | 中 | 无 ARIA labels、无键盘导航 |
-| T12 | jarvis-dashboard.html | 无响应式处理 | 中 | 无 resize 监听，窗口调整图表失真 |
-| T13 | jarvis-dashboard.html | CSP 缺失 | 中 | 无内容安全策略 |
-| T14 | 全部 SKILL.md | Agent API 未验证 | 中 | 技能示例中的 Agent 调用签名可能与实际不符 |
-
-### P2 — 远期规划
-
-| # | 位置 | 类型 | 严重程度 | 描述 |
-|---|------|------|---------|------|
-| T15 | 全部 | 工具依赖未验证 | 低 | 部分工具名可能随版本变化 |
-| T16 | 文档 | 维护日程缺失 | 低 | 无定期更新机制 |
-
----
-
-## 🗺️ 演进路线图
-
-### P0（立即执行）
-- [x] ~~深度扫描完成~~ → 当前阶段
-- [ ] 统一三份协议文档，消除 80% 重复
-- [ ] 修复 Dashboard 设计错误（color-scheme）
-- [ ] 移除 vm2 推荐，替换为 worker_threads
-- [ ] 为 git reset 添加安全警告
-- [ ] 初始化 Git 仓库
-- [ ] 创建 CLAUDE.md 项目上下文
-
-### P1（近期执行）
-- [ ] 实现 Dashboard 真实数据管道
-- [ ] 添加 Dashboard 错误处理
-- [ ] 统一 SKILL.md 版本号
-- [ ] 添加 Chart.js 本地 fallback
-- [ ] 验证 Agent 工具调用签名
-
-### P2（远期规划）
-- [ ] 添加 CSP 和 ARIA 无障碍支持
-- [ ] 实现 Chart.js 生命周期管理
-- [ ] 建立文档维护日程
-- [ ] 进入 Phase 2：架构重构（创建 src/ 目录、引入 TypeScript）
-
----
-
-## 📦 依赖分析
-
-| 依赖 | 版本 | 用途 | 健康度 |
-|------|------|------|--------|
-| Chart.js | 4.5.0 (CDN) | Dashboard 图表渲染 | ⚠️ 版本较旧，需升级 |
-| Claude Code MCP | 平台版本 | 所有能力的实际执行引擎 | ✅ 稳定 |
-
-**推荐但未安装**：Grid.js, Mermaid, Shadcn/ui, Tailwind CSS, Framer Motion, tsyringe, eventemitter2, Vitest
-
----
-
-## 🏗️ 架构健康度
-
-```
-文档完整性    ████████████ 优秀
-技能覆盖度    ██████████░░ 良好
-安全设计      ████████████ 优秀
-代码实现      ██░░░░░░░░░░ 缺失 (0%)
-测试覆盖      ░░░░░░░░░░░░ 缺失
-构建自动化    ░░░░░░░░░░░░ 缺失
-版本控制      ░░░░░░░░░░░░ 缺失
+src/
+  main.py | main_fastapi.py
+  core/kernel/
+    ollama_manager.py
+    terminal_executor.py
+    plugin_sdk.py
+    event_bus.py
+  core/brain/
+    context_compressor.py
+    semantic_compressor.py
+    orchestrator.py
+    role_registry.py
+    agent_factory.py
 ```
 
-**核心结论**：这是一个纯设计阶段的系统规范集合，文档质量优秀，但完全缺乏工程化基础设施。下一步最重要的行动是**消除文档重复** + **初始化工程基础**。
+## 本轮已解决
 
----
+- 删除 60 份 Iteration 82 及以前的单轮审计报告，建立最近 10 轮滚动保留策略。
+- 删除 8 个 `gen_*`、`write_*`、`_gen_*` 一次性代码生成器。
+- 删除根目录重复 `PROJECT_ANALYSIS.md`，统一到 `docs/reports/`。
+- 删除 19 MB 的 Linux/WSL `.venv`、测试状态、构建产物和 Python 缓存。
+- 删除 `src/` 下 3 个空 TypeScript 文件和 5 个无消费者的重复 TypeScript 文件。
+- 将多代理协议移动到前端真实消费目录，并新增 `npm run typecheck` 门禁。
+- 将 `CLAUDE.md` 收敛为指向 `AGENTS.md` 的兼容入口。
+- 将维护脚本从 8 个缩减为 2 个可重复执行工具，并新增用途说明。
 
-**报告生成**：小奕 JARVIS 自主演进引擎 Phase 1  
-**状态**：✅ 扫描完成，准备进入 Phase 2 重构
+## 剩余风险
+
+### P1：多套 API 行为漂移
+
+Express、Python HTTPServer 和 FastAPI 的端点集合重叠，但错误格式、插件能力和流式行为并未完全一致。
+
+下一步：维护一份机器可读 API 契约，并对同名端点执行跨实现响应测试。
+
+### P1：FastAPI 生命周期 API 已弃用
+
+`src/main_fastapi.py` 仍使用 `@app.on_event("startup")` 和 `@app.on_event("shutdown")`，测试输出持续产生弃用告警。
+
+下一步：迁移到 FastAPI lifespan context manager。
+
+### P1：完整测试环境未统一
+
+Windows `venv` 可运行聚合套件，但当前缺少 `pytest`；完整 discovery 暂由系统 Python 开发环境执行。
+
+下一步：重新安装 `.[dev]`，并在 CI 与本地统一使用同一解释器入口。
+
+### P2：测试运行器超时线程不可取消
+
+`tests/run_all.py` 超时后只能返回，后台测试线程仍会执行到结束。真实慢套件可能与后续测试交叠。
+
+下一步：将超时隔离改为子进程模型。
+
+## 维护规则
+
+1. `src/` 保持 Python-only；前端 TypeScript 统一放在 `frontend/src/`。
+2. `docs/reports/` 只滚动保留最近 10 份 `AUDIT_REPORT_N.md`。
+3. `CHANGELOG.md` 保留最近 10 个迭代摘要；长期事实写入当前分析或协议。
+4. `scripts/` 只保存可重复执行的维护工具，不保留一次性生成器。
+5. 每次交付运行 Python 聚合/完整测试、前端测试、TypeScript typecheck 和生产构建。

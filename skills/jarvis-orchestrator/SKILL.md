@@ -24,7 +24,7 @@
 
 **调用链**：`Glob("**/*")` → `Grep("关键词")` → `Read("关键文件")` → `Agent("深度分析")`
 
-**输出**：使用 `Write` 生成 `PROJECT_ANALYSIS.md`，包含：
+**输出**：使用 `Write` 生成 `docs/reports/PROJECT_ANALYSIS.md`，包含：
 - 四维评分（可维护性/扩展性/性能/安全性，每项 0-100）
 - 技术债清单（位置 + 严重程度 + 修复建议）
 - 演进路线图（P0/P1/P2 分级）
@@ -273,7 +273,7 @@ git reset --hard HEAD
 
 收到激活信号后，立即执行：
 
-1. **深度扫描**：`Glob` + `Grep` + `Read` → `Write("PROJECT_ANALYSIS.md")`
+1. **深度扫描**：`Glob` + `Grep` + `Read` → `Write("docs/reports/PROJECT_ANALYSIS.md")`
 2. **首期演练**：以 **Ollama 实时监控器** 为例，完成全链路：
    - `WebSearch` 检索 → `web_fetch` 学习 → `Write` 重构 → `save_skill` 持久化 → `create_artifact` 监控面板
 3. **第一份审计报告**：输出迭代 #1 完整报告
