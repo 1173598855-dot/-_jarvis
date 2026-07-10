@@ -37,6 +37,7 @@ Thumbs.db
 .test-*.json
 test_write.tmp
 .superpowers/
+.worktrees/
 
 # Git
 .git_broken/
