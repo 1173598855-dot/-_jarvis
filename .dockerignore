@@ -1,0 +1,11 @@
+node_modules
+.git
+.gitignore
+.dockerignore
+README.md
+docs/
+tests/
+.auto-memory/
+__pycache__
+.pytest_cache
+*.log

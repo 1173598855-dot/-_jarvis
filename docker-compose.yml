@@ -1,0 +1,12 @@
+services:
+  jarvis:
+    container_name: jarvis-app
+    build: .
+    ports:
+      - "5173:5173"  # Vite 前端
+      - "9999:9999"  # Express 后端
+    volumes:
+      - ./src:/app/src
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
