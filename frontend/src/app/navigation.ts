@@ -1,11 +1,9 @@
-import {
-  Activity as MonitorActivity,
-  Bot,
-  Boxes,
-  GitBranch,
-  MemoryStick,
-  MessageSquare,
-} from 'lucide-solid';
+import MonitorActivity from 'lucide-solid/icons/activity';
+import Bot from 'lucide-solid/icons/bot';
+import Boxes from 'lucide-solid/icons/boxes';
+import GitBranch from 'lucide-solid/icons/git-branch';
+import MemoryStick from 'lucide-solid/icons/memory-stick';
+import MessageSquare from 'lucide-solid/icons/message-square';
 
 export type ViewId =
   | 'chat'

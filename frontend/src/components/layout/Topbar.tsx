@@ -1,7 +1,5 @@
-import {
-  PanelRightClose,
-  PanelRightOpen,
-} from 'lucide-solid';
+import PanelRightClose from 'lucide-solid/icons/panel-right-close';
+import PanelRightOpen from 'lucide-solid/icons/panel-right-open';
 import {
   createSignal,
   onCleanup,

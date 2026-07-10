@@ -113,7 +113,7 @@ describe('application navigation', () => {
     expect(screen.getAllByTestId('active-view')).toHaveLength(1);
 
     fireEvent.click(desktop.getByRole('button', { name: '运行监控' }));
-    expect(await screen.findByRole('heading', { name: '运行态', level: 1 })).not.toBeNull();
+    expect(await screen.findByRole('heading', { name: '运行监控', level: 1 })).not.toBeNull();
     expect(desktop.getByRole('button', { name: '运行监控' }).getAttribute('aria-current')).toBe('page');
     expect(screen.getAllByTestId('active-view')).toHaveLength(1);
 

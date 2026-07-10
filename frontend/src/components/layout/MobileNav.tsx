@@ -1,5 +1,6 @@
 import * as Dialog from '@kobalte/core/dialog';
-import { Ellipsis, X } from 'lucide-solid';
+import Ellipsis from 'lucide-solid/icons/ellipsis';
+import X from 'lucide-solid/icons/x';
 import {
   For,
   createSignal,

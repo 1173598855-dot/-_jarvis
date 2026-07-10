@@ -38,7 +38,7 @@ export function RuntimeView() {
     <div class="view-stack">
       <header class="view-heading">
         <div>
-          <h1>运行态</h1>
+          <h1>运行监控</h1>
           <p>本机硬件负载与当前服务会话用量。</p>
         </div>
       </header>

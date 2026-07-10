@@ -1,12 +1,10 @@
 import * as Select from '@kobalte/core/select';
-import {
-  ChevronDown,
-  RefreshCw,
-  RotateCcw,
-  Send,
-  Square,
-  Trash2,
-} from 'lucide-solid';
+import ChevronDown from 'lucide-solid/icons/chevron-down';
+import RefreshCw from 'lucide-solid/icons/refresh-cw';
+import RotateCcw from 'lucide-solid/icons/rotate-ccw';
+import Send from 'lucide-solid/icons/send';
+import Square from 'lucide-solid/icons/square';
+import Trash2 from 'lucide-solid/icons/trash-2';
 import remarkGfm from 'remark-gfm';
 import { SolidMarkdown } from 'solid-markdown';
 import {
@@ -181,7 +179,7 @@ export function ChatView() {
     <section class="chat-view" aria-labelledby="chat-view-title">
       <header class="chat-view__header">
         <div>
-          <h2 id="chat-view-title">本地对话</h2>
+          <h1 id="chat-view-title">指挥中心</h1>
           <p>通过 Ollama 运行模型，响应仅在本机处理。</p>
         </div>
         <div class="chat-view__toolbar">

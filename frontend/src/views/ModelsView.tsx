@@ -38,7 +38,7 @@ export function ModelsView() {
     <div class="view-stack">
       <header class="view-heading view-heading--with-status">
         <div>
-          <h1>模型</h1>
+          <h1>本地模型</h1>
           <p>Ollama 运行时与本地已安装模型清单。</p>
         </div>
         <Show when={status()}>

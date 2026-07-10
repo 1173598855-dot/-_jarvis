@@ -1,4 +1,6 @@
-import { Download, Play, Power } from 'lucide-solid';
+import Download from 'lucide-solid/icons/download';
+import Play from 'lucide-solid/icons/play';
+import Power from 'lucide-solid/icons/power';
 import { For, Show, createSignal } from 'solid-js';
 import { useRuntimeResources } from '../app/runtime-resources';
 import { createPollingResource } from '../primitives/create-polling-resource';

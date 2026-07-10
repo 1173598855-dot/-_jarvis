@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import { RefreshCw } from 'lucide-solid';
+import RefreshCw from 'lucide-solid/icons/refresh-cw';
 import { useRuntimeResources } from '../app/runtime-resources';
 import { createPollingResource } from '../primitives/create-polling-resource';
 import { jarvisApi } from '../services/jarvis-api';

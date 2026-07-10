@@ -1,5 +1,6 @@
 import * as Dialog from '@kobalte/core/dialog';
-import { Plus, Search } from 'lucide-solid';
+import Plus from 'lucide-solid/icons/plus';
+import Search from 'lucide-solid/icons/search';
 import {
   For,
   Show,

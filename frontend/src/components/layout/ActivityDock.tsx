@@ -1,5 +1,6 @@
 import * as Collapsible from '@kobalte/core/collapsible';
-import { ChevronDown, ChevronUp } from 'lucide-solid';
+import ChevronDown from 'lucide-solid/icons/chevron-down';
+import ChevronUp from 'lucide-solid/icons/chevron-up';
 import {
   For,
   Show,

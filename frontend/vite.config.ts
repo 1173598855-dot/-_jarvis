@@ -3,6 +3,9 @@ import solidPlugin from 'vite-plugin-solid';
 
 export default defineConfig({
   plugins: [solidPlugin()],
+  optimizeDeps: {
+    include: ['debug', 'extend', 'remark-gfm'],
+  },
   server: {
     port: 5173,
     proxy: {

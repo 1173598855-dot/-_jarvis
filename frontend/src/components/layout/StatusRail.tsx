@@ -1,5 +1,5 @@
 import { Show, type JSX } from 'solid-js';
-import { RefreshCw } from 'lucide-solid';
+import RefreshCw from 'lucide-solid/icons/refresh-cw';
 import { useRuntimeResources } from '../../app/runtime-resources';
 import type { PollingResource } from '../../primitives/create-polling-resource';
 import { IconButton } from '../ui/IconButton';

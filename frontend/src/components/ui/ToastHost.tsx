@@ -5,7 +5,9 @@ import {
   useContext,
   type ParentComponent,
 } from 'solid-js';
-import { CheckCircle2, CircleAlert, X } from 'lucide-solid';
+import CheckCircle2 from 'lucide-solid/icons/circle-check-big';
+import CircleAlert from 'lucide-solid/icons/circle-alert';
+import X from 'lucide-solid/icons/x';
 
 export interface ToastApi {
   success(message: string): void;
