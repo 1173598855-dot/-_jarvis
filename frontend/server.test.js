@@ -42,7 +42,11 @@ beforeAll(async () => {
     if (req.method === 'POST' && req.url === '/api/chat') {
       res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
       res.write(JSON.stringify({ message: { content: 'hello' }, done: false }) + '\n');
-      res.write(JSON.stringify({ done: true }) + '\n');
+      res.write(JSON.stringify({
+        done: true,
+        prompt_eval_count: 7,
+        eval_count: 5,
+      }) + '\n');
       res.end();
       return;
     }
@@ -110,6 +114,19 @@ describe('Ollama streaming chat proxy', () => {
     expect(response.headers.get('content-type')).toContain('text/event-stream');
     expect(body).toContain('data: {"message":{"content":"hello"},"done":false}');
     expect(body).toContain('data: [DONE]');
+
+    const usageResponse = await fetch(
+      `http://127.0.0.1:${API_PORT}/api/ollama/token-usage`,
+    );
+    const usage = await usageResponse.json();
+
+    expect(usage.latest).toMatchObject({
+      prompt_tokens: 7,
+      completion_tokens: 5,
+      total_tokens: 12,
+    });
+    expect(usage.totals.total_tokens).toBe(12);
+    expect(usage.samples).toHaveLength(1);
   });
 });
 

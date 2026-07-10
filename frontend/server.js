@@ -12,6 +12,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { readSystemStats } from './server/system-metrics.js';
+import { createTokenUsageStore } from './server/token-usage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,6 +23,7 @@ const allowedOrigins = (process.env.JARVIS_ALLOWED_ORIGINS || '*')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const tokenUsage = createTokenUsageStore();
 
 // ============================================================
 // 中间件
@@ -88,6 +90,32 @@ function writeSseHeaders(res) {
 function streamOllamaChat(res, payload) {
   writeSseHeaders(res);
 
+  const emitLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    if (trimmed.startsWith('data:')) {
+      const data = trimmed.replace(/^data:\s?/, '');
+      if (data !== '[DONE]') {
+        try {
+          tokenUsage.recordFrame(JSON.parse(data));
+        } catch {
+          // Preserve malformed upstream frames for the client to report.
+        }
+      }
+      res.write(`${trimmed}\n\n`);
+      return;
+    }
+
+    try {
+      const frame = JSON.parse(trimmed);
+      tokenUsage.recordFrame(frame);
+      res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    } catch {
+      res.write(`data: ${JSON.stringify({ raw: trimmed })}\n\n`);
+    }
+  };
+
   const options = {
     hostname: OLLAMA_HOST,
     port: OLLAMA_PORT,
@@ -105,32 +133,12 @@ function streamOllamaChat(res, payload) {
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        if (trimmed.startsWith('data:')) {
-          res.write(`${trimmed}\n\n`);
-          continue;
-        }
-
-        try {
-          const parsed = JSON.parse(trimmed);
-          res.write(`data: ${JSON.stringify(parsed)}\n\n`);
-        } catch {
-          res.write(`data: ${JSON.stringify({ raw: trimmed })}\n\n`);
-        }
+        emitLine(line);
       }
     });
 
     proxyRes.on('end', () => {
-      const trailing = buffer.trim();
-      if (trailing) {
-        try {
-          res.write(`data: ${JSON.stringify(JSON.parse(trailing))}\n\n`);
-        } catch {
-          res.write(`data: ${JSON.stringify({ raw: trailing })}\n\n`);
-        }
-      }
+      emitLine(buffer);
       res.write('data: [DONE]\n\n');
       res.end();
     });
@@ -395,33 +403,8 @@ function runGitCommand(args) {
 }
 
 // ============================================================
-app.get('/api/ollama/token-usage', async (req, res) => {
-  try {
-    const statusRes = await new Promise((resolve) => {
-    http.get(`http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags`, (r) => {
-        let body = '';
-        r.on('data', (d) => { body += d.toString(); });
-        r.on('end', () => resolve({ ok: r.statusCode === 200, body }));
-      }).on('error', () => resolve({ ok: false, body: '' }));
-    });
-
-    if (!statusRes.ok) {
-      return res.json({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, timestamp: Date.now() });
-    }
-
-    // Approximate: use model count as proxy for activity
-    const models = JSON.parse(statusRes.body);
-    const totalModels = models.models?.length || 0;
-
-    res.json({
-      prompt_tokens: totalModels * 120 + Math.floor(Math.random() * 50),
-      completion_tokens: totalModels * 80 + Math.floor(Math.random() * 30),
-      total_tokens: 0,
-      timestamp: Date.now(),
-    });
-  } catch {
-    res.json({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, timestamp: Date.now() });
-  }
+app.get('/api/ollama/token-usage', (req, res) => {
+  res.json(tokenUsage.snapshot());
 });
 
 // ============================================================
