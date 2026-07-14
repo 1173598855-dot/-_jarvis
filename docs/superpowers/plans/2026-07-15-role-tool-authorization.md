@@ -41,6 +41,7 @@ class TestRoleToolBroker(unittest.TestCase):
         self.profile = AgentProfile(
             name="engineer",
             display_name="Engineer",
+            description="Implements tested changes.",
             tools=["terminal_executor", "plugin_sdk", "terminal_executor"],
         )
 
