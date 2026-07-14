@@ -326,6 +326,27 @@ class TestOllamaRoleExecution(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.message, "Ollama role execution failed")
 
+    def test_role_recovers_for_next_request_after_execution_error(self):
+        manager = Mock()
+        manager.chat.side_effect = [
+            {"error": "offline"},
+            self._response("recovered"),
+        ]
+        factory = AgentFactory(ollama_manager=manager)
+
+        first = factory.dispatch_by_role("engineer", "first task")
+        second = factory.dispatch_by_role("engineer", "second task")
+
+        self.assertEqual(first.status, "error")
+        self.assertEqual(first.message, "Ollama role execution failed")
+        self.assertEqual(second.status, "success")
+        self.assertEqual(second.message, "recovered")
+        self.assertEqual(manager.chat.call_count, 2)
+        info = factory.orchestrator.list_agents()[0]
+        self.assertEqual(info.status, "idle")
+        self.assertEqual(info.errors_count, 1)
+        self.assertEqual(info.tasks_completed, 1)
+
     def test_role_model_uses_process_configuration(self):
         with patch.dict("os.environ", {"JARVIS_ROLE_MODEL": "configured-role"}):
             factory = AgentFactory()

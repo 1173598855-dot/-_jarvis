@@ -81,6 +81,8 @@ class AgentFactory:
             },
         )
         result = self.orchestrator.dispatch(task)
+        if result.status == "error":
+            self.orchestrator.recover_agent(profile.name)
         status = "dispatched" if result.status == "completed" else result.status
         return DispatchResult(
             role_name=role_name, task_id=result.task_id,
