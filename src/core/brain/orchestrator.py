@@ -139,6 +139,7 @@ class _RegisteredAgent:
         self.current_task: Optional[AgentTask] = None
         self.tasks_completed = 0
         self.errors_count = 0
+        self._error_recoverable = False
         self._lock = threading.Lock()
 
     def is_available(self) -> bool:
@@ -149,24 +150,38 @@ class _RegisteredAgent:
         with self._lock:
             self.current_task = task
             self.status = AgentStatus.BUSY
+            self._error_recoverable = False
 
     def complete(self) -> None:
         with self._lock:
             self.tasks_completed += 1
             self.status = AgentStatus.IDLE
             self.current_task = None
+            self._error_recoverable = False
 
-    def fail(self) -> None:
+    def fail(self, *, recoverable: bool = True) -> None:
         with self._lock:
             self.errors_count += 1
             self.status = AgentStatus.ERROR
             self.current_task = None
+            self._error_recoverable = recoverable
 
     def reset(self) -> None:
         """Reset to IDLE so dispatch_with_retry can re-attempt."""
         with self._lock:
             self.status = AgentStatus.IDLE
             self.current_task = None
+            self._error_recoverable = False
+
+    def recover_from_error(self) -> bool:
+        """Return a completed error state to IDLE without changing counters."""
+        with self._lock:
+            if self.status != AgentStatus.ERROR or not self._error_recoverable:
+                return False
+            self.status = AgentStatus.IDLE
+            self.current_task = None
+            self._error_recoverable = False
+            return True
 
     def info(self) -> AgentInfo:
         with self._lock:
@@ -246,6 +261,13 @@ class Orchestrator:
         logger.info(f"Agent unregistered: '{name}'")
         return True
 
+    def recover_agent(self, name: str) -> bool:
+        """Recover a registered agent only when its current state is ERROR."""
+        agent = self._agents.get(name)
+        if agent is None:
+            return False
+        return agent.recover_from_error()
+
     def list_agents(self) -> List[AgentInfo]:
         """Return info for all registered agents."""
         return [a.info() for a in self._agents.values()]
@@ -313,7 +335,7 @@ class Orchestrator:
 
         except TimeoutError:
             duration_ms = int((time.perf_counter() - start) * 1000)
-            agent.fail()
+            agent.fail(recoverable=False)
             self._stats["total_timeouts"] += 1
             result = AgentResult(
                 task_id=task.task_id,

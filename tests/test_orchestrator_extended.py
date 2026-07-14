@@ -104,6 +104,35 @@ class TestRegisteredAgentLifecycle(unittest.TestCase):
         a.fail()
         self.assertEqual(a.status, AgentStatus.ERROR)
 
+    def test_recover_from_error_returns_to_idle_and_preserves_error_count(self):
+        agent = self._make_agent()
+        agent.assign(AgentTask(agent_name="test_agent", prompt="p"))
+        agent.fail()
+
+        recovered = agent.recover_from_error()
+
+        self.assertTrue(recovered)
+        self.assertEqual(agent.status, AgentStatus.IDLE)
+        self.assertEqual(agent.errors_count, 1)
+        self.assertIsNone(agent.current_task)
+
+    def test_recover_from_error_refuses_non_error_states(self):
+        for status in (AgentStatus.IDLE, AgentStatus.BUSY, AgentStatus.SHUTDOWN):
+            with self.subTest(status=status):
+                agent = self._make_agent()
+                agent.status = status
+                self.assertFalse(agent.recover_from_error())
+                self.assertEqual(agent.status, status)
+
+    def test_recover_from_error_refuses_nonrecoverable_error(self):
+        agent = self._make_agent()
+        agent.assign(AgentTask(agent_name="test_agent", prompt="p"))
+        agent.fail(recoverable=False)
+
+        self.assertFalse(agent.recover_from_error())
+        self.assertEqual(agent.status, AgentStatus.ERROR)
+        self.assertEqual(agent.errors_count, 1)
+
     def test_info_returns_agent_info(self):
         a = self._make_agent('my_agent', ['c1', 'c2'])
         info = a.info()
@@ -151,6 +180,56 @@ class TestOrchestratorInitAndShutdown(unittest.TestCase):
         orch.shutdown()
         self.assertTrue(orch._shutdown)
 
+
+class TestOrchestratorRecovery(unittest.TestCase):
+    def test_recover_agent_preserves_failed_result_history_and_stats(self):
+        orchestrator = Orchestrator()
+
+        def fail(_task):
+            raise RuntimeError("failed")
+
+        orchestrator.register("worker", fail)
+        result = orchestrator.dispatch(
+            AgentTask(task_id="failed-task", agent_name="worker", prompt="task")
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertTrue(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "idle")
+        self.assertEqual(orchestrator.list_agents()[0].errors_count, 1)
+        self.assertEqual(
+            orchestrator.collect(task_id="failed-task")[0].status,
+            "error",
+        )
+        self.assertEqual(orchestrator.get_stats()["total_errors"], 1)
+
+    def test_recover_agent_refuses_missing_and_non_error_agents(self):
+        orchestrator = Orchestrator()
+        orchestrator.register("worker", lambda _task: "ok")
+
+        self.assertFalse(orchestrator.recover_agent("missing"))
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        orchestrator._agents["worker"].assign(
+            AgentTask(agent_name="worker", prompt="busy")
+        )
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "busy")
+
+    def test_recover_agent_does_not_recover_timeout(self):
+        orchestrator = Orchestrator()
+
+        def slow(_task):
+            time.sleep(0.1)
+            return "late"
+
+        orchestrator.register("worker", slow)
+        result = orchestrator.dispatch(
+            AgentTask(agent_name="worker", prompt="task", timeout=0.01)
+        )
+
+        self.assertEqual(result.status, "timeout")
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "error")
 
 class TestOrchestratorRegisterUnregister(unittest.TestCase):
     def test_register_returns_self(self):
@@ -382,6 +461,7 @@ def run_all_tests():
     for tc in [TestAgentTaskDataclass, TestAgentResultSerialization,
                TestAgentInfoDataclass, TestRegisteredAgentLifecycle,
                TestOrchestratorInitAndShutdown, TestOrchestratorRegisterUnregister,
+               TestOrchestratorRecovery,
                TestOrchestratorDispatch, TestOrchestratorDispatchConcurrent,
                TestOrchestratorCollect, TestOrchestratorRunWithTimeout,
                TestOrchestratorEdgeCases]:
