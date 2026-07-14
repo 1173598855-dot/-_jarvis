@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from core.brain.orchestrator import AgentTask, Orchestrator
 from core.brain.role_registry import AgentProfile, create_default_registry
+from core.brain.role_tools import RoleToolBroker
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class AgentFactory:
         orchestrator=None,
         ollama_manager=None,
         role_model: Optional[str] = None,
+        role_tool_broker: Optional[RoleToolBroker] = None,
     ):
         self.registry = registry if registry is not None else create_default_registry()
         self.orchestrator = orchestrator or Orchestrator()
@@ -49,6 +51,7 @@ class AgentFactory:
             "JARVIS_ROLE_MODEL", DEFAULT_ROLE_MODEL
         )
         self._role_model = configured_model.strip() or DEFAULT_ROLE_MODEL
+        self._role_tool_broker = role_tool_broker or RoleToolBroker()
         self._lock = threading.Lock()
 
     def dispatch_by_role(self, role_name: str, task_prompt: str, timeout: int = 300) -> DispatchResult:
@@ -63,8 +66,14 @@ class AgentFactory:
                 capabilities=profile.capabilities,
             )
 
+        authorized_tools = self._role_tool_broker.authorized_tools(profile)
         system_prompt = profile.resolve_prompt(task_prompt)
-        full_prompt = self._build_full_prompt(profile, task_prompt, system_prompt)
+        full_prompt = self._build_full_prompt(
+            profile,
+            task_prompt,
+            system_prompt,
+            authorized_tools=authorized_tools,
+        )
 
         task = AgentTask(
             task_id=f"{role_name}_{abs(hash(task_prompt)) % 100000}",
@@ -76,7 +85,8 @@ class AgentFactory:
                 "role_name": role_name,
                 "capabilities": profile.capabilities,
                 "constraints": profile.constraints,
-                "tools": profile.tools,
+                "declared_tools": list(profile.tools),
+                "authorized_tools": authorized_tools,
                 "task_prompt": task_prompt,
             },
         )
@@ -98,7 +108,15 @@ class AgentFactory:
 
         def ollama_handler(task: AgentTask) -> str:
             messages = [
-                {"role": "system", "content": self._build_system_prompt(profile)},
+                {
+                    "role": "system",
+                    "content": self._build_system_prompt(
+                        profile,
+                        authorized_tools=list(
+                            task.metadata.get("authorized_tools", [])
+                        ),
+                    ),
+                },
                 {
                     "role": "user",
                     "content": str(task.metadata.get("task_prompt", "")),
@@ -216,25 +234,49 @@ class AgentFactory:
     def get_role(self, name: str) -> Optional[AgentProfile]:
         return self.registry.get(name)
 
-    def _build_full_prompt(self, profile: AgentProfile, task: str, system_prompt: str) -> str:
+    def _build_full_prompt(
+        self,
+        profile: AgentProfile,
+        task: str,
+        system_prompt: str,
+        authorized_tools: Optional[List[str]] = None,
+    ) -> str:
         parts = [f"[ROLE: {profile.display_name}]", system_prompt]
         if profile.constraints:
             parts.append(f"[CONSTRAINTS] {chr(59).join(profile.constraints)}")
-        if profile.tools:
-            parts.append(f"[AVAILABLE TOOLS] {chr(44).join(profile.tools)}")
+        self._append_tool_access(parts, profile, authorized_tools)
         sep = "\n\n"
         return sep.join(parts + [f"[TASK]{NL}{task}"])
 
-    def _build_system_prompt(self, profile: AgentProfile) -> str:
+    def _build_system_prompt(
+        self,
+        profile: AgentProfile,
+        authorized_tools: Optional[List[str]] = None,
+    ) -> str:
         parts = [
             f"[ROLE: {profile.display_name}]",
             profile.resolve_prompt("Follow the user message."),
         ]
         if profile.constraints:
             parts.append(f"[CONSTRAINTS] {chr(59).join(profile.constraints)}")
-        if profile.tools:
-            parts.append(f"[AVAILABLE TOOLS] {chr(44).join(profile.tools)}")
+        self._append_tool_access(parts, profile, authorized_tools)
         return "\n\n".join(parts)
+
+    def _append_tool_access(
+        self,
+        parts: List[str],
+        profile: AgentProfile,
+        authorized_tools: Optional[List[str]],
+    ) -> None:
+        resolved = (
+            self._role_tool_broker.authorized_tools(profile)
+            if authorized_tools is None
+            else authorized_tools
+        )
+        if resolved:
+            parts.append(f"[AUTHORIZED TOOLS] {chr(44).join(resolved)}")
+        else:
+            parts.append("[TOOL ACCESS] disabled")
 
     def shutdown(self):
         self.orchestrator.shutdown()

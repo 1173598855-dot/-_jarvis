@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.brain.agent_factory import AgentFactory, DispatchResult
+from core.brain.role_tools import RoleToolBroker, RoleToolPolicy
 
 
 class TestDispatchByRole(unittest.TestCase):
@@ -217,15 +218,16 @@ class TestBuildFullPrompt(unittest.TestCase):
         self.assertIn("no secrets", prompt)
 
     def test_build_prompt_with_tools(self):
-        """_build_full_prompt includes tools when present"""
+        """Profile declarations alone do not grant prompt tool access."""
         from core.brain.role_registry import AgentProfile
         profile = AgentProfile(
             name="coder", display_name="Coder", description="developer",
             capabilities=["coding"], tools=["python", "bash"],
         )
         prompt = self.factory._build_full_prompt(profile, "fix bug", "")
-        self.assertIn("AVAILABLE TOOLS", prompt)
-        self.assertIn("python", prompt)
+        self.assertIn("[TOOL ACCESS] disabled", prompt)
+        self.assertNotIn("AVAILABLE TOOLS", prompt)
+        self.assertNotIn("python", prompt)
 
     def test_build_prompt_no_constraints_no_tools(self):
         """_build_full_prompt works without constraints or tools"""
@@ -288,13 +290,61 @@ class TestOllamaRoleExecution(unittest.TestCase):
         self.assertEqual(model, "fixture-role")
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("工程师", messages[0]["content"])
-        self.assertIn("AVAILABLE TOOLS", messages[0]["content"])
+        self.assertIn("[TOOL ACCESS] disabled", messages[0]["content"])
+        self.assertNotIn("AVAILABLE TOOLS", messages[0]["content"])
         self.assertNotIn("write a unit test", messages[0]["content"])
         self.assertEqual(
             messages[1],
             {"role": "user", "content": "write a unit test"},
         )
         self.assertEqual(manager.chat.call_args.kwargs, {"stream": False})
+
+    def test_injected_broker_exposes_only_authorized_registered_tools(self):
+        manager = Mock()
+        manager.chat.return_value = self._response()
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy(
+                {"engineer": ["terminal_executor", "plugin_sdk"]}
+            ),
+            handlers={"terminal_executor": lambda arguments: arguments},
+        )
+        factory = AgentFactory(
+            ollama_manager=manager,
+            role_tool_broker=broker,
+        )
+        captured_tasks = []
+        original_dispatch = factory.orchestrator.dispatch
+
+        def capture(task):
+            captured_tasks.append(task)
+            return original_dispatch(task)
+
+        with patch.object(
+            factory.orchestrator,
+            "dispatch",
+            side_effect=capture,
+        ):
+            result = factory.dispatch_by_role(
+                "engineer",
+                "inspect the workspace",
+            )
+
+        self.assertEqual(result.status, "success")
+        system_prompt = manager.chat.call_args.args[1][0]["content"]
+        self.assertIn(
+            "[AUTHORIZED TOOLS] terminal_executor",
+            system_prompt,
+        )
+        self.assertNotIn("plugin_sdk", system_prompt)
+        self.assertEqual(
+            captured_tasks[0].metadata["declared_tools"],
+            ["orchestrator", "terminal_executor", "plugin_sdk"],
+        )
+        self.assertEqual(
+            captured_tasks[0].metadata["authorized_tools"],
+            ["terminal_executor"],
+        )
+        self.assertNotIn("tools", captured_tasks[0].metadata)
 
     def test_injected_manager_error_response_is_sanitized(self):
         manager = Mock()
