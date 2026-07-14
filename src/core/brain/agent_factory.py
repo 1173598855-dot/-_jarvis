@@ -96,7 +96,7 @@ class AgentFactory:
 
         def ollama_handler(task: AgentTask) -> str:
             messages = [
-                {"role": "system", "content": task.prompt},
+                {"role": "system", "content": self._build_system_prompt(profile)},
                 {
                     "role": "user",
                     "content": str(task.metadata.get("task_prompt", "")),
@@ -222,6 +222,17 @@ class AgentFactory:
             parts.append(f"[AVAILABLE TOOLS] {chr(44).join(profile.tools)}")
         sep = "\n\n"
         return sep.join(parts + [f"[TASK]{NL}{task}"])
+
+    def _build_system_prompt(self, profile: AgentProfile) -> str:
+        parts = [
+            f"[ROLE: {profile.display_name}]",
+            profile.resolve_prompt("Follow the user message."),
+        ]
+        if profile.constraints:
+            parts.append(f"[CONSTRAINTS] {chr(59).join(profile.constraints)}")
+        if profile.tools:
+            parts.append(f"[AVAILABLE TOOLS] {chr(44).join(profile.tools)}")
+        return "\n\n".join(parts)
 
     def shutdown(self):
         self.orchestrator.shutdown()

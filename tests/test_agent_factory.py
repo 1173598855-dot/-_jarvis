@@ -288,6 +288,8 @@ class TestOllamaRoleExecution(unittest.TestCase):
         self.assertEqual(model, "fixture-role")
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("工程师", messages[0]["content"])
+        self.assertIn("AVAILABLE TOOLS", messages[0]["content"])
+        self.assertNotIn("write a unit test", messages[0]["content"])
         self.assertEqual(
             messages[1],
             {"role": "user", "content": "write a unit test"},
