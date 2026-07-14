@@ -4,6 +4,7 @@ Agent 工厂测试 - Phase 11 集成层验证
 """
 import sys
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -265,6 +266,88 @@ class TestDispatchResultExtended(unittest.TestCase):
         self.assertEqual(r.task_id, "")
 
 
+class TestOllamaRoleExecution(unittest.TestCase):
+    @staticmethod
+    def _response(content="role output"):
+        return {
+            "model": "fixture-role",
+            "message": {"role": "assistant", "content": content},
+            "done": True,
+        }
+
+    def test_injected_manager_executes_role_with_system_and_user_messages(self):
+        manager = Mock()
+        manager.chat.return_value = self._response()
+        factory = AgentFactory(ollama_manager=manager, role_model="fixture-role")
+
+        result = factory.dispatch_by_role("engineer", "write a unit test")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.message, "role output")
+        model, messages = manager.chat.call_args.args
+        self.assertEqual(model, "fixture-role")
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("工程师", messages[0]["content"])
+        self.assertEqual(
+            messages[1],
+            {"role": "user", "content": "write a unit test"},
+        )
+        self.assertEqual(manager.chat.call_args.kwargs, {"stream": False})
+
+    def test_injected_manager_error_response_is_sanitized(self):
+        manager = Mock()
+        manager.chat.return_value = {"error": "connection details"}
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_injected_manager_blank_content_is_an_error(self):
+        manager = Mock()
+        manager.chat.return_value = self._response("   ")
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_injected_manager_exception_is_sanitized(self):
+        manager = Mock()
+        manager.chat.side_effect = RuntimeError("socket path and secret")
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_role_model_uses_process_configuration(self):
+        with patch.dict("os.environ", {"JARVIS_ROLE_MODEL": "configured-role"}):
+            factory = AgentFactory()
+
+        self.assertEqual(factory._role_model, "configured-role")
+
+    def test_dispatch_llm_uses_valid_chat_signature(self):
+        manager = Mock()
+        manager.chat.side_effect = [
+            self._response("engineer"),
+            self._response("implemented"),
+        ]
+        factory = AgentFactory(ollama_manager=manager, role_model="fixture-role")
+
+        result = factory.dispatch_llm("implement feature")
+
+        self.assertEqual(result.role_name, "engineer")
+        self.assertEqual(result.message, "implemented")
+        first_call = manager.chat.call_args_list[0]
+        self.assertEqual(first_call.args[0], "fixture-role")
+        self.assertEqual(first_call.args[1][0]["role"], "user")
+        self.assertEqual(first_call.kwargs, {"stream": False})
+
+
 def run_all_tests():
     print("=" * 60)
     print("J.A.R.V.I.S. agent_factory tests - Iteration 36")
@@ -274,7 +357,8 @@ def run_all_tests():
     suite = unittest.TestSuite()
     for tc in [TestDispatchByRole, TestDispatchByCapability, TestBatchDispatch,
                TestListRoles, TestIntegration, TestDispatchResult,
-               TestDispatchResultExtended, TestAgentFactoryInit, TestBuildFullPrompt]:
+               TestDispatchResultExtended, TestAgentFactoryInit, TestBuildFullPrompt,
+               TestOllamaRoleExecution]:
         suite.addTests(loader.loadTestsFromTestCase(tc))
 
     runner = unittest.TextTestRunner(verbosity=2)

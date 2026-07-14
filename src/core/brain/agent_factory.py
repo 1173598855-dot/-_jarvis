@@ -4,6 +4,7 @@ Connects RoleRegistry + Orchestrator for role-driven task dispatch
 Zero external dependencies (stdlib only)
 """
 import logging
+import os
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,9 @@ from core.brain.orchestrator import AgentTask, Orchestrator
 from core.brain.role_registry import AgentProfile, create_default_registry
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ROLE_MODEL = "llama3.2"
+ROLE_EXECUTION_ERROR = "Ollama role execution failed"
 
 
 class DispatchResult:
@@ -31,10 +35,20 @@ NL = "\n"  # avoid f-string newline truncation
 class AgentFactory:
     """Role-driven agent factory connecting RoleRegistry + Orchestrator"""
 
-    def __init__(self, registry=None, orchestrator=None, ollama_manager=None):
+    def __init__(
+        self,
+        registry=None,
+        orchestrator=None,
+        ollama_manager=None,
+        role_model: Optional[str] = None,
+    ):
         self.registry = registry if registry is not None else create_default_registry()
         self.orchestrator = orchestrator or Orchestrator()
         self._ollama_manager = ollama_manager
+        configured_model = role_model or os.environ.get(
+            "JARVIS_ROLE_MODEL", DEFAULT_ROLE_MODEL
+        )
+        self._role_model = configured_model.strip() or DEFAULT_ROLE_MODEL
         self._lock = threading.Lock()
 
     def dispatch_by_role(self, role_name: str, task_prompt: str, timeout: int = 300) -> DispatchResult:
@@ -58,8 +72,13 @@ class AgentFactory:
             prompt=full_prompt,
             timeout=timeout,
             priority=profile.priority,
-            metadata={"role_name": role_name, "capabilities": profile.capabilities,
-                      "constraints": profile.constraints, "tools": profile.tools},
+            metadata={
+                "role_name": role_name,
+                "capabilities": profile.capabilities,
+                "constraints": profile.constraints,
+                "tools": profile.tools,
+                "task_prompt": task_prompt,
+            },
         )
         result = self.orchestrator.dispatch(task)
         status = "dispatched" if result.status == "completed" else result.status
@@ -68,11 +87,43 @@ class AgentFactory:
             status=status, message=result.result or result.error or "",
         )
 
-    @staticmethod
-    def _default_handler(profile: AgentProfile):
-        def handler(task: AgentTask) -> str:
-            return f"[{profile.display_name}] Task received: {task.prompt[:100]}"
-        return handler
+    def _default_handler(self, profile: AgentProfile):
+        if self._ollama_manager is None:
+            def compatibility_handler(task: AgentTask) -> str:
+                return f"[{profile.display_name}] Task received: {task.prompt[:100]}"
+
+            return compatibility_handler
+
+        def ollama_handler(task: AgentTask) -> str:
+            messages = [
+                {"role": "system", "content": task.prompt},
+                {
+                    "role": "user",
+                    "content": str(task.metadata.get("task_prompt", "")),
+                },
+            ]
+            try:
+                response = self._ollama_manager.chat(
+                    self._role_model,
+                    messages,
+                    stream=False,
+                )
+            except Exception:
+                logger.warning(
+                    "Ollama role execution raised for role %s",
+                    profile.name,
+                )
+                raise RuntimeError(ROLE_EXECUTION_ERROR) from None
+
+            if not isinstance(response, dict) or response.get("error"):
+                raise RuntimeError(ROLE_EXECUTION_ERROR)
+            message = response.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError(ROLE_EXECUTION_ERROR)
+            return content.strip()
+
+        return ollama_handler
 
     def dispatch_by_capability(self, capability: str, task_prompt: str, timeout: int = 300) -> DispatchResult:
         candidates = self.registry.list_roles(capability=capability)
@@ -109,13 +160,19 @@ class AgentFactory:
         )
         try:
             response = self._ollama_manager.chat(
-                prompt, model="llama3.2", max_tokens=32, temperature=0.0
+                self._role_model,
+                [{"role": "user", "content": prompt}],
+                stream=False,
             )
         except Exception as exc:
             logger.warning(f"dispatch_llm: LLM call failed ({exc}), falling back")
             return self._fallback_dispatch(task_prompt, timeout)
 
-        candidate = response.strip().split()[0].strip("[]").lower()
+        message = response.get("message") if isinstance(response, dict) else None
+        content = message.get("content") if isinstance(message, dict) else ""
+        if not isinstance(content, str) or not content.strip():
+            return self._fallback_dispatch(task_prompt, timeout)
+        candidate = content.strip().split()[0].strip("[]").lower()
         for role in roles:
             if role.name.lower() == candidate:
                 return self.dispatch_by_role(role.name, task_prompt, timeout)
