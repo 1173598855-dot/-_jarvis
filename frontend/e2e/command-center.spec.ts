@@ -25,8 +25,8 @@ async function installApiFixtures(page: Page) {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
         body: [
-          'data: {"message":{"content":"已完成项目检查。"}}\n\n',
-          'data: {"done":true,"prompt_eval_count":8,"eval_count":6}\n\n',
+          'data: {"model":"qwen2.5:7b","content":"已完成项目检查。","done":false}\n\n',
+          'data: {"model":"qwen2.5:7b","content":"","done":true,"prompt_eval_count":8,"eval_count":6}\n\n',
           'data: [DONE]\n\n',
         ].join(''),
       });

@@ -126,6 +126,19 @@ class TestGetStatus(unittest.TestCase):
             status = m.get_status()
         assert status.running is False
 
+    def test_gpu_available_is_boolean_when_no_models_are_running(self):
+        m = make_manager()
+        responses = [
+            mock_response(json_data={"version": "0.9.0"}),
+            mock_response(json_data={"models": []}),
+            mock_response(json_data={"models": []}),
+        ]
+        with patch.object(m._session, "get", side_effect=responses):
+            status = m.get_status()
+
+        self.assertIs(type(status.gpu_available), bool)
+        self.assertFalse(status.gpu_available)
+
 
 # ============================================================
 # list_models
@@ -213,6 +226,22 @@ class TestChat(unittest.TestCase):
             result = m.chat("llama3", [{"role": "user", "content": "hi"}])
         assert "error" in result
 
+    def test_chat_records_native_ollama_token_counts_once(self):
+        m = make_manager()
+        resp = mock_response(json_data={
+            "model": "llama3",
+            "message": {"role": "assistant", "content": "Hi!"},
+            "done": True,
+            "prompt_eval_count": 8,
+            "eval_count": 3,
+        })
+
+        with patch.object(m._session, "post", return_value=resp):
+            m.chat("llama3", [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(m.get_token_usage().total_tokens, 11)
+        self.assertEqual(len(m.get_token_usage_snapshot()["samples"]), 1)
+
 class TestPullModel(unittest.TestCase):
     """pull_model() streaming pull with progress output"""
 
@@ -266,6 +295,43 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(data["completion_tokens"], 2)
         self.assertEqual(data["total_tokens"], 3)
 
+    def test_session_snapshot_tracks_latest_totals_and_samples(self):
+        m = make_manager()
+        m.record_token_usage(prompt_tokens=10, completion_tokens=5)
+        m.record_token_usage(prompt_tokens=4, completion_tokens=6)
+
+        snapshot = m.get_token_usage_snapshot()
+
+        self.assertEqual(snapshot["latest"]["prompt_tokens"], 4)
+        self.assertEqual(snapshot["latest"]["total_tokens"], 10)
+        self.assertEqual(snapshot["totals"]["total_tokens"], 25)
+        self.assertEqual(len(snapshot["samples"]), 2)
+        self.assertIsInstance(snapshot["session_started_at"], int)
+
+    def test_records_native_ollama_token_fields(self):
+        m = make_manager()
+
+        recorded = m.record_token_usage_from_response({
+            "prompt_eval_count": 11,
+            "eval_count": 7,
+        })
+
+        self.assertTrue(recorded)
+        self.assertEqual(m.get_token_usage().total_tokens, 18)
+
+    def test_records_compatible_nested_usage_fields(self):
+        m = make_manager()
+
+        recorded = m.record_token_usage_from_response({
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+            },
+        })
+
+        self.assertTrue(recorded)
+        self.assertEqual(m.get_token_usage().total_tokens, 9)
+
 class TestStreamChat(unittest.TestCase):
     """_stream_chat() and stream_chat_generator()"""
 
@@ -283,6 +349,21 @@ class TestStreamChat(unittest.TestCase):
             result = m._stream_chat({"model": "m", "messages": [], "stream": True})
         self.assertIn("message", result)
         self.assertIn("Hello world", result["message"]["content"])
+
+    def test_stream_chat_records_final_native_token_counts(self):
+        m = make_manager()
+        chunk_lines = [
+            b'{"message": {"content": "Hello"}, "done": false}',
+            b'{"message": {"content": ""}, "done": true, "prompt_eval_count": 6, "eval_count": 2}',
+        ]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.iter_lines = MagicMock(return_value=chunk_lines)
+
+        with patch.object(m._session, "post", return_value=resp):
+            m._stream_chat({"model": "m", "messages": [], "stream": True})
+
+        self.assertEqual(m.get_token_usage().total_tokens, 8)
 
     def test_stream_chat_connection_error(self):
         """_stream_chat returns error dict on connection failure"""
@@ -306,6 +387,21 @@ class TestStreamChat(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], ("Hi", False))
         self.assertEqual(results[1], ("!", True))
+
+    def test_stream_chat_generator_records_final_native_token_counts(self):
+        m = make_manager()
+        chunk_lines = [
+            b'{"message": {"content": "Hi"}, "done": false}',
+            b'{"message": {"content": ""}, "done": true, "prompt_eval_count": 9, "eval_count": 4}',
+        ]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.iter_lines = MagicMock(return_value=chunk_lines)
+
+        with patch.object(m._session, "post", return_value=resp):
+            list(m.stream_chat_generator("m", []))
+
+        self.assertEqual(m.get_token_usage().total_tokens, 13)
 
     def test_stream_chat_generator_connection_error(self):
         """stream_chat_generator yields error tuple on connection failure"""

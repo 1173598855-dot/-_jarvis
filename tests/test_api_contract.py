@@ -1,0 +1,2209 @@
+"""Cross-implementation checks for the shared Core API contract."""
+
+import json
+import importlib.util
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from contextlib import closing
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from threading import Thread
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).parent.parent
+SRC = ROOT / "src"
+CONTRACT_PATH = ROOT / "contracts" / "core-api.openapi.json"
+sys.path.insert(0, str(SRC))
+
+
+def _free_port():
+    with closing(socket.socket()) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _load_httpserver_module():
+    spec = importlib.util.spec_from_file_location(
+        "jarvis_contract_httpserver",
+        SRC / "main.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _get_json(url, timeout=5):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, json.load(error)
+
+
+def _get_sse_payloads(url, timeout=5):
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "text/event-stream"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payloads = []
+        while True:
+            raw_line = response.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line.removeprefix("data:").strip()
+            payloads.append(payload)
+            if payload == "[DONE]":
+                break
+        return response.status, payloads
+
+
+def _post_sse_payloads(url, payload, timeout=5):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payloads = []
+            while True:
+                raw_line = response.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                payloads.append(line.removeprefix("data:").strip())
+                if payloads[-1] == "[DONE]":
+                    break
+            return response.status, payloads
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, []
+
+
+def _post_json(url, payload, timeout=5, headers=None):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, json.load(error)
+
+
+def _post_raw_json(url, payload, timeout=5):
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, json.load(error)
+
+
+def _post_raw_body(url, payload, timeout=5):
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, error.read().decode("utf-8")
+
+
+def _post_error_body(url, payload, timeout=5):
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, ""
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, error.read().decode("utf-8")
+
+
+def _wait_for_health(base_url, process=None):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("Express server exited before becoming healthy")
+        try:
+            status, _ = _get_json(f"{base_url}/api/health", timeout=1)
+            if status == 200:
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError(f"Server did not become healthy: {base_url}")
+
+
+def _resolve_schema(document, schema):
+    if "$ref" not in schema:
+        return schema
+    node = document
+    for part in schema["$ref"].removeprefix("#/").split("/"):
+        node = node[part]
+    return node
+
+
+def _assert_json_shape(test_case, document, schema, value, path="response"):
+    schema = _resolve_schema(document, schema)
+    expected_types = schema.get("type")
+    if isinstance(expected_types, str):
+        expected_types = [expected_types]
+
+    def matches_type(type_name):
+        checks = {
+            "null": lambda candidate: candidate is None,
+            "object": lambda candidate: isinstance(candidate, dict),
+            "array": lambda candidate: isinstance(candidate, list),
+            "string": lambda candidate: isinstance(candidate, str),
+            "number": lambda candidate: (
+                type(candidate) in {int, float}
+            ),
+            "integer": lambda candidate: type(candidate) is int,
+            "boolean": lambda candidate: type(candidate) is bool,
+        }
+        return type_name in checks and checks[type_name](value)
+
+    expected_type = None
+    if expected_types:
+        expected_type = next(
+            (type_name for type_name in expected_types if matches_type(type_name)),
+            None,
+        )
+        test_case.assertIsNotNone(
+            expected_type,
+            f"{path}: expected {expected_types}, got {type(value).__name__}",
+        )
+
+    if "const" in schema:
+        test_case.assertEqual(value, schema["const"], path)
+    if "enum" in schema:
+        test_case.assertIn(value, schema["enum"], path)
+    if "minimum" in schema:
+        test_case.assertGreaterEqual(value, schema["minimum"], path)
+    if "maximum" in schema:
+        test_case.assertLessEqual(value, schema["maximum"], path)
+    if "minLength" in schema:
+        test_case.assertGreaterEqual(len(value), schema["minLength"], path)
+    if "pattern" in schema:
+        test_case.assertIsNotNone(re.search(schema["pattern"], value), path)
+
+    if value is None:
+        return
+    if expected_type == "object":
+        for key in schema.get("required", []):
+            test_case.assertIn(key, value, f"{path}.{key}")
+        for key, child_schema in schema.get("properties", {}).items():
+            if key in value:
+                _assert_json_shape(test_case, document, child_schema, value[key], f"{path}.{key}")
+    if expected_type == "array" and "items" in schema:
+        for index, item in enumerate(value):
+            _assert_json_shape(
+                test_case,
+                document,
+                schema["items"],
+                item,
+                f"{path}[{index}]",
+            )
+
+
+def _assert_contract_document(test_case, document):
+    test_case.assertRegex(document.get("openapi", ""), r"^3\.1\.")
+    test_case.assertIsInstance(document.get("info"), dict)
+    test_case.assertIsInstance(document.get("paths"), dict)
+    test_case.assertIsInstance(document.get("components", {}).get("schemas"), dict)
+
+    def visit(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                resolved = _resolve_schema(document, node)
+                test_case.assertIsInstance(resolved, dict)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(document)
+
+
+class _OllamaFixtureHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        pass
+
+    def do_GET(self):
+        responses = {
+            "/api/version": {"version": "0.9.0-test"},
+            "/api/tags": {
+                "models": [{
+                    "name": "fixture-model:latest",
+                    "size": 123,
+                    "digest": "fixture-digest",
+                    "modified_at": "2026-07-12T00:00:00Z",
+                    "details": {},
+                }],
+            },
+            "/api/ps": {"models": []},
+        }
+        payload = responses.get(self.path)
+        if payload is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path != "/api/chat":
+            self.send_response(404)
+            self.end_headers()
+            return
+        content_length = int(self.headers.get("Content-Length", 0))
+        request = json.loads(self.rfile.read(content_length) or b"{}")
+        if request.get("model") == "fixture-error":
+            body = json.dumps({"error": "fixture upstream failure"}).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if request.get("model") == "fixture-invalid":
+            body = json.dumps({
+                "message": {"content": "incomplete response"},
+                "done": True,
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if request.get("stream"):
+            frames = [
+                {
+                    "model": "fixture-model:latest",
+                    "message": {"role": "assistant", "content": "OK"},
+                    "done": False,
+                },
+                {
+                    "model": "fixture-model:latest",
+                    "done": True,
+                    "prompt_eval_count": 10,
+                    "eval_count": 7,
+                },
+            ]
+            body = "\n".join(json.dumps(frame) for frame in frames).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        payload = {
+            "model": "fixture-model:latest",
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+            "prompt_eval_count": 10,
+            "eval_count": 7,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TestSharedApiContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+
+    def test_contract_is_openapi_31_document(self):
+        _assert_contract_document(self, self.contract)
+        self.assertEqual(self.contract["info"]["version"], "1.11.0")
+
+    def test_express_api_fallback_is_documented(self):
+        fallback = self.contract["x-jarvis-api-fallback"]
+        self.assertEqual(fallback["status"], 404)
+        self.assertEqual(fallback["error_code"], "API_NOT_FOUND")
+        self.assertEqual(
+            fallback["response_schema"],
+            {"$ref": "#/components/schemas/ErrorResponse"},
+        )
+
+    def test_declared_json_error_responses_use_error_response_schema(self):
+        for path, operations in self.contract["paths"].items():
+            for method, operation in operations.items():
+                if method.startswith("x-"):
+                    continue
+                for status, response in operation.get("responses", {}).items():
+                    if status[0] not in "45":
+                        continue
+                    content = response.get("content", {}).get("application/json")
+                    if content is None:
+                        continue
+                    self.assertEqual(
+                        content["schema"],
+                        {"$ref": "#/components/schemas/ErrorResponse"},
+                        f"{method.upper()} {path} {status}",
+                    )
+
+    def test_proxy_error_responses_are_declared(self):
+        expected = {
+            ("/api/ollama/status", "get"): {"502", "503"},
+            ("/api/ollama/models", "get"): {"502", "503"},
+            ("/api/system/stats", "get"): {"500"},
+            ("/api/plugins", "get"): {"502", "503"},
+            ("/api/memory/entries", "get"): {"502", "503"},
+            ("/api/events", "get"): {"502", "503"},
+            ("/api/orchestrator/agents", "get"): {"502", "503"},
+            ("/api/orchestrator/history", "get"): {"400", "502", "503"},
+            ("/api/orchestrator/dispatch", "post"): {"413", "502", "503"},
+            ("/api/terminal/execute", "post"): {"502", "503"},
+        }
+        for (path, method), statuses in expected.items():
+            responses = self.contract["paths"][path][method]["responses"]
+            self.assertTrue(statuses.issubset(responses), f"{method} {path}")
+
+    def test_schema_validation_enforces_const_minimum_and_strict_integer(self):
+        schema = {
+            "type": "object",
+            "required": ["status", "count"],
+            "properties": {
+                "status": {"type": "string", "const": "healthy"},
+                "count": {"type": "integer", "minimum": 0},
+            },
+        }
+        with self.assertRaises(AssertionError):
+            _assert_json_shape(self, self.contract, schema, {
+                "status": "broken",
+                "count": 0,
+            })
+        with self.assertRaises(AssertionError):
+            _assert_json_shape(self, self.contract, schema, {
+                "status": "healthy",
+                "count": -1,
+            })
+        with self.assertRaises(AssertionError):
+            _assert_json_shape(self, self.contract, schema, {
+                "status": "healthy",
+                "count": True,
+            })
+
+        maximum_schema = {
+            "type": "object",
+            "required": ["priority"],
+            "properties": {
+                "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+            },
+        }
+        _assert_json_shape(
+            self,
+            self.contract,
+            maximum_schema,
+            {"priority": 3},
+        )
+        with self.assertRaises(AssertionError):
+            _assert_json_shape(
+                self,
+                self.contract,
+                maximum_schema,
+                {"priority": 4},
+            )
+
+    def test_schema_validation_accepts_any_matching_union_type(self):
+        schema = {"type": ["number", "string", "null"]}
+        _assert_json_shape(self, self.contract, schema, "123")
+
+    def test_schema_validation_enforces_pattern(self):
+        schema = {"type": "string", "pattern": r"\S"}
+        _assert_json_shape(self, self.contract, schema, "analyzer")
+        with self.assertRaises(AssertionError):
+            _assert_json_shape(self, self.contract, schema, " \t")
+
+    def test_stable_shared_paths_are_declared(self):
+        self.assertIn("get", self.contract["paths"]["/api/health"])
+        self.assertIn("get", self.contract["paths"]["/api/system/stats"])
+        self.assertIn("get", self.contract["paths"]["/api/ollama/token-usage"])
+        self.assertIn("get", self.contract["paths"]["/api/orchestrator/agents"])
+        self.assertIn("get", self.contract["paths"]["/api/orchestrator/history"])
+        self.assertIn("post", self.contract["paths"]["/api/orchestrator/dispatch"])
+
+    def test_shared_orchestrator_subset_has_error_contracts(self):
+        expected = {
+            ("/api/orchestrator/agents", "get"): {"200", "502", "503"},
+            ("/api/orchestrator/history", "get"): {"200", "400", "502", "503"},
+            ("/api/orchestrator/dispatch", "post"): {
+                "200",
+                "400",
+                "413",
+                "502",
+                "503",
+            },
+        }
+        for (path, method), statuses in expected.items():
+            self.assertTrue(
+                statuses.issubset(self.contract["paths"][path][method]["responses"]),
+                f"{method} {path}",
+            )
+        self.assertIn("get", self.contract["paths"]["/api/ollama/status"])
+        self.assertIn("get", self.contract["paths"]["/api/ollama/models"])
+        self.assertIn("post", self.contract["paths"]["/api/terminal/execute"])
+
+    def test_orchestrator_request_contract_declares_defaults_bounds_and_patterns(self):
+        history_parameters = self.contract["paths"][
+            "/api/orchestrator/history"
+        ]["get"]["parameters"]
+        limit_schema = next(
+            parameter["schema"]
+            for parameter in history_parameters
+            if parameter["name"] == "limit" and parameter["in"] == "query"
+        )
+        self.assertEqual(
+            limit_schema,
+            {"type": "integer", "default": 10, "minimum": 1, "maximum": 100},
+        )
+
+        operation = self.contract["paths"]["/api/orchestrator/dispatch"]["post"]
+        request_schema = operation["requestBody"]["content"]["application/json"][
+            "schema"
+        ]
+        properties = request_schema["properties"]
+        self.assertEqual(
+            properties["timeout"],
+            {"type": "integer", "default": 300, "minimum": 1, "maximum": 300},
+        )
+        self.assertEqual(
+            properties["priority"],
+            {"type": "integer", "default": 1, "minimum": 0, "maximum": 3},
+        )
+        for field in ("agent_name", "prompt"):
+            self.assertIn("pattern", properties[field], field)
+            _assert_json_shape(
+                self,
+                self.contract,
+                properties[field],
+                "non-blank",
+                field,
+            )
+            with self.assertRaises(AssertionError, msg=field):
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    properties[field],
+                    " \t\n",
+                    field,
+                )
+
+        self.assertEqual(
+            operation["responses"]["413"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/ErrorResponse"},
+        )
+
+    def test_terminal_access_failures_are_declared(self):
+        responses = self.contract["paths"]["/api/terminal/execute"]["post"][
+            "responses"
+        ]
+        for status in ("401", "403"):
+            schema = responses[status]["content"]["application/json"]["schema"]
+            _assert_json_shape(
+                self,
+                self.contract,
+                schema,
+                {"error": {"code": "TERMINAL_DISABLED", "message": "disabled"}},
+                status,
+            )
+
+    def test_terminal_execution_success_is_declared(self):
+        responses = self.contract["paths"]["/api/terminal/execute"]["post"][
+            "responses"
+        ]
+        schema = responses["200"]["content"]["application/json"]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            schema,
+            {
+                "command_id": "api-contract",
+                "exit_code": 0,
+                "stdout": "capability-contract\n",
+                "stderr": "",
+                "duration": 0.01,
+                "success": True,
+                "risk_level": "safe",
+                "timestamp": "2026-07-12T00:00:00",
+            },
+            "200",
+        )
+
+    def test_stream_contract_is_declared(self):
+        operation = self.contract["paths"]["/api/ollama/chat/stream"]["get"]
+        stream_schema = operation["responses"]["200"]["content"][
+            "text/event-stream"
+        ]["schema"]
+        self.assertEqual(stream_schema["type"], "string")
+
+        _assert_json_shape(
+            self,
+            self.contract,
+            {"$ref": "#/components/schemas/SseContentFrame"},
+            {
+                "model": "fixture-model:latest",
+                "content": "OK",
+                "done": False,
+                "prompt_eval_count": 10,
+                "eval_count": 7,
+            },
+            "stream content",
+        )
+        _assert_json_shape(
+            self,
+            self.contract,
+            {"$ref": "#/components/schemas/SseErrorFrame"},
+            {
+                "error": {
+                    "code": "OLLAMA_STREAM_ERROR",
+                    "message": "fixture failure",
+                }
+            },
+            "stream error",
+        )
+
+        samples = {
+            "/api/plugins": {
+                "plugins": [{
+                    "id": "event-logger",
+                    "name": "Event Logger",
+                    "version": "1.0.0",
+                    "status": "enabled",
+                    "permissions": ["events"],
+                }],
+            },
+            "/api/memory/entries": {
+                "entries": [{
+                    "id": "memory-1",
+                    "type": "project",
+                    "title": "Contract fixture",
+                    "content": "Stable memory response",
+                    "created_at": "2026-07-12T00:00:00",
+                    "tags": ["contract"],
+                    "access_count": 0,
+                }],
+            },
+            "/api/events": {
+                "events": [{
+                    "type": "plugin.loaded",
+                    "payload": "event-logger",
+                    "timestamp": "2026-07-12T00:00:00",
+                    "source": "plugin-manager",
+                }],
+            },
+        }
+        for path, sample in samples.items():
+            self.assertIn(path, self.contract["paths"])
+            self.assertIn("get", self.contract["paths"][path])
+            schema = self.contract["paths"][path]["get"]["responses"]["200"][
+                "content"
+            ]["application/json"]["schema"]
+            _assert_json_shape(self, self.contract, schema, sample, path)
+
+    def test_post_stream_contract_is_declared(self):
+        operation = self.contract["paths"]["/api/ollama/chat/stream"]["post"]
+        request_schema = operation["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            request_schema,
+            {
+                "model": "fixture-model:latest",
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            "POST stream request",
+        )
+
+        responses = operation["responses"]
+        self.assertIn("text/event-stream", responses["200"]["content"])
+        error_schema = responses["400"]["content"]["application/json"]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            error_schema,
+            {"error": {"code": "INVALID_REQUEST", "message": "invalid"}},
+            "POST stream invalid request",
+        )
+
+    def test_post_stream_body_limit_is_declared(self):
+        responses = self.contract["paths"]["/api/ollama/chat/stream"][
+            "post"
+        ]["responses"]
+        schema = responses["413"]["content"]["application/json"]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            schema,
+            {
+                "error": {
+                    "code": "REQUEST_BODY_TOO_LARGE",
+                    "message": "Request body exceeds the 32 KiB limit",
+                }
+            },
+            "POST stream body limit",
+        )
+
+    def test_nonstream_chat_contract_is_declared(self):
+        operation = self.contract["paths"]["/api/ollama/chat"]["post"]
+        request_schema = operation["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            request_schema,
+            {
+                "model": "fixture-model:latest",
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": False,
+            },
+            "non-stream chat request",
+        )
+
+        success_schema = operation["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            success_schema,
+            {
+                "model": "fixture-model:latest",
+                "message": {"role": "assistant", "content": "OK"},
+                "done": True,
+                "prompt_eval_count": 10,
+                "eval_count": 7,
+            },
+            "non-stream chat response",
+        )
+
+        for status in ("400", "413", "502"):
+            schema = operation["responses"][status]["content"][
+                "application/json"
+            ]["schema"]
+            _assert_json_shape(
+                self,
+                self.contract,
+                schema,
+                {
+                    "error": {
+                        "code": "OLLAMA_UPSTREAM_ERROR",
+                        "message": "Ollama chat request failed",
+                    }
+                },
+                f"non-stream chat {status}",
+            )
+
+    def test_fastapi_routes_cover_contract(self):
+        import main_fastapi
+
+        routes = {
+            (method.lower(), route.path)
+            for route in main_fastapi.app.routes
+            for method in getattr(route, "methods", set())
+        }
+        for path, operations in self.contract["paths"].items():
+            for method in operations:
+                self.assertIn((method, path), routes)
+
+    def test_all_implementations_match_stable_response_schemas(self):
+        import main_fastapi
+        from fastapi.testclient import TestClient
+
+        httpserver_module = _load_httpserver_module()
+        http_server = HTTPServer(
+            ("127.0.0.1", 0),
+            httpserver_module.JARVISHandler,
+        )
+        http_thread = Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+
+        ollama_server = HTTPServer(("127.0.0.1", 0), _OllamaFixtureHandler)
+        ollama_thread = Thread(target=ollama_server.serve_forever, daemon=True)
+        ollama_thread.start()
+        ollama_url = f"http://127.0.0.1:{ollama_server.server_port}"
+        original_http_ollama_url = httpserver_module.state.ollama.base_url
+        fastapi_state = main_fastapi.AppState()
+        fastapi_app = main_fastapi.create_app(fastapi_state)
+        httpserver_module.state.ollama.base_url = ollama_url
+        fastapi_state.ollama.base_url = ollama_url
+
+        observed_dispatch_options = []
+
+        def fixture_handler(_task):
+            observed_dispatch_options.append((_task.timeout, _task.priority))
+            return "fixture result"
+
+        httpserver_module.state.orchestrator.register(
+            "analyzer",
+            fixture_handler,
+            capabilities=["analysis"],
+        )
+        fastapi_state.orchestrator.register(
+            "analyzer",
+            fixture_handler,
+            capabilities=["analysis"],
+        )
+
+        express_port = _free_port()
+        express_env = {
+            **os.environ,
+            "PORT": str(express_port),
+            "JARVIS_HOST": "127.0.0.1",
+            "OLLAMA_HOST": "127.0.0.1",
+            "OLLAMA_PORT": str(ollama_server.server_port),
+        }
+        core_url = f"http://127.0.0.1:{http_server.server_port}"
+        express_env["JARVIS_CORE_API_URL"] = core_url
+        express_env["JARVIS_TERMINAL_ENABLED"] = "true"
+        express_env["JARVIS_TERMINAL_TOKEN"] = "contract-terminal-token"
+        express = subprocess.Popen(
+            ["node", "server.js"],
+            cwd=ROOT / "frontend",
+            env=express_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+        try:
+            express_url = f"http://127.0.0.1:{express_port}"
+            _wait_for_health(express_url, express)
+            clients = {
+                "python-http": lambda path: _get_json(
+                    f"{core_url}{path}"
+                ),
+                "express": lambda path: _get_json(f"{express_url}{path}"),
+            }
+
+            with TestClient(fastapi_app) as fastapi_client:
+                for path in (
+                    "/api/health",
+                    "/api/system/stats",
+                    "/api/ollama/status",
+                    "/api/ollama/models",
+                    "/api/ollama/token-usage",
+                    "/api/plugins",
+                    "/api/memory/entries",
+                    "/api/events",
+                    "/api/orchestrator/agents",
+                    "/api/orchestrator/history",
+                ):
+                    self.assertIn(path, self.contract["paths"])
+                    operation = self.contract["paths"][path]["get"]
+                    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+                    for name, request in clients.items():
+                        status, body = request(path)
+                        self.assertEqual(status, 200, f"{name} {path}: {body}")
+                        _assert_json_shape(self, self.contract, schema, body, f"{name} {path}")
+
+                    response = fastapi_client.get(path)
+                    self.assertEqual(response.status_code, 200, "fastapi")
+                    _assert_json_shape(
+                        self, self.contract, schema, response.json(), "fastapi"
+                    )
+
+                roles_list_schema = self.contract["paths"]["/api/roles"][
+                    "get"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                for name, request in clients.items():
+                    status, body = request("/api/roles")
+                    self.assertEqual(status, 200, f"{name} /api/roles: {body}")
+                    _assert_json_shape(
+                        self, self.contract, roles_list_schema, body, f"{name} roles"
+                    )
+                    self.assertGreater(body["count"], 0, name)
+                response = fastapi_client.get("/api/roles")
+                self.assertEqual(response.status_code, 200, "fastapi roles")
+                _assert_json_shape(
+                    self, self.contract, roles_list_schema, response.json(), "fastapi"
+                )
+
+                role_schema = self.contract["paths"]["/api/roles/{role_name}"][
+                    "get"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                for name, request in clients.items():
+                    status, body = request("/api/roles/engineer")
+                    self.assertEqual(status, 200, f"{name} role: {body}")
+                    _assert_json_shape(
+                        self, self.contract, role_schema, body, f"{name} role"
+                    )
+                    self.assertEqual(body["role"]["name"], "engineer", name)
+                response = fastapi_client.get("/api/roles/engineer")
+                self.assertEqual(response.status_code, 200, "fastapi role")
+                _assert_json_shape(
+                    self, self.contract, role_schema, response.json(), "fastapi"
+                )
+
+                role_not_found_schema = self.contract["paths"][
+                    "/api/roles/{role_name}"
+                ]["get"]["responses"]["404"]["content"]["application/json"]["schema"]
+                for name, request in clients.items():
+                    status, body = request("/api/roles/.test-missing-role")
+                    self.assertEqual(status, 404, f"{name} missing role: {body}")
+                    _assert_json_shape(
+                        self, self.contract, role_not_found_schema, body, f"{name} 404"
+                    )
+                    self.assertEqual(body["error"]["code"], "ROLE_NOT_FOUND", name)
+                response = fastapi_client.get("/api/roles/.test-missing-role")
+                self.assertEqual(response.status_code, 404, "fastapi missing role")
+                self.assertEqual(
+                    response.json()["error"]["code"], "ROLE_NOT_FOUND", "fastapi"
+                )
+
+                role_dispatch_schema = self.contract["paths"][
+                    "/api/roles/dispatch"
+                ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+                role_dispatch_payload = {
+                    "role_name": "engineer",
+                    "prompt": "write a unit test",
+                    "timeout": 30,
+                }
+                role_dispatch_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/dispatch",
+                        role_dispatch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/dispatch",
+                        role_dispatch_payload,
+                    ),
+                }
+                for name, request in role_dispatch_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, f"{name} role dispatch: {body}")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        role_dispatch_schema,
+                        body,
+                        f"{name} role dispatch",
+                    )
+                    self.assertEqual(body["role_name"], "engineer", name)
+                    self.assertEqual(body["status"], "success", name)
+                    self.assertEqual(body["message"], "OK", name)
+                response = fastapi_client.post(
+                    "/api/roles/dispatch",
+                    json=role_dispatch_payload,
+                )
+                self.assertEqual(response.status_code, 200, "fastapi role dispatch")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    role_dispatch_schema,
+                    response.json(),
+                    "fastapi role dispatch",
+                )
+                self.assertEqual(response.json()["status"], "success")
+                self.assertEqual(response.json()["message"], "OK")
+
+                missing_role_dispatch = {"prompt": "no role name"}
+                role_dispatch_400_schema = self.contract["paths"][
+                    "/api/roles/dispatch"
+                ]["post"]["responses"]["400"]["content"]["application/json"]["schema"]
+                for name, request in {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/dispatch",
+                        missing_role_dispatch,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/dispatch",
+                        missing_role_dispatch,
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, f"{name} role dispatch 400: {body}")
+                    _assert_json_shape(
+                        self, self.contract, role_dispatch_400_schema, body, name
+                    )
+                    self.assertEqual(body["error"]["code"], "INVALID_REQUEST", name)
+                response = fastapi_client.post(
+                    "/api/roles/dispatch",
+                    json=missing_role_dispatch,
+                )
+                self.assertEqual(response.status_code, 400, "fastapi role dispatch 400")
+                self.assertEqual(
+                    response.json()["error"]["code"], "INVALID_REQUEST", "fastapi"
+                )
+
+                unknown_role_dispatch = {
+                    "role_name": ".test-missing-role",
+                    "prompt": "task",
+                }
+                role_dispatch_404_schema = self.contract["paths"][
+                    "/api/roles/dispatch"
+                ]["post"]["responses"]["404"]["content"]["application/json"]["schema"]
+                for name, request in {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/dispatch",
+                        unknown_role_dispatch,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/dispatch",
+                        unknown_role_dispatch,
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 404, f"{name} role dispatch 404: {body}")
+                    _assert_json_shape(
+                        self, self.contract, role_dispatch_404_schema, body, name
+                    )
+                    self.assertEqual(body["error"]["code"], "ROLE_NOT_FOUND", name)
+                response = fastapi_client.post(
+                    "/api/roles/dispatch",
+                    json=unknown_role_dispatch,
+                )
+                self.assertEqual(response.status_code, 404, "fastapi role dispatch 404")
+                self.assertEqual(
+                    response.json()["error"]["code"], "ROLE_NOT_FOUND", "fastapi"
+                )
+
+                cap_dispatch_schema = self.contract["paths"][
+                    "/api/roles/dispatch_by_cap"
+                ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+                cap_dispatch_payload = {"capability": "coding", "prompt": "fix bug"}
+                for name, request in {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/dispatch_by_cap",
+                        cap_dispatch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/dispatch_by_cap",
+                        cap_dispatch_payload,
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, f"{name} cap dispatch: {body}")
+                    _assert_json_shape(
+                        self, self.contract, cap_dispatch_schema, body, name
+                    )
+                response = fastapi_client.post(
+                    "/api/roles/dispatch_by_cap",
+                    json=cap_dispatch_payload,
+                )
+                self.assertEqual(response.status_code, 200, "fastapi cap dispatch")
+                _assert_json_shape(
+                    self, self.contract, cap_dispatch_schema, response.json(), "fastapi"
+                )
+
+                unknown_cap_payload = {
+                    "capability": ".test-missing-cap",
+                    "prompt": "task",
+                }
+                cap_dispatch_404_schema = self.contract["paths"][
+                    "/api/roles/dispatch_by_cap"
+                ]["post"]["responses"]["404"]["content"]["application/json"]["schema"]
+                for name, request in {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/dispatch_by_cap",
+                        unknown_cap_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/dispatch_by_cap",
+                        unknown_cap_payload,
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 404, f"{name} cap dispatch 404: {body}")
+                    _assert_json_shape(
+                        self, self.contract, cap_dispatch_404_schema, body, name
+                    )
+                    self.assertEqual(
+                        body["error"]["code"], "CAPABILITY_NOT_FOUND", name
+                    )
+                response = fastapi_client.post(
+                    "/api/roles/dispatch_by_cap",
+                    json=unknown_cap_payload,
+                )
+                self.assertEqual(response.status_code, 404, "fastapi cap dispatch 404")
+                self.assertEqual(
+                    response.json()["error"]["code"], "CAPABILITY_NOT_FOUND", "fastapi"
+                )
+
+                batch_schema = self.contract["paths"][
+                    "/api/roles/batch_dispatch"
+                ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+                batch_payload = {
+                    "tasks": [
+                        {"role": "engineer", "prompt": "task 1"},
+                        {"capability": "code_review", "prompt": "task 2"},
+                    ]
+                }
+                for name, request in {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/roles/batch_dispatch",
+                        batch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/roles/batch_dispatch",
+                        batch_payload,
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, f"{name} batch dispatch: {body}")
+                    _assert_json_shape(
+                        self, self.contract, batch_schema, body, name
+                    )
+                    self.assertEqual(body["count"], 2, name)
+                response = fastapi_client.post(
+                    "/api/roles/batch_dispatch",
+                    json=batch_payload,
+                )
+                self.assertEqual(response.status_code, 200, "fastapi batch dispatch")
+                _assert_json_shape(
+                    self, self.contract, batch_schema, response.json(), "fastapi"
+                )
+
+                dispatch_payload = {
+                    "agent_name": "analyzer",
+                    "prompt": "ping",
+                    "timeout": 45,
+                    "priority": 3,
+                }
+                dispatch_schema = self.contract["paths"][
+                    "/api/orchestrator/dispatch"
+                ]["post"]["responses"]["200"]["content"][
+                    "application/json"
+                ]["schema"]
+                dispatch_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/orchestrator/dispatch",
+                        dispatch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/orchestrator/dispatch",
+                        dispatch_payload,
+                    ),
+                }
+                for name, request in dispatch_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, f"{name} dispatch: {body}")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        dispatch_schema,
+                        body,
+                        f"{name} dispatch",
+                    )
+                    self.assertEqual(body["agent_name"], "analyzer", name)
+                    self.assertEqual(body["result"], "fixture result", name)
+                    self.assertEqual(body["status"], "success", name)
+
+                fastapi_dispatch = fastapi_client.post(
+                    "/api/orchestrator/dispatch",
+                    json=dispatch_payload,
+                )
+                self.assertEqual(fastapi_dispatch.status_code, 200, "fastapi dispatch")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    dispatch_schema,
+                    fastapi_dispatch.json(),
+                    "fastapi dispatch",
+                )
+                self.assertEqual(fastapi_dispatch.json()["agent_name"], "analyzer")
+                self.assertEqual(fastapi_dispatch.json()["result"], "fixture result")
+                self.assertEqual(fastapi_dispatch.json()["status"], "success")
+                self.assertEqual(
+                    observed_dispatch_options,
+                    [(45, 3), (45, 3), (45, 3)],
+                )
+
+                default_dispatch_payload = {
+                    "agent_name": "analyzer",
+                    "prompt": "default dispatch options",
+                }
+                default_dispatch_requests = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/orchestrator/dispatch",
+                        default_dispatch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/orchestrator/dispatch",
+                        default_dispatch_payload,
+                    ),
+                }
+                for name, request in default_dispatch_requests.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, f"{name} default dispatch: {body}")
+                fastapi_default_dispatch = fastapi_client.post(
+                    "/api/orchestrator/dispatch",
+                    json=default_dispatch_payload,
+                )
+                self.assertEqual(
+                    fastapi_default_dispatch.status_code,
+                    200,
+                    f"fastapi default dispatch: {fastapi_default_dispatch.text}",
+                )
+                self.assertEqual(
+                    observed_dispatch_options[-3:],
+                    [(300, 1), (300, 1), (300, 1)],
+                )
+
+                dispatch_error_schema = self.contract["paths"][
+                    "/api/orchestrator/dispatch"
+                ]["post"]["responses"]["400"]["content"][
+                    "application/json"
+                ]["schema"]
+                invalid_dispatch_payload = {"agent_name": "analyzer"}
+                invalid_dispatch_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/orchestrator/dispatch",
+                        invalid_dispatch_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/orchestrator/dispatch",
+                        invalid_dispatch_payload,
+                    ),
+                }
+                for name, request in invalid_dispatch_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, f"{name} invalid dispatch")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        dispatch_error_schema,
+                        body,
+                        f"{name} invalid dispatch",
+                    )
+
+                invalid_shape_payloads = [
+                    [],
+                    "not-an-object",
+                    {"agent_name": 1, "prompt": "ping"},
+                    {"agent_name": "analyzer", "prompt": 1},
+                    {"agent_name": "   ", "prompt": "ping"},
+                    {"agent_name": "analyzer", "prompt": "\t"},
+                    {"agent_name": "analyzer", "prompt": "ping", "timeout": 0},
+                    {"agent_name": "analyzer", "prompt": "ping", "timeout": 301},
+                    {"agent_name": "analyzer", "prompt": "ping", "timeout": True},
+                    {"agent_name": "analyzer", "prompt": "ping", "priority": -1},
+                    {"agent_name": "analyzer", "prompt": "ping", "priority": 4},
+                    {"agent_name": "analyzer", "prompt": "ping", "priority": True},
+                ]
+                for invalid_payload in invalid_shape_payloads:
+                    for name, request in {
+                        "python-http": lambda payload=invalid_payload: _post_json(
+                            f"{core_url}/api/orchestrator/dispatch",
+                            payload,
+                        ),
+                        "express": lambda payload=invalid_payload: _post_json(
+                            f"{express_url}/api/orchestrator/dispatch",
+                            payload,
+                        ),
+                    }.items():
+                        status, body = request()
+                        self.assertEqual(
+                            status,
+                            400,
+                            f"{name} invalid dispatch shape {invalid_payload!r}",
+                        )
+                        _assert_json_shape(
+                            self,
+                            self.contract,
+                            dispatch_error_schema,
+                            body,
+                            f"{name} invalid dispatch shape",
+                        )
+
+                    fastapi_invalid_shape = fastapi_client.post(
+                        "/api/orchestrator/dispatch",
+                        json=invalid_payload,
+                    )
+                    self.assertEqual(
+                        fastapi_invalid_shape.status_code,
+                        400,
+                        f"fastapi invalid dispatch shape {invalid_payload!r}",
+                    )
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        dispatch_error_schema,
+                        fastapi_invalid_shape.json(),
+                        "fastapi invalid dispatch shape",
+                    )
+
+                unpaired_surrogate_bodies = [
+                    b'{"agent_name":"\\ud800","prompt":"ping"}',
+                    b'{"agent_name":"analyzer","prompt":"\\udfff"}',
+                ]
+                for raw_payload in unpaired_surrogate_bodies:
+                    for name, request in {
+                        "python-http": lambda payload=raw_payload: _post_raw_json(
+                            f"{core_url}/api/orchestrator/dispatch",
+                            payload,
+                        ),
+                        "express": lambda payload=raw_payload: _post_raw_json(
+                            f"{express_url}/api/orchestrator/dispatch",
+                            payload,
+                        ),
+                    }.items():
+                        status, body = request()
+                        self.assertEqual(status, 400, f"{name} unpaired surrogate")
+                        _assert_json_shape(
+                            self,
+                            self.contract,
+                            dispatch_error_schema,
+                            body,
+                            f"{name} unpaired surrogate",
+                        )
+
+                    fastapi_unpaired_surrogate = fastapi_client.post(
+                        "/api/orchestrator/dispatch",
+                        content=raw_payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(
+                        fastapi_unpaired_surrogate.status_code,
+                        400,
+                        "fastapi unpaired surrogate",
+                    )
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        dispatch_error_schema,
+                        fastapi_unpaired_surrogate.json(),
+                        "fastapi unpaired surrogate",
+                    )
+
+                oversized_dispatch_body = json.dumps({
+                    "agent_name": "analyzer",
+                    "prompt": "x" * (32 * 1024),
+                }).encode("utf-8")
+                self.assertGreater(len(oversized_dispatch_body), 32 * 1024)
+                dispatch_body_limit_schema = self.contract["paths"][
+                    "/api/orchestrator/dispatch"
+                ]["post"]["responses"]["413"]["content"]["application/json"][
+                    "schema"
+                ]
+                oversized_dispatch_clients = {
+                    "python-http": lambda: _post_raw_json(
+                        f"{core_url}/api/orchestrator/dispatch",
+                        oversized_dispatch_body,
+                    ),
+                    "express": lambda: _post_raw_json(
+                        f"{express_url}/api/orchestrator/dispatch",
+                        oversized_dispatch_body,
+                    ),
+                }
+                for name, request in oversized_dispatch_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 413, f"{name} oversized dispatch")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        dispatch_body_limit_schema,
+                        body,
+                        f"{name} oversized dispatch",
+                    )
+                    self.assertEqual(
+                        body["error"]["code"],
+                        "REQUEST_BODY_TOO_LARGE",
+                        name,
+                    )
+
+                fastapi_oversized_dispatch = fastapi_client.post(
+                    "/api/orchestrator/dispatch",
+                    content=oversized_dispatch_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(
+                    fastapi_oversized_dispatch.status_code,
+                    413,
+                    "fastapi oversized dispatch",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    dispatch_body_limit_schema,
+                    fastapi_oversized_dispatch.json(),
+                    "fastapi oversized dispatch",
+                )
+                self.assertEqual(
+                    fastapi_oversized_dispatch.json()["error"]["code"],
+                    "REQUEST_BODY_TOO_LARGE",
+                    "fastapi oversized dispatch",
+                )
+
+                for name, request in {
+                    "python-http": lambda: _get_json(
+                        f"{core_url}/api/orchestrator/history?limit=abc"
+                    ),
+                    "express": lambda: _get_json(
+                        f"{express_url}/api/orchestrator/history?limit=abc"
+                    ),
+                }.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, f"{name} invalid history limit")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        self.contract["paths"]["/api/orchestrator/history"]["get"][
+                            "responses"
+                        ]["400"]["content"]["application/json"]["schema"],
+                        body,
+                        f"{name} invalid history limit",
+                    )
+
+                fastapi_invalid_history = fastapi_client.get(
+                    "/api/orchestrator/history?limit=abc"
+                )
+                self.assertEqual(fastapi_invalid_history.status_code, 400)
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    self.contract["paths"]["/api/orchestrator/history"]["get"][
+                        "responses"
+                    ]["400"]["content"]["application/json"]["schema"],
+                    fastapi_invalid_history.json(),
+                    "fastapi invalid history limit",
+                )
+
+                fastapi_invalid_dispatch = fastapi_client.post(
+                    "/api/orchestrator/dispatch",
+                    json=invalid_dispatch_payload,
+                )
+                self.assertEqual(
+                    fastapi_invalid_dispatch.status_code,
+                    400,
+                    "fastapi invalid dispatch",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    dispatch_error_schema,
+                    fastapi_invalid_dispatch.json(),
+                    "fastapi invalid dispatch",
+                )
+
+                chat_payload = {
+                    "model": "fixture-model:latest",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                }
+                chat_clients = {
+                    "python-http": lambda: _post_json(
+                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        chat_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/ollama/chat",
+                        chat_payload,
+                    ),
+                }
+                chat_success_schema = self.contract["paths"][
+                    "/api/ollama/chat"
+                ]["post"]["responses"]["200"]["content"][
+                    "application/json"
+                ]["schema"]
+                for name, request in chat_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 200, name)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        chat_success_schema,
+                        body,
+                        name,
+                    )
+                fastapi_response = fastapi_client.post(
+                    "/api/ollama/chat",
+                    json=chat_payload,
+                )
+                self.assertEqual(fastapi_response.status_code, 200, "fastapi")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    chat_success_schema,
+                    fastapi_response.json(),
+                    "fastapi",
+                )
+
+                chat_error_payload = {
+                    "model": "fixture-error",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                }
+                chat_error_schema = self.contract["paths"][
+                    "/api/ollama/chat"
+                ]["post"]["responses"]["502"]["content"][
+                    "application/json"
+                ]["schema"]
+                chat_error_clients = {
+                    "python-http": lambda: _post_json(
+                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        chat_error_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/ollama/chat",
+                        chat_error_payload,
+                    ),
+                }
+                for name, request in chat_error_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 502, name)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        chat_error_schema,
+                        body,
+                        name,
+                    )
+                    self.assertEqual(
+                        body["error"]["code"],
+                        "OLLAMA_UPSTREAM_ERROR",
+                        name,
+                    )
+                    self.assertEqual(
+                        body["error"]["message"],
+                        "Ollama chat request failed",
+                        name,
+                    )
+
+                fastapi_chat_error = fastapi_client.post(
+                    "/api/ollama/chat",
+                    json=chat_error_payload,
+                )
+                self.assertEqual(fastapi_chat_error.status_code, 502, "fastapi")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    chat_error_schema,
+                    fastapi_chat_error.json(),
+                    "fastapi",
+                )
+                self.assertEqual(
+                    fastapi_chat_error.json()["error"]["code"],
+                    "OLLAMA_UPSTREAM_ERROR",
+                    "fastapi",
+                )
+
+                invalid_chat_response_payload = {
+                    "model": "fixture-invalid",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                }
+                invalid_chat_response_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/ollama/chat",
+                        invalid_chat_response_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/ollama/chat",
+                        invalid_chat_response_payload,
+                    ),
+                }
+                for name, request in invalid_chat_response_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 502, name)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        chat_error_schema,
+                        body,
+                        name,
+                    )
+                    self.assertEqual(
+                        body,
+                        {
+                            "error": {
+                                "code": "OLLAMA_UPSTREAM_ERROR",
+                                "message": "Ollama chat request failed",
+                            }
+                        },
+                        name,
+                    )
+
+                fastapi_invalid_chat_response = fastapi_client.post(
+                    "/api/ollama/chat",
+                    json=invalid_chat_response_payload,
+                )
+                self.assertEqual(
+                    fastapi_invalid_chat_response.status_code,
+                    502,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    chat_error_schema,
+                    fastapi_invalid_chat_response.json(),
+                    "fastapi",
+                )
+                self.assertEqual(
+                    fastapi_invalid_chat_response.json(),
+                    {
+                        "error": {
+                            "code": "OLLAMA_UPSTREAM_ERROR",
+                            "message": "Ollama chat request failed",
+                        }
+                    },
+                )
+
+                stream_rejected_payload = {
+                    "model": "fixture-model:latest",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": True,
+                }
+                chat_invalid_schema = self.contract["paths"][
+                    "/api/ollama/chat"
+                ]["post"]["responses"]["400"]["content"][
+                    "application/json"
+                ]["schema"]
+                stream_rejected_clients = {
+                    "python-http": lambda: _post_error_body(
+                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        json.dumps(stream_rejected_payload).encode("utf-8"),
+                    ),
+                    "express": lambda: _post_error_body(
+                        f"{express_url}/api/ollama/chat",
+                        json.dumps(stream_rejected_payload).encode("utf-8"),
+                    ),
+                }
+                for name, request in stream_rejected_clients.items():
+                    status, raw_body = request()
+                    self.assertEqual(status, 400, name)
+                    body = json.loads(raw_body)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        chat_invalid_schema,
+                        body,
+                        name,
+                    )
+                    self.assertEqual(body["error"]["code"], "INVALID_REQUEST", name)
+
+                fastapi_stream_rejected = fastapi_client.post(
+                    "/api/ollama/chat",
+                    json=stream_rejected_payload,
+                )
+                self.assertEqual(
+                    fastapi_stream_rejected.status_code,
+                    400,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    chat_invalid_schema,
+                    fastapi_stream_rejected.json(),
+                    "fastapi",
+                )
+                self.assertEqual(
+                    fastapi_stream_rejected.json()["error"]["code"],
+                    "INVALID_REQUEST",
+                    "fastapi",
+                )
+
+                usage_requests = {
+                    **clients,
+                    "fastapi": lambda path: (
+                        fastapi_client.get(path).status_code,
+                        fastapi_client.get(path).json(),
+                    ),
+                }
+                expected_usage = {
+                    "python-http": (153, 9),
+                    "express": (17, 1),
+                    "fastapi": (85, 5),
+                }
+                for name, request in usage_requests.items():
+                    status, body = request("/api/ollama/token-usage")
+                    self.assertEqual(status, 200, name)
+                    expected_total, expected_samples = expected_usage[name]
+                    self.assertEqual(
+                        body["totals"]["total_tokens"], expected_total, name
+                    )
+                    self.assertEqual(len(body["samples"]), expected_samples, name)
+
+                stream_query = urllib.parse.urlencode({
+                    "model": "fixture-model:latest",
+                    "messages": json.dumps([{"role": "user", "content": "ping"}]),
+                })
+                stream_path = f"/api/ollama/chat/stream?{stream_query}"
+                stream_content_schema = {
+                    "$ref": "#/components/schemas/SseContentFrame"
+                }
+                stream_clients = {
+                    "python-http": lambda: _get_sse_payloads(
+                        f"{core_url}{stream_path}"
+                    ),
+                    "express": lambda: _get_sse_payloads(
+                        f"{express_url}{stream_path}"
+                    ),
+                }
+                for name, request in stream_clients.items():
+                    status, payloads = request()
+                    self.assertEqual(status, 200, name)
+                    self.assertEqual(payloads.count("[DONE]"), 1, name)
+                    frames = [
+                        json.loads(payload)
+                        for payload in payloads
+                        if payload != "[DONE]"
+                    ]
+                    self.assertEqual(
+                        sum(frame.get("done") is True for frame in frames),
+                        1,
+                        name,
+                    )
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        stream_content_schema,
+                        frames[0],
+                        name,
+                    )
+
+                fastapi_stream = fastapi_client.get(
+                    "/api/ollama/chat/stream",
+                    params={
+                        "model": "fixture-model:latest",
+                        "messages": json.dumps([{"role": "user", "content": "ping"}]),
+                    },
+                )
+                self.assertEqual(fastapi_stream.status_code, 200, "fastapi")
+                fastapi_payloads = [
+                    line.removeprefix("data:").strip()
+                    for event in fastapi_stream.text.replace("\r\n", "\n").split("\n\n")
+                    for line in event.splitlines()
+                    if line.startswith("data:")
+                ]
+                self.assertEqual(fastapi_payloads.count("[DONE]"), 1, "fastapi")
+                fastapi_frames = [
+                    json.loads(payload)
+                    for payload in fastapi_payloads
+                    if payload != "[DONE]"
+                ]
+                self.assertEqual(
+                    sum(frame.get("done") is True for frame in fastapi_frames),
+                    1,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    stream_content_schema,
+                    fastapi_frames[0],
+                    "fastapi",
+                )
+
+                stream_post_payload = {
+                    "model": "fixture-model:latest",
+                    "messages": [{"role": "user", "content": "ping"}],
+                }
+                post_stream_clients = {
+                    "python-http": lambda: _post_sse_payloads(
+                        f"{core_url}/api/ollama/chat/stream",
+                        stream_post_payload,
+                    ),
+                    "express": lambda: _post_sse_payloads(
+                        f"{express_url}/api/ollama/chat/stream",
+                        stream_post_payload,
+                    ),
+                }
+                for name, request in post_stream_clients.items():
+                    status, payloads = request()
+                    self.assertEqual(status, 200, name)
+                    self.assertEqual(payloads.count("[DONE]"), 1, name)
+                    frames = [
+                        json.loads(payload)
+                        for payload in payloads
+                        if payload != "[DONE]"
+                    ]
+                    self.assertEqual(
+                        sum(frame.get("done") is True for frame in frames),
+                        1,
+                        name,
+                    )
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        stream_content_schema,
+                        frames[0],
+                        name,
+                    )
+
+                fastapi_post_stream = fastapi_client.post(
+                    "/api/ollama/chat/stream",
+                    json=stream_post_payload,
+                )
+                self.assertEqual(
+                    fastapi_post_stream.status_code,
+                    200,
+                    "fastapi",
+                )
+                fastapi_post_payloads = [
+                    line.removeprefix("data:").strip()
+                    for event in fastapi_post_stream.text.replace("\r\n", "\n").split("\n\n")
+                    for line in event.splitlines()
+                    if line.startswith("data:")
+                ]
+                self.assertEqual(
+                    fastapi_post_payloads.count("[DONE]"),
+                    1,
+                    "fastapi",
+                )
+                fastapi_post_frames = [
+                    json.loads(payload)
+                    for payload in fastapi_post_payloads
+                    if payload != "[DONE]"
+                ]
+                self.assertEqual(
+                    sum(frame.get("done") is True for frame in fastapi_post_frames),
+                    1,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    stream_content_schema,
+                    fastapi_post_frames[0],
+                    "fastapi",
+                )
+
+                stream_post_error_schema = self.contract["paths"][
+                    "/api/ollama/chat/stream"
+                ]["post"]["responses"]["400"]["content"][
+                    "application/json"
+                ]["schema"]
+                invalid_post_stream_clients = {
+                    "python-http": lambda: _post_raw_body(
+                        f"{core_url}/api/ollama/chat/stream",
+                        b"[]",
+                    ),
+                    "express": lambda: _post_raw_body(
+                        f"{express_url}/api/ollama/chat/stream",
+                        b"[]",
+                    ),
+                }
+                for name, request in invalid_post_stream_clients.items():
+                    status, raw_body = request()
+                    self.assertEqual(status, 400, name)
+                    body = json.loads(raw_body)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        stream_post_error_schema,
+                        body,
+                        name,
+                    )
+                    self.assertEqual(body["error"]["code"], "INVALID_REQUEST", name)
+
+                fastapi_invalid_post_stream = fastapi_client.post(
+                    "/api/ollama/chat/stream",
+                    json=[],
+                )
+                self.assertEqual(
+                    fastapi_invalid_post_stream.status_code,
+                    400,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    stream_post_error_schema,
+                    fastapi_invalid_post_stream.json(),
+                    "fastapi",
+                )
+                self.assertEqual(
+                    fastapi_invalid_post_stream.json()["error"]["code"],
+                    "INVALID_REQUEST",
+                    "fastapi",
+                )
+
+                oversized_stream_body = json.dumps({
+                    "model": "fixture-model:latest",
+                    "messages": [{
+                        "role": "user",
+                        "content": "x" * (32 * 1024),
+                    }],
+                }).encode("utf-8")
+                self.assertGreater(len(oversized_stream_body), 32 * 1024)
+                stream_body_limit_schema = self.contract["paths"][
+                    "/api/ollama/chat/stream"
+                ]["post"]["responses"]["413"]["content"][
+                    "application/json"
+                ]["schema"]
+                oversized_stream_clients = {
+                    "python-http": lambda: _post_error_body(
+                        f"{core_url}/api/ollama/chat/stream",
+                        oversized_stream_body,
+                    ),
+                    "express": lambda: _post_error_body(
+                        f"{express_url}/api/ollama/chat/stream",
+                        oversized_stream_body,
+                    ),
+                }
+                for name, request in oversized_stream_clients.items():
+                    status, raw_body = request()
+                    self.assertEqual(status, 413, name)
+                    body = json.loads(raw_body)
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        stream_body_limit_schema,
+                        body,
+                        name,
+                    )
+                    self.assertEqual(
+                        body["error"]["code"],
+                        "REQUEST_BODY_TOO_LARGE",
+                        name,
+                    )
+
+                fastapi_oversized_stream = fastapi_client.post(
+                    "/api/ollama/chat/stream",
+                    content=oversized_stream_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(
+                    fastapi_oversized_stream.status_code,
+                    413,
+                    "fastapi",
+                )
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    stream_body_limit_schema,
+                    fastapi_oversized_stream.json(),
+                    "fastapi",
+                )
+                self.assertEqual(
+                    fastapi_oversized_stream.json()["error"]["code"],
+                    "REQUEST_BODY_TOO_LARGE",
+                    "fastapi",
+                )
+
+                terminal_headers = {
+                    "X-Jarvis-Terminal-Token": "contract-terminal-token"
+                }
+                terminal_payload = {
+                    "command": "echo",
+                    "args": ["capability-contract"],
+                    "timeout": 5,
+                }
+                terminal_success_schema = self.contract[
+                    "paths"
+                ]["/api/terminal/execute"]["post"]["responses"]["200"][
+                    "content"
+                ]["application/json"]["schema"]
+                with patch.dict(
+                    os.environ,
+                    {
+                        "JARVIS_TERMINAL_ENABLED": "true",
+                        "JARVIS_TERMINAL_TOKEN": "contract-terminal-token",
+                    },
+                ):
+                    terminal_success_clients = {
+                        "python-http": lambda: _post_json(
+                            f"{core_url}/api/terminal/execute",
+                            terminal_payload,
+                            headers=terminal_headers,
+                        ),
+                        "express": lambda: _post_json(
+                            f"{express_url}/api/terminal/execute",
+                            terminal_payload,
+                            headers=terminal_headers,
+                        ),
+                    }
+                    for name, request in terminal_success_clients.items():
+                        status, body = request()
+                        self.assertEqual(status, 200, name)
+                        _assert_json_shape(
+                            self,
+                            self.contract,
+                            terminal_success_schema,
+                            body,
+                            name,
+                        )
+                        self.assertTrue(body["success"], name)
+                        self.assertEqual(body["exit_code"], 0, name)
+                        self.assertIn("capability-contract", body["stdout"], name)
+
+                    fastapi_response = fastapi_client.post(
+                        "/api/terminal/execute",
+                        json=terminal_payload,
+                        headers=terminal_headers,
+                    )
+                    self.assertEqual(fastapi_response.status_code, 200, "fastapi")
+                    fastapi_body = fastapi_response.json()
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        terminal_success_schema,
+                        fastapi_body,
+                        "fastapi",
+                    )
+                    self.assertTrue(fastapi_body["success"])
+                    self.assertEqual(fastapi_body["exit_code"], 0)
+                    self.assertIn("capability-contract", fastapi_body["stdout"])
+
+                error_schema = self.contract["paths"]["/api/terminal/execute"][
+                    "post"
+                ]["responses"]["400"]["content"]["application/json"]["schema"]
+                post_clients = {
+                    "python-http": lambda: _post_json(
+                        f"http://127.0.0.1:{http_server.server_port}/api/terminal/execute",
+                        {"command": ""},
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/terminal/execute",
+                        {"command": ""},
+                    ),
+                }
+                for name, request in post_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, name)
+                    _assert_json_shape(self, self.contract, error_schema, body, name)
+                    self.assertEqual(body["error"]["code"], "MISSING_COMMAND", name)
+
+                response = fastapi_client.post(
+                    "/api/terminal/execute", json={"command": ""}
+                )
+                self.assertEqual(response.status_code, 400, "fastapi")
+                _assert_json_shape(
+                    self, self.contract, error_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "MISSING_COMMAND",
+                    "fastapi",
+                )
+
+                missing_command_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/terminal/execute",
+                        {},
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/terminal/execute",
+                        {},
+                    ),
+                }
+                for name, request in missing_command_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, name)
+                    _assert_json_shape(self, self.contract, error_schema, body, name)
+                    self.assertEqual(body["error"]["code"], "MISSING_COMMAND", name)
+
+                response = fastapi_client.post("/api/terminal/execute", json={})
+                self.assertEqual(response.status_code, 400, "fastapi missing command")
+                _assert_json_shape(
+                    self, self.contract, error_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "MISSING_COMMAND",
+                    "fastapi",
+                )
+
+                invalid_json_clients = {
+                    "python-http": lambda: _post_raw_json(
+                        f"{core_url}/api/terminal/execute",
+                        b'{"command":',
+                    ),
+                    "express": lambda: _post_raw_json(
+                        f"{express_url}/api/terminal/execute",
+                        b'{"command":',
+                    ),
+                }
+                for name, request in invalid_json_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, name)
+                    _assert_json_shape(self, self.contract, error_schema, body, name)
+                    self.assertEqual(body["error"]["code"], "INVALID_JSON", name)
+
+                response = fastapi_client.post(
+                    "/api/terminal/execute",
+                    content=b'{"command":',
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 400, "fastapi invalid JSON")
+                _assert_json_shape(
+                    self, self.contract, error_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "INVALID_JSON",
+                    "fastapi",
+                )
+
+                non_object_json_clients = {
+                    "python-http": lambda: _post_raw_json(
+                        f"{core_url}/api/terminal/execute",
+                        b"[]",
+                    ),
+                    "express": lambda: _post_raw_json(
+                        f"{express_url}/api/terminal/execute",
+                        b"[]",
+                    ),
+                }
+                for name, request in non_object_json_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, name)
+                    _assert_json_shape(self, self.contract, error_schema, body, name)
+                    self.assertEqual(body["error"]["code"], "INVALID_REQUEST", name)
+
+                response = fastapi_client.post(
+                    "/api/terminal/execute",
+                    content=b"[]",
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 400, "fastapi non-object JSON")
+                _assert_json_shape(
+                    self, self.contract, error_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "INVALID_REQUEST",
+                    "fastapi",
+                )
+
+                plugin_error_schema = self.contract["paths"]["/api/plugins/load"][
+                    "post"
+                ]["responses"]["400"]["content"]["application/json"]["schema"]
+                missing_plugin_id_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/plugins/load",
+                        {},
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/plugins/load",
+                        {},
+                    ),
+                }
+                for name, request in missing_plugin_id_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 400, name)
+                    _assert_json_shape(
+                        self, self.contract, plugin_error_schema, body, name
+                    )
+                    self.assertEqual(
+                        body["error"]["code"], "MISSING_PLUGIN_ID", name
+                    )
+
+                response = fastapi_client.post("/api/plugins/load", json={})
+                self.assertEqual(response.status_code, 400, "fastapi missing plugin ID")
+                _assert_json_shape(
+                    self, self.contract, plugin_error_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "MISSING_PLUGIN_ID",
+                    "fastapi",
+                )
+
+                missing_plugin_schema = self.contract["paths"]["/api/plugins/load"][
+                    "post"
+                ]["responses"]["404"]["content"]["application/json"]["schema"]
+                missing_plugin_payload = {
+                    "plugin_id": ".test-contract-plugin-not-found"
+                }
+                missing_plugin_clients = {
+                    "python-http": lambda: _post_json(
+                        f"{core_url}/api/plugins/load",
+                        missing_plugin_payload,
+                    ),
+                    "express": lambda: _post_json(
+                        f"{express_url}/api/plugins/load",
+                        missing_plugin_payload,
+                    ),
+                }
+                for name, request in missing_plugin_clients.items():
+                    status, body = request()
+                    self.assertEqual(status, 404, name)
+                    _assert_json_shape(
+                        self, self.contract, missing_plugin_schema, body, name
+                    )
+                    self.assertEqual(
+                        body["error"]["code"], "PLUGIN_NOT_FOUND", name
+                    )
+
+                response = fastapi_client.post(
+                    "/api/plugins/load",
+                    json=missing_plugin_payload,
+                )
+                self.assertEqual(response.status_code, 404, "fastapi missing plugin")
+                _assert_json_shape(
+                    self, self.contract, missing_plugin_schema, response.json(), "fastapi"
+                )
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "PLUGIN_NOT_FOUND",
+                    "fastapi",
+                )
+        finally:
+            express.terminate()
+            try:
+                express.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                express.kill()
+                express.wait(timeout=5)
+            http_server.shutdown()
+            http_server.server_close()
+            http_thread.join(timeout=5)
+            httpserver_module.state.ollama.base_url = original_http_ollama_url
+            ollama_server.shutdown()
+            ollama_server.server_close()
+            ollama_thread.join(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()

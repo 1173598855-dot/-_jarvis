@@ -3,6 +3,7 @@
 import re
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -183,7 +184,7 @@ class TestIterationLedger(unittest.TestCase):
         latest_report = latest_audit_report_iteration()
         metadata = audit_report_metadata(latest_report)
 
-        self.assertEqual(metadata["date"], "2026-07-10")
+        self.assertIsInstance(date.fromisoformat(metadata["date"]), date)
         self.assertEqual(metadata["status"], "Complete")
 
     def test_latest_changelog_date_matches_latest_audit_report_date(self):

@@ -4,9 +4,9 @@
 
 **项目路径**：`C:\GitHub\贾维斯\`
 
-**最后更新**：2026-07-10
+**最后更新**：2026-07-15
 
-**最新迭代**：Iteration 93
+**最新迭代**：Iteration 128
 
 ## 项目目标
 
@@ -31,7 +31,7 @@
 | Python HTTP 服务 | `src/main.py` | 标准库 HTTP API，默认端口 8080 |
 | FastAPI 服务 | `src/main_fastapi.py` | 更完整的异步 API 与角色调度入口 |
 | Kernel | `src/core/kernel/` | Ollama、终端、插件、事件总线 |
-| Brain | `src/core/brain/` | 上下文压缩、编排器、角色注册、Agent 工厂 |
+| Brain | `src/core/brain/` | 上下文压缩、编排器、角色注册、Agent 工厂与角色工具授权 |
 | Plugin | `plugins/` | 插件模板与事件记录插件 |
 | Skill | `skills/` | 19 个本地技能包 |
 
@@ -65,13 +65,13 @@
 
 ## 当前规模
 
-- `src/`：11 个 Python 文件；服务端源代码统一使用 Python。
+- `src/`：15 个 Python 文件；服务端源代码统一使用 Python。
 - `frontend/src/`：38 个 TypeScript/TSX 文件。
-- `tests/`：35 个 Python 文件；规范聚合套件 113 个用例。
-- 前端验证：Vitest 61 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
+- `tests/`：42 个 Python 文件；规范聚合套件 208 个用例，完整 discovery 1080 个用例。
+- 前端验证：Vitest 112 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
-- `docs/reports/`：滚动保留最近 10 份审计报告，最新为 `AUDIT_REPORT_93.md`。
+- `docs/reports/`：滚动保留最近 10 份审计报告，最新为 `AUDIT_REPORT_128.md`。
 
 ## 阶段状态
 
@@ -83,7 +83,7 @@
 | Phase 8 | 进行中 | Plugin SDK、沙箱策略、2 个插件目录 |
 | Phase 9 | 已重构 | Solid.js 六视图指挥中心与响应式导航 |
 | Phase 10 | 已重构 | 真实系统/Token 遥测、状态栏和运行趋势图 |
-| Phase 11 | 进行中 | Python 编排器、角色注册与 TypeScript 多代理协议 |
+| Phase 11 | 进行中 | Python 编排器、角色注册、真实 Ollama 角色执行、错误后恢复、默认拒绝工具 broker 与 TypeScript 多代理协议；模型工具循环和 timeout 隔离待完成 |
 | Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest/Playwright |
 
 ## 启动方式
@@ -134,3 +134,5 @@ npm run build
 - Skill/Plugin 通过项目定义的权限与沙箱策略运行。
 - 临时测试输出使用 `.test-*` 命名并保持 Git 忽略。
 - 不把历史审计报告中的测试数量或阶段状态直接当作当前状态。
+
+Current verified test baseline for Iteration 128: aggregate 208; full discovery 1080.

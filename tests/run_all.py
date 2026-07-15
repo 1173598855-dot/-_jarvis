@@ -14,10 +14,14 @@ from core.brain.context_compressor import ContextCompressor, MemoryEntry, Memory
 from core.brain.role_registry import AgentProfile, RoleRegistry, create_default_registry
 from core.kernel.ollama_manager import OllamaModel
 from core.kernel.terminal_executor import CommandRisk, TerminalCommand, TerminalExecutor
+from test_terminal_worker import TestTerminalWorker
+from test_api_contract import TestSharedApiContract
 from test_docs_setup import TestSetupDocs
 from test_iteration_ledger import TestIterationLedger
 from test_main import TestMainHTTPHelpers, TestMainHTTPGETRouting, TestMainHTTPPOSTRouting, TestMainHTTPHandleMethodsRouting, TestMainHTTPEdgeCases
-from test_main_fastapi import TestMainFastapiIntegration
+from test_main_fastapi import TestMainFastapiIntegration, TestRequestBodyLimitMiddleware
+from test_local_integration_profile import TestLocalIntegrationProfile
+from test_local_integration_runner import TestLocalIntegrationRunner
 from test_project_config import TestPythonDependencies
 from test_readme import TestReadme
 from test_plugin_installation import TestPluginInstallation
@@ -231,6 +235,8 @@ AGGREGATE_TEST_CASES = [
     TestIntegration,
     TestPerformance,
     TestTerminalExecutor,
+    TestTerminalWorker,
+    TestSharedApiContract,
     TestReadme,
     TestSetupDocs,
     TestPythonDependencies,
@@ -241,6 +247,9 @@ AGGREGATE_TEST_CASES = [
     TestMainHTTPHandleMethodsRouting,
     TestMainHTTPEdgeCases,
     TestMainFastapiIntegration,
+    TestRequestBodyLimitMiddleware,
+    TestLocalIntegrationProfile,
+    TestLocalIntegrationRunner,
     TestPluginInstallation,
 ]
 

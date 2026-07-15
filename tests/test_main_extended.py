@@ -38,6 +38,13 @@ def _make_handler(command="GET", path="/api/health", headers=None):
 
 
 class TestAppStateExtended(unittest.TestCase):
+    def test_agent_factory_uses_application_ollama_manager(self):
+        s = AppState()
+        try:
+            self.assertIs(s.agent_factory._ollama_manager, s.ollama)
+        finally:
+            s.terminal.close()
+
     def test_default_ollama_manager(self):
         s = AppState()
         self.assertIsNotNone(s.ollama)

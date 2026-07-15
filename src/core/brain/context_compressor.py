@@ -16,6 +16,7 @@
 """
 
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -282,6 +283,7 @@ importance: {entry.importance}
 token_count: {entry.token_count}
 compressed: {entry.compressed}
 parent_id: {entry.parent_id or ''}
+probe_cleanup_token: {entry.metadata.get('probe_cleanup_token', '')}
 ---
 
 {entry.content}
@@ -313,6 +315,54 @@ parent_id: {entry.parent_id or ''}
         else:
             with open(self.index_file, "a", encoding="utf-8") as f:
                 f.write(index_line)
+
+    def delete_probe(
+        self,
+        memory_type: MemoryType,
+        entry_id: str,
+        cleanup_token: str,
+    ) -> bool:
+        """Delete an integration probe after exact type, title, and token checks."""
+        if not isinstance(memory_type, MemoryType):
+            return False
+        if not entry_id or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            for character in entry_id
+        ):
+            return False
+        if not isinstance(cleanup_token, str) or not cleanup_token:
+            return False
+
+        filepath = self.memory_dir / f"{memory_type.value}_{entry_id}.md"
+        if not filepath.is_file():
+            return False
+
+        content = filepath.read_text(encoding="utf-8")
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return False
+        metadata = {}
+        for line in parts[1].splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                metadata[key.strip()] = value.strip()
+        if not metadata.get("name", "").startswith(".test-local-integration-"):
+            return False
+        stored_token = metadata.get("probe_cleanup_token", "")
+        if not stored_token or not hmac.compare_digest(stored_token, cleanup_token):
+            return False
+
+        filepath.unlink()
+
+        self._ensure_index()
+        lines = self.index_file.read_text(encoding="utf-8").splitlines()
+        retained = [
+            line
+            for line in lines
+            if f"({filepath.name})" not in line
+        ]
+        self.index_file.write_text("\n".join(retained) + "\n", encoding="utf-8")
+        return True
 
     def load(self, memory_type: Optional[MemoryType] = None) -> List[MemoryEntry]:
         entries = []

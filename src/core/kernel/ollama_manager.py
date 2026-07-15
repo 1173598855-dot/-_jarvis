@@ -17,6 +17,7 @@ import os
 import requests
 import json
 import sys
+import time
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -83,16 +84,69 @@ class OllamaManager:
         self.timeout = timeout
         self._session = requests.Session()
         self._token_usage = TokenUsage()
+        self._latest_token_usage: Optional[Dict[str, Any]] = None
+        self._token_usage_samples: List[Dict[str, Any]] = []
+        self._token_usage_session_started_at = int(time.time() * 1000)
 
     def record_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
-        self._token_usage.prompt_tokens += max(prompt_tokens, 0)
-        self._token_usage.completion_tokens += max(completion_tokens, 0)
+        prompt_tokens = max(prompt_tokens, 0)
+        completion_tokens = max(completion_tokens, 0)
+        self._token_usage.prompt_tokens += prompt_tokens
+        self._token_usage.completion_tokens += completion_tokens
         self._token_usage.total_tokens = (
             self._token_usage.prompt_tokens + self._token_usage.completion_tokens
         )
+        sample = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "timestamp": int(time.time() * 1000),
+        }
+        self._latest_token_usage = sample
+        self._token_usage_samples = [
+            *self._token_usage_samples,
+            sample,
+        ][-60:]
+
+    def record_token_usage_from_response(self, response: Dict[str, Any]) -> bool:
+        """Record token counts from an Ollama response when count fields exist."""
+        if not isinstance(response, dict):
+            return False
+
+        prompt_tokens = response.get("prompt_eval_count")
+        completion_tokens = response.get("eval_count")
+        has_native_counts = (
+            "prompt_eval_count" in response or "eval_count" in response
+        )
+
+        if not has_native_counts:
+            usage = response.get("usage")
+            if not isinstance(usage, dict):
+                return False
+            if "prompt_tokens" not in usage and "completion_tokens" not in usage:
+                return False
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+
+        try:
+            normalized_prompt = int(prompt_tokens or 0)
+            normalized_completion = int(completion_tokens or 0)
+        except (TypeError, ValueError):
+            return False
+
+        self.record_token_usage(normalized_prompt, normalized_completion)
+        return True
 
     def get_token_usage(self) -> TokenUsage:
         return self._token_usage
+
+    def get_token_usage_snapshot(self) -> Dict[str, Any]:
+        return {
+            "latest": dict(self._latest_token_usage) if self._latest_token_usage else None,
+            "totals": self._token_usage.to_dict(),
+            "samples": [dict(sample) for sample in self._token_usage_samples],
+            "session_started_at": self._token_usage_session_started_at,
+        }
 
     def _get(self, path: str) -> Dict[str, Any]:
         """?? GET ?????????"""
@@ -143,7 +197,10 @@ class OllamaManager:
             models = [OllamaModel.from_api(m) for m in models_data["models"]]
 
         gpu_info = self._get("/api/ps")
-        gpu_available = "error" not in gpu_info and gpu_info.get("models", [])
+        gpu_available = (
+            "error" not in gpu_info
+            and bool(gpu_info.get("models", []))
+        )
         gpu_name = None
         if gpu_available and gpu_info.get("models"):
             gpu_name = gpu_info["models"][0].get("name", "Unknown GPU")
@@ -204,7 +261,36 @@ class OllamaManager:
         }
         if stream:
             return self._stream_chat(data)
-        return self._post("/api/chat", data)
+        result = self._post("/api/chat", data)
+        if "error" not in result and self._is_valid_chat_response(result):
+            self.record_token_usage_from_response(result)
+            return result
+        if "error" not in result:
+            return {"error": "Ollama chat response is invalid"}
+        return result
+
+    @staticmethod
+    def _is_valid_chat_response(response: Dict[str, Any]) -> bool:
+        """Return whether an upstream non-streaming chat response matches the public contract."""
+        if not isinstance(response, dict):
+            return False
+        if not isinstance(response.get("model"), str) or not response["model"]:
+            return False
+        message = response.get("message")
+        if not isinstance(message, dict):
+            return False
+        if not isinstance(message.get("role"), str) or not message["role"]:
+            return False
+        if not isinstance(message.get("content"), str):
+            return False
+        if type(response.get("done")) is not bool:
+            return False
+        for field in ("prompt_eval_count", "eval_count"):
+            if field in response and (
+                type(response[field]) is not int or response[field] < 0
+            ):
+                return False
+        return True
 
     def _stream_chat(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """??????"""
@@ -226,6 +312,7 @@ class OllamaManager:
                         print(content, end="", flush=True)
                         full_response += content
                     if chunk.get("done"):
+                        self.record_token_usage_from_response(chunk)
                         print()
                         return {
                             "model": chunk.get("model", ""),
@@ -263,6 +350,8 @@ class OllamaManager:
                 chunk = json.loads(line)
                 content = chunk.get("message", {}).get("content", "")
                 done = chunk.get("done", False)
+                if done:
+                    self.record_token_usage_from_response(chunk)
                 if content or done:
                     yield content, done
 

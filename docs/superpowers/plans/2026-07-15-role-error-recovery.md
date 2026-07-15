@@ -4,7 +4,7 @@
 
 **Goal:** Recover a role for a later request after its completed handler raises, without retrying the failed request or weakening timeout safety.
 
-**Architecture:** Add an atomic `ERROR -> IDLE` transition to `_RegisteredAgent` and expose it through `Orchestrator.recover_agent(name)`. `AgentFactory` invokes that public boundary only after an ordinary `error` result; timeout, busy, idle, shutdown, and missing-agent states remain unchanged.
+**Architecture:** Mark internal error states as recoverable or nonrecoverable, add an atomic recoverable `ERROR -> IDLE` transition to `_RegisteredAgent`, and expose it through `Orchestrator.recover_agent(name)`. `AgentFactory` invokes that public boundary only after an ordinary `error` result; timeout, busy, idle, shutdown, and missing-agent states remain unchanged.
 
 **Tech Stack:** Python 3 standard library, `unittest`, existing role registry and orchestrator.
 
@@ -26,6 +26,7 @@
 
 **Interfaces:**
 - Produces: `_RegisteredAgent.recover_from_error() -> bool`.
+- Produces: `_RegisteredAgent.fail(*, recoverable: bool = True) -> None`.
 - Produces: `Orchestrator.recover_agent(name: str) -> bool`.
 
 - [ ] **Step 1: Add failing registered-agent recovery tests**
@@ -52,6 +53,15 @@ def test_recover_from_error_refuses_non_error_states(self):
             agent.status = status
             self.assertFalse(agent.recover_from_error())
             self.assertEqual(agent.status, status)
+
+def test_recover_from_error_refuses_nonrecoverable_error(self):
+    agent = self._make_agent()
+    agent.assign(AgentTask(agent_name="test_agent", prompt="p"))
+    agent.fail(recoverable=False)
+
+    self.assertFalse(agent.recover_from_error())
+    self.assertEqual(agent.status, AgentStatus.ERROR)
+    self.assertEqual(agent.errors_count, 1)
 ```
 
 - [ ] **Step 2: Add failing orchestrator boundary tests**
@@ -119,18 +129,36 @@ Expected: `AttributeError` for both missing recovery methods.
 
 - [ ] **Step 4: Implement the atomic state transition**
 
-Add to `_RegisteredAgent`:
+Initialize `self._error_recoverable = False`. Update state transitions so
+`assign()`, `complete()`, and `reset()` clear the marker. Change `fail()` and add
+the recovery method:
 
 ```python
+def fail(self, *, recoverable: bool = True) -> None:
+    with self._lock:
+        self.errors_count += 1
+        self.status = AgentStatus.ERROR
+        self.current_task = None
+        self._error_recoverable = recoverable
+
 def recover_from_error(self) -> bool:
     """Return a completed error state to IDLE without changing counters."""
     with self._lock:
-        if self.status != AgentStatus.ERROR:
+        if self.status != AgentStatus.ERROR or not self._error_recoverable:
             return False
         self.status = AgentStatus.IDLE
         self.current_task = None
+        self._error_recoverable = False
         return True
 ```
+
+In the timeout branch of `Orchestrator.dispatch()`, call:
+
+```python
+agent.fail(recoverable=False)
+```
+
+The ordinary exception branch keeps `agent.fail()` and is recoverable.
 
 Add to `Orchestrator` near registration and lifecycle methods:
 

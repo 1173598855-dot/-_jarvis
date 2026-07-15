@@ -2,9 +2,14 @@
 Test main_fastapi.py - Phase 11 FastAPI REST API integration tests
 Run: python3 tests/test_main_fastapi.py
 """
+import asyncio
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -64,7 +69,34 @@ class TestMainFastapiSyntax(unittest.TestCase):
             stripped = line.strip()
             if stripped == "data = a":
                 self.fail("File is truncated at 'data = a'")
-        self.assertIn("shutdown()", text)
+        self.assertIn("uvicorn.run(app", text)
+
+    def test_uses_lifespan_instead_of_deprecated_event_hooks(self):
+        """FastAPI lifecycle is configured through the lifespan API."""
+        source = Path(__file__).parent.parent / "src" / "main_fastapi.py"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("lifespan=lifespan", text)
+        self.assertNotIn("@app.on_event", text)
+
+    def test_isolated_app_lifespan_does_not_shutdown_default_state(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        with tempfile.TemporaryDirectory() as memory_dir:
+            isolated_state = main_fastapi.AppState(memory_dir=memory_dir)
+            isolated_app = main_fastapi.create_app(isolated_state)
+            sandbox_dir = isolated_state.terminal.sandbox_dir
+            with patch.object(
+                main_fastapi.state.orchestrator,
+                "shutdown",
+            ) as default_shutdown:
+                with TestClient(isolated_app) as client:
+                    self.assertEqual(client.get("/api/health").status_code, 200)
+
+            default_shutdown.assert_not_called()
+            self.assertTrue(isolated_state.orchestrator._shutdown)
+            self.assertFalse(os.path.exists(sandbox_dir))
 
     def test_app_state_has_agent_factory(self):
         """Verify AppState includes agent_factory"""
@@ -80,6 +112,50 @@ class TestMainFastapiSyntax(unittest.TestCase):
         text = source.read_text(encoding="utf-8")
         self.assertIn('version="1.1.0"', text)
 
+
+
+class TestRequestBodyLimitMiddleware(unittest.TestCase):
+    def test_rejects_headerless_chunked_overflow(self):
+        import main_fastapi
+
+        incoming = iter([
+            {
+                "type": "http.request",
+                "body": b"x" * main_fastapi.MAX_REQUEST_BODY_BYTES,
+                "more_body": True,
+            },
+            {"type": "http.request", "body": b"x", "more_body": False},
+        ])
+        downstream_messages = []
+        sent = []
+
+        async def receive():
+            return next(incoming)
+
+        async def send(message):
+            sent.append(message)
+
+        async def downstream(_scope, downstream_receive, _send):
+            downstream_messages.append(await downstream_receive())
+
+        middleware = main_fastapi._RequestBodyLimitMiddleware(downstream)
+        asyncio.run(middleware(
+            {"type": "http", "method": "POST", "headers": []},
+            receive,
+            send,
+        ))
+
+        self.assertEqual(downstream_messages[0]["type"], "http.disconnect")
+        self.assertEqual(sent[0]["status"], 413)
+        self.assertEqual(
+            json.loads(sent[-1]["body"]),
+            {
+                "error": {
+                    "code": "REQUEST_BODY_TOO_LARGE",
+                    "message": "Request body exceeds the 32 KiB limit",
+                }
+            },
+        )
 
 
 # ============================================================
@@ -101,19 +177,19 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
         resp = self.client.post("/api/roles/dispatch", json={
             "role_name": "engineer", "prompt": "write a test", "timeout": 30,
         })
-        self.assertIn(resp.status_code, [200, 500])
+        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
 
     def test_dispatch_by_role_missing_role_name(self):
         resp = self.client.post("/api/roles/dispatch", json={"prompt": "test"})
-        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_dispatch_by_role_invalid_role(self):
         resp = self.client.post("/api/roles/dispatch", json={
             "role_name": "nonexistent_role_xyz", "prompt": "test",
         })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertIn("status", data)
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"]["code"], "ROLE_NOT_FOUND")
 
     def test_dispatch_by_capability_coding(self):
         resp = self.client.post("/api/roles/dispatch_by_cap", json={
@@ -134,7 +210,7 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
                 {"role_name": "reviewer", "prompt": "task 2", "timeout": 30},
             ]
         })
-        self.assertIn(resp.status_code, [200, 500])
+        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
         if resp.status_code == 200:
             data = resp.json()
             self.assertIn("results", data)
@@ -178,12 +254,214 @@ class TestQueryEndpoints(unittest.TestCase):
         data = resp.json()
         self.assertLessEqual(data["count"], 5)
 
+    def test_orchestrator_history_clamps_limit_to_contract_maximum(self):
+        import main_fastapi
+
+        with patch.object(
+            main_fastapi.state.orchestrator,
+            "collect",
+            return_value=[],
+        ) as collect:
+            resp = self.client.get("/api/orchestrator/history?limit=101")
+
+        self.assertEqual(resp.status_code, 200)
+        collect.assert_called_once_with(limit=100)
+
+    def test_orchestrator_history_rejects_non_integer_limit_with_invalid_request(self):
+        resp = self.client.get("/api/orchestrator/history?limit=abc")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "INVALID_REQUEST")
+
     def test_roles_list_with_capability_filter(self):
         resp = self.client.get("/api/roles?capability=coding")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertIn("roles", data)
         self.assertIn("count", data)
+
+
+class TestOrchestratorInputValidation(unittest.TestCase):
+    """The shared orchestrator contract rejects malformed request values."""
+
+    @classmethod
+    def setUpClass(cls):
+        from fastapi.testclient import TestClient
+
+        import main_fastapi
+        cls.main_fastapi = main_fastapi
+        cls.client = TestClient(main_fastapi.app, raise_server_exceptions=False)
+
+    def assert_invalid_request(self, response):
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "INVALID_REQUEST")
+        self.assertIn("message", response.json()["error"])
+
+    def test_normalize_dispatch_text_accepts_surrogate_pair_and_scalar(self):
+        paired_surrogates = "\ud83d\ude00"
+        scalar_emoji = "\U0001f600"
+
+        self.assertEqual(
+            self.main_fastapi._normalize_dispatch_text(paired_surrogates),
+            scalar_emoji,
+        )
+        self.assertEqual(
+            self.main_fastapi._normalize_dispatch_text(scalar_emoji),
+            scalar_emoji,
+        )
+
+    def test_dispatch_rejects_non_object_json_bodies(self):
+        for payload in ([], 1, "prompt"):
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/orchestrator/dispatch",
+                    json=payload,
+                )
+                self.assert_invalid_request(response)
+
+    def test_dispatch_rejects_malformed_json_with_invalid_json_code(self):
+        response = self.client.post(
+            "/api/orchestrator/dispatch",
+            content=b'{"agent_name":',
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "INVALID_JSON")
+
+    def test_dispatch_normalizes_json_resource_limit_errors(self):
+        excessive_integer = (
+            b'{"agent_name":"analyzer","prompt":"ping","timeout":'
+            + (b"9" * 5000)
+            + b"}"
+        )
+        depth = 10_000
+        deeply_nested = (
+            b'{"agent_name":"analyzer","prompt":"ping","nested":'
+            + (b"[" * depth)
+            + b"0"
+            + (b"]" * depth)
+            + b"}"
+        )
+
+        for payload in (excessive_integer, deeply_nested):
+            with self.subTest(payload_size=len(payload)):
+                response = self.client.post(
+                    "/api/orchestrator/dispatch",
+                    content=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "INVALID_JSON",
+                )
+
+    def test_dispatch_rejects_non_string_or_blank_agent_and_prompt(self):
+        payloads = (
+            {"agent_name": 1, "prompt": "ping"},
+            {"agent_name": [], "prompt": "ping"},
+            {"agent_name": "analyzer", "prompt": 1},
+            {"agent_name": "analyzer", "prompt": []},
+            {"agent_name": "   ", "prompt": "ping"},
+            {"agent_name": "analyzer", "prompt": "\t"},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/orchestrator/dispatch",
+                    json=payload,
+                )
+                self.assert_invalid_request(response)
+
+    def test_dispatch_rejects_surrogate_code_points(self):
+        payloads = (
+            b'{"agent_name":"\\ud800","prompt":"ping"}',
+            b'{"agent_name":"analyzer\\udfff","prompt":"ping"}',
+            b'{"agent_name":"analyzer","prompt":"\\ud800"}',
+            b'{"agent_name":"analyzer","prompt":"ping\\udfff"}',
+        )
+        with patch.object(self.main_fastapi.state.orchestrator, "dispatch") as dispatch:
+            dispatch.return_value.to_dict.return_value = {
+                "task_id": "fixture-task",
+                "agent_name": "analyzer",
+                "result": "ok",
+                "error": "",
+                "duration_ms": 0,
+                "status": "success",
+            }
+            for payload in payloads:
+                with self.subTest(payload=payload):
+                    response = self.client.post(
+                        "/api/orchestrator/dispatch",
+                        content=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assert_invalid_request(response)
+
+        dispatch.assert_not_called()
+
+    def test_dispatch_enforces_timeout_minimum_and_priority_bounds(self):
+        for payload in (
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": 0},
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": -1},
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": 301},
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": 10**100},
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": True},
+            {"agent_name": "analyzer", "prompt": "ping", "priority": -1},
+            {"agent_name": "analyzer", "prompt": "ping", "priority": 4},
+            {"agent_name": "analyzer", "prompt": "ping", "priority": True},
+        ):
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/orchestrator/dispatch",
+                    json=payload,
+                )
+                self.assert_invalid_request(response)
+
+    def test_dispatch_accepts_contract_boundary_values(self):
+        with patch.object(self.main_fastapi.state.orchestrator, "dispatch") as dispatch:
+            dispatch.return_value.to_dict.return_value = {
+                "task_id": "fixture-task",
+                "agent_name": "analyzer",
+                "result": "ok",
+                "error": "",
+                "duration_ms": 0,
+                "status": "success",
+            }
+            response = self.client.post(
+                "/api/orchestrator/dispatch",
+                json={
+                    "agent_name": "analyzer",
+                    "prompt": "ping",
+                    "timeout": 300,
+                    "priority": 0,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        task = dispatch.call_args.args[0]
+        self.assertEqual(task.timeout, 300)
+        self.assertEqual(task.priority, 0)
+
+    def test_dispatch_defaults_timeout_to_contract_maximum(self):
+        with patch.object(self.main_fastapi.state.orchestrator, "dispatch") as dispatch:
+            dispatch.return_value.to_dict.return_value = {
+                "task_id": "fixture-task",
+                "agent_name": "analyzer",
+                "result": "ok",
+                "error": "",
+                "duration_ms": 0,
+                "status": "success",
+            }
+            response = self.client.post(
+                "/api/orchestrator/dispatch",
+                json={"agent_name": "analyzer", "prompt": "ping"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(dispatch.call_args.args[0].timeout, 300)
 
 
 class TestPluginLifecycleEndpoints(unittest.TestCase):
@@ -294,23 +572,24 @@ class TestFastAPIEndpoints(unittest.TestCase):
         """GET /api/ollama/status returns dict (error OK since no Ollama)"""
         resp = self.client.get("/api/ollama/status")
         # Returns 200 with status dict or 500 if Ollama unavailable
-        self.assertIn(resp.status_code, [200, 500])
+        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
 
     def test_ollama_chat_missing_model_returns_400(self):
         """POST /api/ollama/chat with empty model returns error"""
         resp = self.client.post("/api/ollama/chat", json={"messages": []})
-        # Should return 500 (connection error) or handle gracefully
-        self.assertIn(resp.status_code, [400, 500])
+        # Upstream unavailability is normalized to the public 502 envelope.
+        self.assertIn(resp.status_code, [400, 502])
 
     def test_terminal_execute_empty_command_returns_400(self):
         """POST /api/terminal/execute with empty command returns 400"""
         resp = self.client.post("/api/terminal/execute", json={"command": ""})
         self.assertEqual(resp.status_code, 400)
 
-    def test_terminal_execute_missing_field_returns_422(self):
-        """POST /api/terminal/execute without 'command' field returns 422"""
+    def test_terminal_execute_missing_field_returns_standard_error(self):
+        """POST /api/terminal/execute without 'command' uses the shared envelope."""
         resp = self.client.post("/api/terminal/execute", json={})
-        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "MISSING_COMMAND")
 
     def test_plugins_list_returns_200(self):
         """GET /api/plugins returns list of plugins"""
@@ -357,7 +636,7 @@ class TestFastAPIEndpoints(unittest.TestCase):
             # Connection error if orchestrator shutdown by prior test
             return
         # 200 if running, 500 if error
-        self.assertIn(resp.status_code, [200, 500])
+        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
         if resp.status_code == 200:
             data = resp.json()
             self.assertIn("agents", data)
@@ -377,9 +656,10 @@ class TestFastAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     def test_dispatch_by_role_missing_fields_returns_422(self):
-        """POST /api/roles/dispatch without required fields returns 422"""
+        """POST /api/roles/dispatch without required fields returns 400"""
         resp = self.client.post("/api/roles/dispatch", json={})
-        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_cors_headers_present(self):
         """CORS middleware allows cross-origin requests"""
@@ -426,6 +706,64 @@ class TestMainFastapiIntegration(unittest.TestCase):
     def test_terminal_missing_command_returns_400(self):
         resp = self.client.post("/api/terminal/execute", json={"command": ""})
         self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], "MISSING_COMMAND")
+
+    def test_terminal_execute_is_disabled_without_capability(self):
+        with patch.dict(
+            os.environ,
+            {"JARVIS_TERMINAL_ENABLED": "false", "JARVIS_TERMINAL_TOKEN": ""},
+        ):
+            resp = self.client.post(
+                "/api/terminal/execute",
+                json={"command": "echo", "args": ["blocked"]},
+            )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"]["code"], "TERMINAL_DISABLED")
+
+    def test_terminal_execute_rejects_invalid_capability_token(self):
+        import main_fastapi
+
+        with patch.dict(
+            os.environ,
+            {"JARVIS_TERMINAL_ENABLED": "true", "JARVIS_TERMINAL_TOKEN": "test-token"},
+        ), patch.object(main_fastapi.state.terminal, "execute") as execute:
+            resp = self.client.post(
+                "/api/terminal/execute",
+                json={"command": "pwd", "args": []},
+                headers={"X-Jarvis-Terminal-Token": "wrong-token"},
+            )
+
+        execute.assert_not_called()
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json()["error"]["code"], "TERMINAL_UNAUTHORIZED")
+
+    def test_orchestrator_dispatch_forwards_timeout_and_priority(self):
+        import main_fastapi
+
+        with patch.object(main_fastapi.state.orchestrator, "dispatch") as dispatch:
+            dispatch.return_value.to_dict.return_value = {
+                "task_id": "fixture-task",
+                "agent_name": "analyzer",
+                "result": "ok",
+                "error": "",
+                "duration_ms": 0,
+                "status": "success",
+            }
+            resp = self.client.post(
+                "/api/orchestrator/dispatch",
+                json={
+                    "agent_name": "analyzer",
+                    "prompt": "ping",
+                    "timeout": 45,
+                    "priority": 3,
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        task = dispatch.call_args.args[0]
+        self.assertEqual(task.timeout, 45)
+        self.assertEqual(task.priority, 3)
 
     def test_memory_store_returns_success(self):
         resp = self.client.post("/api/memory/store", json={
@@ -437,14 +775,35 @@ class TestMainFastapiIntegration(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json().get("success"))
 
+    def test_memory_probe_can_be_deleted_by_returned_id(self):
+        cleanup_token = "fastapi-test-secret"
+        stored = self.client.post("/api/memory/store", json={
+            "type": "project",
+            "title": ".test-local-integration-fastapi-delete",
+            "content": "temporary integration probe",
+            "tags": ["test"],
+            "probe_cleanup_token": cleanup_token,
+        })
+        entry_id = stored.json()["id"]
+
+        deleted = self.client.request(
+            "DELETE",
+            f"/api/memory/probes/project/{entry_id}",
+            json={"cleanup_token": cleanup_token},
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json(), {"success": True, "id": entry_id})
+
 
     def test_ollama_token_usage_returns_fields(self):
         resp = self.client.get("/api/ollama/token-usage")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertIn("prompt_tokens", data)
-        self.assertIn("completion_tokens", data)
-        self.assertIn("total_tokens", data)
+        self.assertIn("latest", data)
+        self.assertIn("totals", data)
+        self.assertIn("samples", data)
+        self.assertIn("session_started_at", data)
 
     def test_ollama_chat_records_token_usage(self):
         resp = self.client.post("/api/ollama/chat", json={
@@ -452,9 +811,30 @@ class TestMainFastapiIntegration(unittest.TestCase):
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
         })
-        self.assertIn(resp.status_code, [200, 500])
+        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
         usage_resp = self.client.get("/api/ollama/token-usage")
         self.assertEqual(usage_resp.status_code, 200)
+
+    def test_ollama_stream_uses_nested_error_frame_without_done(self):
+        import main_fastapi
+
+        with patch.object(
+            main_fastapi.state.ollama,
+            "stream_chat_generator",
+            side_effect=RuntimeError("fixture failure"),
+        ):
+            response = self.client.get(
+                "/api/ollama/chat/stream",
+                params={"model": "fixture-model"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            '"error": {"code": "OLLAMA_STREAM_ERROR", "message": "fixture failure"}',
+            response.text,
+        )
+        self.assertNotIn("data: [DONE]", response.text)
+
     def test_openapi_route_exists(self):
         resp = self.client.get("/docs")
         self.assertIn(resp.status_code, [200, 404])

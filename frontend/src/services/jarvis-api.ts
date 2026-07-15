@@ -97,7 +97,7 @@ export const jarvisApi = {
   storeMemory: (
     body: { type: string; title: string; content: string; tags: string[] },
     signal?: AbortSignal,
-  ) => requestJson<{ success: boolean; path: string }>('/api/memory/store', {
+  ) => requestJson<{ success: boolean; path: string; id: string; type: string }>('/api/memory/store', {
     method: 'POST',
     body: JSON.stringify(body),
     signal,

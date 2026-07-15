@@ -25,13 +25,15 @@ Ollama call. Resetting the same registered agent between requests produced
 
 Add an explicit recovery boundary to the orchestrator:
 
-1. `_RegisteredAgent.recover_from_error()` atomically changes only
+1. `_RegisteredAgent.fail(recoverable=...)` records whether an `ERROR` came from
+   a completed handler or a timeout whose daemon thread may still be running.
+2. `_RegisteredAgent.recover_from_error()` atomically changes only a recoverable
    `ERROR -> IDLE` and returns whether it performed the transition.
-2. `Orchestrator.recover_agent(name)` delegates to that transition and returns
+3. `Orchestrator.recover_agent(name)` delegates to that transition and returns
    `False` for unknown agents or any non-error state.
-3. `AgentFactory.dispatch_by_role()` calls `recover_agent()` only after receiving
+4. `AgentFactory.dispatch_by_role()` calls `recover_agent()` only after receiving
    an `AgentResult` whose status is `error`.
-4. The original `DispatchResult` remains an error. Recovery only prepares the
+5. The original `DispatchResult` remains an error. Recovery only prepares the
    role for a separate future request; it is not a hidden retry.
 
 This keeps state ownership in `Orchestrator` and avoids further access to its
@@ -51,19 +53,21 @@ private `_agents` map from `AgentFactory`.
 
 | Current state | `recover_agent()` | Resulting state |
 |---|---|---|
-| `ERROR` | `True` | `IDLE` |
+| Recoverable `ERROR` | `True` | `IDLE` |
+| Nonrecoverable `ERROR` | `False` | `ERROR` |
 | `IDLE` | `False` | `IDLE` |
 | `BUSY` | `False` | `BUSY` |
 | `SHUTDOWN` | `False` | `SHUTDOWN` |
 | Missing agent | `False` | Missing |
 
 The transition does not modify `tasks_completed`, `errors_count`, dispatch
-statistics, or history.
+statistics, or history. The recoverable marker is internal and does not change
+the public `AgentInfo.status` values or OpenAPI schema.
 
-Timeouts remain intentionally unrecovered. `_run_with_timeout()` uses a daemon
-thread that may still be executing after the timeout result; returning that
-agent to `IDLE` could allow overlapping work. Timeout cancellation or process
-isolation requires a separate design.
+Timeouts call `fail(recoverable=False)` and remain intentionally unrecovered.
+`_run_with_timeout()` uses a daemon thread that may still be executing after the
+timeout result; returning that agent to `IDLE` could allow overlapping work.
+Timeout cancellation or process isolation requires a separate design.
 
 ## Data Flow
 

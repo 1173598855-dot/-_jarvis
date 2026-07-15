@@ -38,8 +38,8 @@ function processEvent(data: string, handlers: ChatHandlers) {
   }
 
   let frame: {
-    error?: string | { code?: string; message?: string };
-    message?: { content?: string };
+    error?: { code?: string; message?: string };
+    content?: string;
     done?: boolean;
     prompt_eval_count?: number;
     eval_count?: number;
@@ -57,17 +57,15 @@ function processEvent(data: string, handlers: ChatHandlers) {
   }
 
   if (frame.error) {
-    const message = typeof frame.error === 'string'
-      ? frame.error
-      : frame.error.message || '聊天请求失败';
-    const code = typeof frame.error === 'string'
-      ? 'CHAT_STREAM_ERROR'
-      : frame.error.code || 'CHAT_STREAM_ERROR';
-    throw new JarvisApiError(message, code, 502);
+    throw new JarvisApiError(
+      frame.error.message || '聊天请求失败',
+      frame.error.code || 'CHAT_STREAM_ERROR',
+      502,
+    );
   }
 
-  if (frame.message?.content) {
-    handlers.onDelta(frame.message.content);
+  if (frame.content) {
+    handlers.onDelta(frame.content);
   }
 
   if (

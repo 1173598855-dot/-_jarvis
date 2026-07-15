@@ -88,6 +88,9 @@ class TestRunAllCoverage(unittest.TestCase):
         self.assertIn("TestSetupDocs", case_names)
         self.assertIn("TestPythonDependencies", case_names)
         self.assertIn("TestIterationLedger", case_names)
+        self.assertIn("TestSharedApiContract", case_names)
+        self.assertIn("TestLocalIntegrationProfile", case_names)
+        self.assertIn("TestRequestBodyLimitMiddleware", case_names)
 
     def test_build_aggregate_suite_loads_every_declared_case(self):
         expected = sum(

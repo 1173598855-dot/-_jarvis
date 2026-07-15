@@ -146,6 +146,73 @@ class TestMemoryStore(unittest.TestCase):
             self.assertEqual(len(user_entries), 1)
             self.assertEqual(user_entries[0].title, f"u1_{uid}")
 
+    def test_delete_probe_removes_exact_entry_file_and_index_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(memory_dir=tmp)
+            entry = MemoryEntry.create(
+                MemoryType.PROJECT,
+                ".test-local-integration-probe",
+                "temporary",
+                metadata={"probe_cleanup_token": "secret"},
+            )
+            path = Path(store.store(entry))
+
+            deleted = store.delete_probe(
+                MemoryType.PROJECT,
+                entry.id,
+                "secret",
+            )
+
+            self.assertTrue(deleted)
+            self.assertFalse(path.exists())
+            self.assertNotIn(entry.id, store.index_file.read_text(encoding="utf-8"))
+            self.assertEqual(store.load(), [])
+
+    def test_delete_probe_rejects_invalid_entry_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(memory_dir=tmp)
+
+            self.assertFalse(store.delete_probe(MemoryType.PROJECT, "../MEMORY", "secret"))
+
+    def test_delete_probe_rejects_regular_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(memory_dir=tmp)
+            entry = MemoryEntry.create(
+                MemoryType.PROJECT,
+                "real user memory",
+                "keep this",
+                metadata={"probe_cleanup_token": "secret"},
+            )
+            path = Path(store.store(entry))
+
+            self.assertFalse(store.delete_probe(MemoryType.PROJECT, entry.id, "secret"))
+            self.assertTrue(path.exists())
+
+    def test_delete_probe_targets_one_memory_type_when_ids_collide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(memory_dir=tmp)
+            entries = [
+                MemoryEntry.create(
+                    memory_type,
+                    ".test-local-integration-collision",
+                    "same content",
+                    metadata={"probe_cleanup_token": "secret"},
+                )
+                for memory_type in (MemoryType.USER, MemoryType.PROJECT)
+            ]
+            paths = [Path(store.store(entry)) for entry in entries]
+            self.assertEqual(entries[0].id, entries[1].id)
+
+            deleted = store.delete_probe(
+                MemoryType.PROJECT,
+                entries[1].id,
+                "secret",
+            )
+
+            self.assertTrue(deleted)
+            self.assertTrue(paths[0].exists())
+            self.assertFalse(paths[1].exists())
+
     def test_index_created(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MemoryStore(memory_dir=tmp)

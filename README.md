@@ -1,4 +1,4 @@
-﻿# XiaoYi J.A.R.V.I.S.
+# XiaoYi J.A.R.V.I.S.
 
 XiaoYi J.A.R.V.I.S. is a local-first autonomous-evolution engine for multi-agent orchestration, Ollama access, controlled execution, plugin lifecycle management, memory, and a responsive Solid.js command center.
 
@@ -22,6 +22,8 @@ The project is evolving through the protocol in [docs/protocols](docs/protocols)
 ```text
 .
 +-- CHANGELOG.md
++-- contracts/
+|   +-- core-api.openapi.json
 +-- docs/
 |   +-- protocols/
 |   +-- reports/
@@ -101,13 +103,36 @@ npm run dev
 
 ## Runtime Configuration
 
-`JARVIS_ALLOWED_ORIGINS` controls CORS for the Python HTTPServer, FastAPI server, and Express backend.
+`JARVIS_ALLOWED_ORIGINS` controls CORS for the Python HTTPServer, FastAPI server, and Express backend. When unset, only the local Vite origins are allowed; `*` is ignored rather than used as a fallback.
 
 ```powershell
 $env:JARVIS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 ```
 
-When unset, development servers keep wildcard CORS compatibility. When set, only matching request origins receive `Access-Control-Allow-Origin`.
+When set, only exact matching request origins receive `Access-Control-Allow-Origin`. `JARVIS_HOST` defaults to `127.0.0.1`; use an explicit value only when a deployment boundary has been reviewed.
+
+Role dispatch uses the same `OLLAMA_BASE_URL` and in-process `OllamaManager` as chat and token telemetry. `JARVIS_ROLE_MODEL` selects the installed Ollama model used by `/api/roles/dispatch`, capability dispatch, and batch dispatch; it defaults to `llama3.2`.
+
+```powershell
+$env:JARVIS_ROLE_MODEL = "llama3.2"
+```
+
+Role profile `tools` are declarations, not authority. `AgentFactory` uses an empty
+`RoleToolBroker` by default; a tool appears in role prompts only when it is
+declared by the profile, explicitly granted to that role, and backed by a
+registered handler. Automatic model-driven tool invocation is not enabled, and
+no HTTP setting grants terminal or plugin access to roles.
+
+Terminal execution is disabled by default. To expose the five read-only diagnostic operations (`echo`, `pwd`, `whoami`, `hostname`, and `date`) to a local trusted client, explicitly configure both a high-entropy capability token and the enable flag:
+
+```powershell
+$tokenBytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+$env:JARVIS_TERMINAL_TOKEN = [Convert]::ToHexString($tokenBytes)
+$env:JARVIS_TERMINAL_ENABLED = "true"
+```
+
+Callers must send the token in `X-Jarvis-Terminal-Token`. The Express service forwards this header to the configured Core API; it never launches the Python terminal executor itself.
 
 `JARVIS_CORE_API_URL` enables the Express bridge for memory, plugin, event, and capability endpoints. Start FastAPI first, then launch Express with:
 
@@ -151,6 +176,7 @@ Configuration and documentation guards:
 python tests/test_project_config.py
 python tests/test_docs_setup.py
 python tests/test_readme.py
+python -m unittest tests.test_api_contract
 ```
 
 Frontend unit, browser, type, and production checks:
@@ -163,7 +189,24 @@ npm run typecheck
 npm run build
 ```
 
+Optional local integration profile (requires running Express + Ollama):
+
+```powershell
+.\venv\Scripts\python.exe scripts/local_integration_profile.py
+```
+
+Use `--require-services` in CI or prepared environments to enforce service availability.
+
+The CI-equivalent deterministic check starts FastAPI, Express, and a local Ollama fixture on ephemeral loopback ports:
+
+```powershell
+.\venv\Scripts\python.exe scripts/ci_local_integration.py --require-services
+```
+
 ## Key API Surfaces
+
+The stable cross-implementation response contract is maintained in
+[`contracts/core-api.openapi.json`](contracts/core-api.openapi.json).
 
 | Endpoint | Service | Purpose |
 |----------|---------|---------|
@@ -176,18 +219,23 @@ npm run build
 | `/api/git/status` | Express | Read-only working-tree status |
 | `/api/git/log` | Express | Read-only commit history |
 | `/api/capabilities` | Express | Core API bridge availability |
-| `/api/terminal/execute` | Python / FastAPI / Express | Guarded terminal execution |
+| `/api/terminal/execute` | Python / FastAPI / Express | Opt-in token-gated fixed diagnostic operations |
 | `/api/plugins` | Python / FastAPI / Express | Plugin inventory |
 | `/api/plugins/load` | Python / FastAPI / Express | Load plugin |
 | `/api/plugins/enable` | Python / FastAPI / Express | Enable plugin |
 | `/api/plugins/disable` | Python / FastAPI / Express | Disable plugin |
 | `/api/memory/entries` | Python / FastAPI / Express | Memory entries |
 | `/api/memory/store` | Python / FastAPI / Express | Store memory |
+| `DELETE /api/memory/probes/{type}/{id}` | Python / FastAPI / Express | Token-verified local integration probe cleanup |
 | `/api/events` | Python / FastAPI / Express | Event history |
 | `/api/orchestrator/agents` | Python / FastAPI / Express | Registered agent list |
 | `/api/orchestrator/history` | Python / FastAPI / Express | Task history |
 | `/api/orchestrator/dispatch` | Python / FastAPI / Express | Dispatch task |
-| `/api/roles/*` | FastAPI | Role-driven dispatch |
+| `/api/roles` | Python / FastAPI / Express | Registered role list and capability filter |
+| `/api/roles/{role_name}` | Python / FastAPI / Express | Role profile |
+| `/api/roles/dispatch` | Python / FastAPI / Express | Dispatch by role |
+| `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Dispatch by capability |
+| `/api/roles/batch_dispatch` | Python / FastAPI / Express | Batch role dispatch |
 
 ## Notes
 

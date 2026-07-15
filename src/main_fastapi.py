@@ -29,19 +29,23 @@ Endpoints:
 - POST /api/roles/dispatch_by_cap - Dispatch by capability
 """
 
+import atexit
 import json
 import logging
 import os
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from core.brain.agent_factory import AgentFactory
@@ -52,7 +56,14 @@ from core.brain.role_registry import create_default_registry
 # Phase 11 imports (moved to top to resolve E402)
 from core.kernel.ollama_manager import OllamaManager
 from core.kernel.plugin_sdk import global_plugin_manager
+from core.kernel.runtime_security import (
+    configured_allowed_origins as configured_security_origins,
+    terminal_access_enabled,
+    terminal_request_is_authorized,
+)
 from core.kernel.terminal_executor import TerminalCommand, TerminalExecutor
+from core.kernel.terminal_policy import TerminalPolicyError, validate_terminal_operation
+from core.kernel.terminal_worker import TerminalWorker
 
 # Add src to path (after imports so Phase 11 modules resolve)
 sys_path = str(Path(__file__).parent)
@@ -60,29 +71,221 @@ if sys_path not in sys.path:
     sys.path.insert(0, sys_path)
 
 logger = logging.getLogger(__name__)
+MAX_REQUEST_BODY_BYTES = 32 * 1024
 
 
 def configured_allowed_origins() -> list[str]:
-    raw = os.environ.get("JARVIS_ALLOWED_ORIGINS", "*")
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return configured_security_origins()
+
+
+def _normalize_dispatch_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    normalized = []
+    index = 0
+    while index < len(value):
+        code_point = ord(value[index])
+        if 0xD800 <= code_point <= 0xDBFF:
+            if index + 1 >= len(value):
+                return None
+            low_surrogate = ord(value[index + 1])
+            if not 0xDC00 <= low_surrogate <= 0xDFFF:
+                return None
+            scalar = 0x10000 + (
+                ((code_point - 0xD800) << 10)
+                | (low_surrogate - 0xDC00)
+            )
+            normalized.append(chr(scalar))
+            index += 2
+            continue
+        if 0xDC00 <= code_point <= 0xDFFF:
+            return None
+        normalized.append(value[index])
+        index += 1
+    return "".join(normalized)
+
+
+class _RequestBodyLimitMiddleware:
+    """Reject declared request bodies before framework parsing allocates them."""
+
+    def __init__(self, app, max_body_bytes: int = MAX_REQUEST_BODY_BYTES):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def _send_limit_response(self, scope, receive, send):
+        await JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "code": "REQUEST_BODY_TOO_LARGE",
+                    "message": "Request body exceeds the 32 KiB limit",
+                }
+            },
+        )(scope, receive, send)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = dict(scope.get("headers", [])).get(b"content-length")
+        if content_length is not None:
+            try:
+                body_size = int(content_length)
+            except ValueError:
+                body_size = 0
+            if body_size > self.max_body_bytes:
+                await self._send_limit_response(scope, receive, send)
+                return
+
+        rejected = False
+        received_bytes = 0
+
+        async def limited_receive():
+            nonlocal rejected, received_bytes
+            if rejected:
+                return {"type": "http.disconnect"}
+
+            message = await receive()
+            if message["type"] != "http.request":
+                return message
+
+            received_bytes += len(message.get("body", b""))
+            exceeds_limit = received_bytes > self.max_body_bytes
+            reaches_limit_with_more_body = (
+                received_bytes == self.max_body_bytes
+                and message.get("more_body", False)
+            )
+            if exceeds_limit or reaches_limit_with_more_body:
+                rejected = True
+                await self._send_limit_response(scope, receive, send)
+                return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            if not rejected:
+                await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not rejected:
+                raise
 
 # ============================================================
 # FastAPI app initialization
 # ============================================================
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("J.A.R.V.I.S. FastAPI server started on http://127.0.0.1:8080")
+    app_state = _app.state.jarvis_state
+    try:
+        yield
+    finally:
+        try:
+            app_state.orchestrator.shutdown()
+            app_state.agent_factory.shutdown()
+        finally:
+            app_state.terminal.close()
+        logger.info("J.A.R.V.I.S. FastAPI server shutdown complete")
+
+
 app = FastAPI(
     title="J.A.R.V.I.S. API",
     description="XiaoYi autonomous evolution engine - REST API",
     version="1.1.0",
+    lifespan=lifespan,
 )
 
+app.add_middleware(_RequestBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_allowed_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Jarvis-Terminal-Token"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict):
+        code = str(detail.get("code", f"HTTP_{exc.status_code}"))
+        message = str(detail.get("message", detail))
+    else:
+        code = f"HTTP_{exc.status_code}"
+        message = str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": code, "message": message}},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    errors = exc.errors()
+    is_invalid_json = any(
+        error.get("type") == "json_invalid" for error in errors
+    )
+    is_missing_plugin_id = any(
+        error.get("type") == "missing"
+        and tuple(error.get("loc", ())) == ("body", "plugin_id")
+        for error in errors
+    )
+    is_missing_command = any(
+        error.get("type") == "missing"
+        and tuple(error.get("loc", ())) == ("body", "command")
+        for error in errors
+    )
+    is_orchestrator_history = request.url.path == "/api/orchestrator/history"
+    status_code = (
+        400
+        if (
+            is_invalid_json
+            or is_missing_plugin_id
+            or is_missing_command
+            or is_orchestrator_history
+            or request.url.path == "/api/terminal/execute"
+            or request.url.path == "/api/ollama/chat/stream"
+        )
+        else 422
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": (
+                    "INVALID_JSON"
+                    if is_invalid_json
+                    else "MISSING_PLUGIN_ID"
+                    if is_missing_plugin_id
+                    else "MISSING_COMMAND"
+                    if is_missing_command
+                    else "INVALID_REQUEST"
+                    if is_orchestrator_history
+                    else "INVALID_REQUEST"
+                ),
+                "message": (
+                    "Request body must be valid JSON"
+                    if is_invalid_json
+                    else "Missing plugin_id parameter"
+                    if is_missing_plugin_id
+                    else "Missing command parameter"
+                    if is_missing_command
+                    else "The history limit must be an integer"
+                    if is_orchestrator_history
+                    else "Request body is invalid"
+                ),
+            }
+        },
+    )
 
 # ============================================================
 # Global state
@@ -90,20 +293,62 @@ app.add_middleware(
 
 class AppState:
     """Application global state"""
-    def __init__(self):
+    def __init__(self, memory_dir: str = ".auto-memory", terminal=None):
         self.ollama = OllamaManager()
-        self.terminal = TerminalExecutor()
-        self.memory_store = MemoryStore(memory_dir=".auto-memory")
+        self.terminal = terminal if terminal is not None else TerminalWorker()
+        self.memory_store = MemoryStore(memory_dir=memory_dir)
         self.orchestrator = Orchestrator()
         self.role_registry = create_default_registry()
         self.agent_factory = AgentFactory(
             registry=self.role_registry,
             orchestrator=self.orchestrator,
+            ollama_manager=self.ollama,
         )
         self.start_time = time.time()
         self.request_count = 0
 
-state = AppState()
+
+_active_state: ContextVar[Optional[AppState]] = ContextVar(
+    "jarvis_fastapi_state",
+    default=None,
+)
+
+
+class _StateProxy:
+    def __init__(self, default_state: AppState):
+        object.__setattr__(self, "_default_state", default_state)
+
+    def _target(self) -> AppState:
+        return _active_state.get() or self._default_state
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._target(), name, value)
+
+
+class _StateBindingMiddleware:
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in {"http", "websocket"}:
+            await self.asgi_app(scope, receive, send)
+            return
+        app_state = scope["app"].state.jarvis_state
+        token = _active_state.set(app_state)
+        try:
+            await self.asgi_app(scope, receive, send)
+        finally:
+            _active_state.reset(token)
+
+
+_default_state = AppState()
+state = _StateProxy(_default_state)
+atexit.register(_default_state.terminal.close)
+app.state.jarvis_state = _default_state
+app.add_middleware(_StateBindingMiddleware)
 
 # ============================================================
 # Pydantic models
@@ -124,6 +369,10 @@ class MemoryRequest(BaseModel):
     title: str = ""
     content: str = ""
     tags: list = []
+    probe_cleanup_token: Optional[str] = None
+
+class ProbeCleanupRequest(BaseModel):
+    cleanup_token: str
 
 class PluginLoadRequest(BaseModel):
     plugin_id: str
@@ -217,34 +466,34 @@ async def ollama_models():
 @app.post("/api/ollama/chat")
 async def ollama_chat(request: ChatRequest):
     """Chat request (non-streaming)"""
-    result = state.ollama.chat(request.model, request.messages, request.stream)
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    usage = result.get("usage")
-    if isinstance(usage, dict):
-        state.ollama.record_token_usage(
-            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+    if request.stream is not False:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Use /api/ollama/chat/stream for streaming requests",
+            },
         )
-    else:
-        state.ollama.record_token_usage()
+    result = state.ollama.chat(request.model, request.messages, False)
+    if "error" in result:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "OLLAMA_UPSTREAM_ERROR",
+                "message": "Ollama chat request failed",
+            },
+        )
     return result
 
 @app.get("/api/ollama/token-usage")
 async def ollama_token_usage():
     """Ollama token usage snapshot"""
-    usage = state.ollama.get_token_usage()
-    return usage.to_dict()
+    return state.ollama.get_token_usage_snapshot()
 
-@app.get("/api/ollama/chat/stream")
-async def ollama_chat_stream(model: str = "default", messages: str = "[]"):
-    """Streaming chat (SSE)"""
-    try:
-        messages_list = json.loads(messages)
-    except json.JSONDecodeError:
-        messages_list = [{"role": "user", "content": messages}]
-
+def _ollama_chat_stream_response(model: str, messages_list: list):
+    """Build one canonical Ollama SSE response."""
     async def generate():
+        completed = False
         try:
             for chunk_text, is_done in state.ollama.stream_chat_generator(model, messages_list):
                 event_data = json.dumps({
@@ -254,10 +503,17 @@ async def ollama_chat_stream(model: str = "default", messages: str = "[]"):
                 }, ensure_ascii=False)
                 yield f"data: {event_data}\n\n"
                 if is_done:
+                    completed = True
                     break
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            error_data = json.dumps({"error": str(e)}, ensure_ascii=False)
+            if completed:
+                yield "data: [DONE]\n\n"
+        except Exception as error:
+            error_data = json.dumps({
+                "error": {
+                    "code": "OLLAMA_STREAM_ERROR",
+                    "message": str(error),
+                },
+            }, ensure_ascii=False)
             yield f"data: {error_data}\n\n"
 
     return StreamingResponse(
@@ -269,22 +525,72 @@ async def ollama_chat_stream(model: str = "default", messages: str = "[]"):
         },
     )
 
+
+@app.get("/api/ollama/chat/stream")
+async def ollama_chat_stream(model: str = "default", messages: str = "[]"):
+    """Streaming chat (SSE) with query parameters for EventSource clients."""
+    try:
+        messages_list = json.loads(messages)
+    except json.JSONDecodeError:
+        messages_list = [{"role": "user", "content": messages}]
+    return _ollama_chat_stream_response(model, messages_list)
+
+
+@app.post("/api/ollama/chat/stream")
+async def ollama_chat_stream_post(request: ChatRequest):
+    """Streaming chat (SSE) with a JSON body for fetch clients."""
+    return _ollama_chat_stream_response(request.model, request.messages)
+
 # ============================================================
 # API endpoints - Terminal
 # ============================================================
 
 @app.post("/api/terminal/execute")
-async def terminal_execute(request: TerminalRequest):
+async def terminal_execute(
+    request: TerminalRequest,
+    x_jarvis_terminal_token: Optional[str] = Header(default=None),
+):
     """Terminal command execution"""
     if not request.command:
-        raise HTTPException(status_code=400, detail="Missing command parameter")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MISSING_COMMAND",
+                "message": "Missing command parameter",
+            },
+        )
+
+    try:
+        command, args, timeout = validate_terminal_operation(
+            request.command,
+            request.args,
+            request.timeout,
+        )
+    except TerminalPolicyError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_TERMINAL_REQUEST", "message": str(error)},
+        ) from error
+    if not terminal_access_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "TERMINAL_DISABLED", "message": "Terminal execution is disabled"},
+        )
+    if not terminal_request_is_authorized(x_jarvis_terminal_token):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "TERMINAL_UNAUTHORIZED",
+                "message": "Terminal capability token is invalid",
+            },
+        )
 
     cmd = TerminalCommand(
         id=f"api-{uuid.uuid4().hex[:8]}",
-        command=request.command,
-        args=request.args,
-        timeout=request.timeout,
-        risk_level=state.terminal._assess_risk(request.command),
+        command=command,
+        args=args,
+        timeout=timeout,
+        risk_level=state.terminal._assess_risk(command),
     )
     result = state.terminal.execute(cmd)
     return result.to_dict()
@@ -313,10 +619,24 @@ async def plugins_list():
 @app.post("/api/plugins/load")
 async def plugin_load(request: PluginLoadRequest):
     """Load plugin"""
+    if not request.plugin_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MISSING_PLUGIN_ID",
+                "message": "Missing plugin_id parameter",
+            },
+        )
     manifests = global_plugin_manager.discover()
     manifest = next((m for m in manifests if m.plugin_id == request.plugin_id), None)
     if not manifest:
-        raise HTTPException(status_code=404, detail=f"Plugin {request.plugin_id} not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PLUGIN_NOT_FOUND",
+                "message": f"Plugin {request.plugin_id} not found",
+            },
+        )
     instance = global_plugin_manager.load(manifest)
     return {
         "plugin_id": instance.manifest.plugin_id,
@@ -358,6 +678,7 @@ async def memory_entries(memory_type: Optional[str] = None):
                 "title": e.title,
                 "content": e.content[:200],
                 "created_at": e.created_at,
+                "tags": e.tags,
                 "access_count": e.access_count,
             }
             for e in entries
@@ -371,9 +692,44 @@ async def memory_store(request: MemoryRequest):
         mtype = MemoryType(request.type)
     except ValueError:
         mtype = MemoryType.USER
-    entry = MemoryEntry.create(mtype, request.title, request.content, tags=request.tags)
+    metadata = {}
+    if request.probe_cleanup_token:
+        metadata["probe_cleanup_token"] = request.probe_cleanup_token
+    entry = MemoryEntry.create(
+        mtype,
+        request.title,
+        request.content,
+        metadata=metadata,
+        tags=request.tags,
+    )
     path = state.memory_store.store(entry)
-    return {"success": True, "path": path}
+    return {
+        "success": True,
+        "path": path,
+        "id": entry.id,
+        "type": entry.type.value,
+    }
+
+@app.delete("/api/memory/probes/{memory_type}/{entry_id}")
+async def memory_probe_delete(
+    memory_type: MemoryType,
+    entry_id: str,
+    request: ProbeCleanupRequest,
+):
+    """Delete one integration probe after cleanup-token verification."""
+    if not state.memory_store.delete_probe(
+        memory_type,
+        entry_id,
+        request.cleanup_token,
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MEMORY_NOT_FOUND",
+                "message": "Memory entry not found",
+            },
+        )
+    return {"success": True, "id": entry_id}
 
 # ============================================================
 # API endpoints - Events
@@ -412,7 +768,7 @@ async def orchestrator_agents():
 @app.get("/api/orchestrator/history")
 async def orchestrator_history(limit: int = 10):
     """Return task history"""
-    history = state.orchestrator.collect(limit=limit)
+    history = state.orchestrator.collect(limit=max(1, min(100, limit)))
     return {"results": [r.to_dict() for r in history], "count": len(history)}
 
 @app.post("/api/orchestrator/dispatch")
@@ -420,16 +776,74 @@ async def orchestrator_dispatch(request: Request):
     """Dispatch task to agent"""
     try:
         data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
 
-    agent_name = data.get("agent_name", "")
-    prompt = data.get("prompt", "")
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be a JSON object",
+            },
+        )
+
+    agent_name = _normalize_dispatch_text(data.get("agent_name", ""))
+    prompt = _normalize_dispatch_text(data.get("prompt", ""))
     timeout = data.get("timeout", 300)
     priority = data.get("priority", 1)
 
-    if not agent_name or not prompt:
-        raise HTTPException(status_code=400, detail="agent_name and prompt are required")
+    if (
+        agent_name is None
+        or prompt is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "agent_name and prompt are required",
+            },
+        )
+
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, int)
+        or not 1 <= timeout <= 300
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "timeout must be an integer between 1 and 300",
+            },
+        )
+    if (
+        isinstance(priority, bool)
+        or not isinstance(priority, int)
+        or priority < 0
+        or priority > 3
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "priority must be an integer between 0 and 3",
+            },
+        )
 
     task = AgentTask(
         task_id=f"api-{uuid.uuid4().hex[:8]}",
@@ -449,6 +863,8 @@ async def orchestrator_dispatch(request: Request):
 @app.get("/api/roles")
 async def list_roles(capability: Optional[str] = None):
     """List all registered roles, optionally filtered by capability"""
+    if capability is not None and not capability.strip():
+        capability = None
     roles = state.role_registry.list_roles(capability=capability)
     return {
         "roles": [r.to_dict() for r in roles],
@@ -460,49 +876,178 @@ async def get_role(role_name: str):
     """Get specific role details"""
     profile = state.role_registry.get(role_name)
     if not profile:
-        raise HTTPException(status_code=404, detail=f"Role {role_name} not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_NOT_FOUND",
+                "message": f"Role '{role_name}' not found",
+            },
+        )
     return {"role": profile.to_dict()}
 
+async def _read_role_body(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be a JSON object",
+            },
+        )
+    return data
+
+
+def _validate_role_timeout(timeout: object) -> int:
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, int)
+        or not 1 <= timeout <= 300
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "timeout must be an integer between 1 and 300",
+            },
+        )
+    return timeout
+
+
 @app.post("/api/roles/dispatch")
-async def dispatch_by_role(request: RoleDispatchRequest):
+async def dispatch_by_role(request: Request):
     """Dispatch task to a specific role"""
+    data = await _read_role_body(request)
+    role_name = _normalize_dispatch_text(data.get("role_name", ""))
+    prompt = _normalize_dispatch_text(data.get("prompt", ""))
+    if role_name is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "role_name must be a non-empty string",
+            },
+        )
+    if prompt is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "prompt must be a non-empty string",
+            },
+        )
+    timeout = _validate_role_timeout(data.get("timeout", 300))
+    if state.role_registry.get(role_name) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_NOT_FOUND",
+                "message": f"Role '{role_name}' not found",
+            },
+        )
     result = state.agent_factory.dispatch_by_role(
-        request.role_name, request.prompt, timeout=request.timeout
+        role_name, prompt, timeout=timeout
     )
     return result.to_dict()
 
 @app.post("/api/roles/dispatch_by_cap")
-async def dispatch_by_capability(request: CapabilityDispatchRequest):
+async def dispatch_by_capability(request: Request):
     """Dispatch task by capability (auto-selects highest priority role)"""
+    data = await _read_role_body(request)
+    capability = _normalize_dispatch_text(data.get("capability", ""))
+    prompt = _normalize_dispatch_text(data.get("prompt", ""))
+    if capability is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "capability must be a non-empty string",
+            },
+        )
+    if prompt is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "prompt must be a non-empty string",
+            },
+        )
+    timeout = _validate_role_timeout(data.get("timeout", 300))
     result = state.agent_factory.dispatch_by_capability(
-        request.capability, request.prompt, timeout=request.timeout
+        capability, prompt, timeout=timeout
     )
     if result.status == "no_capability":
         raise HTTPException(
             status_code=404,
-            detail=f"No role with capability: {request.capability}",
+            detail={
+                "code": "CAPABILITY_NOT_FOUND",
+                "message": f"No role with capability: {capability}",
+            },
         )
     return result.to_dict()
 
 @app.post("/api/roles/batch_dispatch")
-async def batch_dispatch(request: BatchDispatchRequest):
+async def batch_dispatch(request: Request):
     """Batch dispatch multiple tasks"""
-    results = state.agent_factory.batch_dispatch(request.tasks)
+    data = await _read_role_body(request)
+    tasks = data.get("tasks", [])
+    if not isinstance(tasks, list):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "tasks must be an array",
+            },
+        )
+    results = state.agent_factory.batch_dispatch(tasks)
     return {"results": [r.to_dict() for r in results], "count": len(results)}
 
-# ============================================================
-# Startup / shutdown
-# ============================================================
 
-@app.on_event("startup")
-async def startup():
-    logger.info("J.A.R.V.I.S. FastAPI server started on http://127.0.0.1:8080")
-
-@app.on_event("shutdown")
-async def shutdown():
-    state.orchestrator.shutdown()
-    state.agent_factory.shutdown()
-    logger.info("J.A.R.V.I.S. FastAPI server shutdown complete")
+def create_app(app_state: Optional[AppState] = None) -> FastAPI:
+    """Create an isolated FastAPI application with its own lifecycle state."""
+    application = FastAPI(
+        title="J.A.R.V.I.S. API",
+        description="XiaoYi autonomous evolution engine - REST API",
+        version="1.1.0",
+        lifespan=lifespan,
+    )
+    application.add_middleware(_RequestBodyLimitMiddleware)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=configured_allowed_origins(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Jarvis-Terminal-Token"],
+    )
+    application.add_middleware(_StateBindingMiddleware)
+    application.add_exception_handler(HTTPException, http_exception_handler)
+    application.add_exception_handler(
+        RequestValidationError,
+        request_validation_exception_handler,
+    )
+    standard_paths = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+    for route in app.router.routes:
+        if getattr(route, "path", None) not in standard_paths:
+            application.router.routes.append(route)
+    application.state.jarvis_state = app_state or AppState()
+    return application
 
 # ============================================================
 # Direct execution
@@ -512,4 +1057,4 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8080)
+    uvicorn.run(app, host=os.environ.get("JARVIS_HOST", "127.0.0.1"), port=8080)

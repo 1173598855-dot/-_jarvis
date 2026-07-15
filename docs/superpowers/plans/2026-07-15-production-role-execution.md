@@ -32,7 +32,7 @@
 - Modify `docs/reports/GITHUB_LEARNING_REPORT.md`: record Phase 3 evidence and no-dependency decision.
 - Modify `docs/reports/PROJECT_ANALYSIS.md`, `docs/reports/README.md`, `CHANGELOG.md`, `AGENTS.md`: advance authoritative project state to Iteration 126.
 - Create `docs/reports/AUDIT_REPORT_126.md`: current delivery evidence.
-- Delete `docs/reports/AUDIT_REPORT_116.md`: retain reports 117-126.
+- Delete `docs/reports/AUDIT_REPORT_115.md` and `docs/reports/AUDIT_REPORT_116.md`: correct the pre-existing eleven-report drift and retain reports 117-126.
 - Modify `docs/superpowers/specs/2026-07-15-production-role-execution-design.md`: remove two trailing Markdown spaces reported during the design commit.
 
 ---
@@ -360,6 +360,7 @@ git commit -m "test: prove live role execution across adapters"
 - Modify: `CHANGELOG.md`
 - Modify: `AGENTS.md`
 - Create: `docs/reports/AUDIT_REPORT_126.md`
+- Delete: `docs/reports/AUDIT_REPORT_115.md`
 - Delete: `docs/reports/AUDIT_REPORT_116.md`
 - Modify: `docs/superpowers/specs/2026-07-15-production-role-execution-design.md`
 
@@ -398,7 +399,7 @@ Update the analysis and ledgers to state that production HTTP role dispatch now 
 
 - [ ] **Step 4: Add the audit report and clean the design whitespace**
 
-Create `AUDIT_REPORT_126.md` with sections `Goal`, `Changes`, `Verification`, and `Remaining Work`. Remove only the two trailing spaces after the design document's Iteration and Date metadata lines. Delete `AUDIT_REPORT_116.md` to preserve the ten-report rule.
+Create `AUDIT_REPORT_126.md` with sections `Goal`, `Changes`, `Verification`, and `Remaining Work`. Remove only the two trailing spaces after the design document's Iteration and Date metadata lines. Delete `AUDIT_REPORT_115.md` and `AUDIT_REPORT_116.md` to correct the pre-existing eleven-report drift and preserve the ten-report rule.
 
 - [ ] **Step 5: Run documentation regressions**
 
@@ -413,7 +414,7 @@ Expected: all documentation and report-retention tests pass.
 - [ ] **Step 6: Commit documentation and ledger files**
 
 ```powershell
-git add -- README.md docs/SETUP.md docs/reports/GITHUB_LEARNING_REPORT.md docs/reports/PROJECT_ANALYSIS.md docs/reports/README.md CHANGELOG.md AGENTS.md docs/reports/AUDIT_REPORT_126.md docs/reports/AUDIT_REPORT_116.md docs/superpowers/specs/2026-07-15-production-role-execution-design.md
+git add -- README.md docs/SETUP.md docs/reports/GITHUB_LEARNING_REPORT.md docs/reports/PROJECT_ANALYSIS.md docs/reports/README.md CHANGELOG.md AGENTS.md docs/reports/AUDIT_REPORT_126.md docs/reports/AUDIT_REPORT_115.md docs/reports/AUDIT_REPORT_116.md docs/superpowers/specs/2026-07-15-production-role-execution-design.md
 git diff --cached --check
 git commit -m "docs: record production role execution"
 ```

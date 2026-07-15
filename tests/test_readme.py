@@ -20,6 +20,9 @@ class TestReadme(unittest.TestCase):
     def test_readme_links_report_index(self):
         self.assertIn("docs/reports/README.md", self.text)
 
+    def test_readme_links_shared_api_contract(self):
+        self.assertIn("contracts/core-api.openapi.json", self.text)
+
     def test_readme_describes_main_services(self):
         self.assertIn("Python HTTPServer", self.text)
         self.assertIn("FastAPI", self.text)

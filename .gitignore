@@ -35,6 +35,7 @@ Thumbs.db
 # Test/runtime scratch
 .test-*/
 .test-*.json
+.test-*.txt
 .test-*.png
 test_write.tmp
 frontend/test-results/

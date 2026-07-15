@@ -1,6 +1,9 @@
 """Extended tests for terminal_executor.py - Iteration 46"""
 import sys
 import unittest
+import os
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
@@ -155,6 +158,77 @@ class TestTerminalExecutorEnvInjection(unittest.TestCase):
                                 env={"MY_VAR": "my_val"},
                                 risk_level=CommandRisk.SAFE))
             self.assertIn("env", mp.call_args[1])
+
+
+class TestTerminalExecutorSandboxBoundary(unittest.TestCase):
+    def test_close_removes_dedicated_sandbox_directory(self):
+        exe = TerminalExecutor()
+        sandbox_dir = exe.sandbox_dir
+
+        exe.close()
+
+        self.assertFalse(os.path.exists(sandbox_dir))
+
+    def test_closed_sandbox_rejects_new_commands(self):
+        exe = TerminalExecutor()
+        exe.close()
+
+        result = exe.execute(TerminalCommand(
+            id="closed-sandbox",
+            command="echo",
+            args=["blocked"],
+            risk_level=CommandRisk.SAFE,
+        ))
+
+        self.assertFalse(result.success)
+        self.assertIn("Sandbox", result.stderr)
+
+    def test_sandbox_uses_dedicated_directory_and_minimal_environment(self):
+        exe = TerminalExecutor()
+        with patch.dict("os.environ", {"JARVIS_TEST_SECRET": "do-not-inherit"}), patch(
+            "subprocess.Popen"
+        ) as process:
+            process.return_value.communicate.return_value = ("out", "")
+            process.return_value.returncode = 0
+
+            result = exe.execute(TerminalCommand(
+                id="sandboxed",
+                command="whoami",
+                risk_level=CommandRisk.SAFE,
+            ))
+
+        self.assertTrue(result.success)
+        kwargs = process.call_args.kwargs
+        self.assertTrue(Path(kwargs["cwd"]).is_dir())
+        self.assertEqual(Path(kwargs["cwd"]), exe.sandbox_dir)
+        self.assertNotIn("JARVIS_TEST_SECRET", kwargs["env"])
+        self.assertIn("PATH", kwargs["env"])
+
+    def test_sandbox_rejects_caller_working_directory(self):
+        exe = TerminalExecutor()
+        result = exe.execute(TerminalCommand(
+            id="sandbox-cwd",
+            command="echo",
+            args=["blocked"],
+            cwd=".",
+            risk_level=CommandRisk.SAFE,
+        ))
+
+        self.assertFalse(result.success)
+        self.assertIn("Sandbox policy", result.stderr)
+
+    def test_sandbox_rejects_caller_environment(self):
+        exe = TerminalExecutor()
+        result = exe.execute(TerminalCommand(
+            id="sandbox-env",
+            command="echo",
+            args=["blocked"],
+            env={"INJECTED": "value"},
+            risk_level=CommandRisk.SAFE,
+        ))
+
+        self.assertFalse(result.success)
+        self.assertIn("Sandbox policy", result.stderr)
 
 
 class TestTerminalExecutorDurationCalculation(unittest.TestCase):

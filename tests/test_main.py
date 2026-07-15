@@ -10,7 +10,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -47,6 +47,19 @@ def _make_handler(command="GET", path="/api/health", headers=None):
 
 
 class TestMainHTTPHelpers(unittest.TestCase):
+    def test_normalize_dispatch_text_accepts_surrogate_pair_and_scalar(self):
+        paired_surrogates = "\ud83d\ude00"
+        scalar_emoji = "\U0001f600"
+
+        self.assertEqual(
+            _main._normalize_dispatch_text(paired_surrogates),
+            scalar_emoji,
+        )
+        self.assertEqual(
+            _main._normalize_dispatch_text(scalar_emoji),
+            scalar_emoji,
+        )
+
     def test_send_json_sets_content_type(self):
         handler = _make_handler()
         handler.send_response = MagicMock()
@@ -59,8 +72,23 @@ class TestMainHTTPHelpers(unittest.TestCase):
         self.assertEqual(len(ct_calls), 1)
         self.assertIn("application/json", ct_calls[0][0][1])
 
-    def test_send_json_sets_cors_headers(self):
+    def test_send_json_advertises_connection_close_when_required(self):
         handler = _make_handler()
+        handler.close_connection = True
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+
+        handler._send_json({"error": {"code": "fixture", "message": "fixture"}}, 413)
+
+        self.assertIn(
+            ("Connection", "close"),
+            [call.args for call in handler.send_header.call_args_list],
+        )
+
+    def test_send_json_sets_cors_headers(self):
+        handler = _make_handler(headers={"Origin": "http://localhost:5173"})
         handler.send_response = MagicMock()
         handler.send_header = MagicMock()
         handler.end_headers = MagicMock()
@@ -92,6 +120,13 @@ class TestMainHTTPHelpers(unittest.TestCase):
                 os.environ.pop("JARVIS_ALLOWED_ORIGINS", None)
             else:
                 os.environ["JARVIS_ALLOWED_ORIGINS"] = previous
+
+    def test_default_cors_origins_are_local_only(self):
+        with patch.dict(os.environ, {"JARVIS_ALLOWED_ORIGINS": ""}):
+            self.assertEqual(
+                _main._configured_allowed_origins(),
+                ["http://localhost:5173", "http://127.0.0.1:5173"],
+            )
 
     def test_send_json_omits_disallowed_origin(self):
         previous = os.environ.get("JARVIS_ALLOWED_ORIGINS")
@@ -158,7 +193,10 @@ class TestMainHTTPHelpers(unittest.TestCase):
         handler._send_error("Not Found", status=404)
         handler.wfile.write.assert_called_once()
         parsed = json.loads(handler.wfile.write.call_args[0][0])
-        self.assertEqual(parsed["error"], "Not Found")
+        self.assertEqual(parsed["error"], {
+            "code": "HTTP_404",
+            "message": "Not Found",
+        })
 
     def test_send_error_default_status_400(self):
         handler = _make_handler()
@@ -178,6 +216,31 @@ class TestMainHTTPHelpers(unittest.TestCase):
         self.assertEqual(result["model"], "llama3")
         self.assertEqual(result["prompt"], "hello")
 
+    def test_read_body_uses_bounded_chunks(self):
+        class BoundedChunkReader(io.BytesIO):
+            def __init__(self, value):
+                super().__init__(value)
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                if size > 8 * 1024:
+                    raise AssertionError(f"unbounded read: {size}")
+                return super().read(size)
+
+        body = json.dumps({"value": "x" * 9000}).encode("utf-8")
+        reader = BoundedChunkReader(body)
+        handler = _make_handler()
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = reader
+
+        result = handler._read_body()
+
+        self.assertEqual(result["value"], "x" * 9000)
+        self.assertGreater(len(reader.read_sizes), 1)
+        self.assertLessEqual(max(reader.read_sizes), 8 * 1024)
+        self.assertFalse(handler.close_connection)
+
     def test_read_body_empty(self):
         handler = _make_handler()
         handler.headers = {"Content-Length": "0"}
@@ -190,14 +253,127 @@ class TestMainHTTPHelpers(unittest.TestCase):
         handler.rfile = io.BytesIO(b"")
         self.assertEqual(handler._read_body(), {})
 
-    def test_read_body_invalid_json_returns_empty(self):
+    def test_read_body_invalid_json_raises_typed_error(self):
         handler = _make_handler()
         handler.headers = {"Content-Length": "5"}
         handler.rfile = io.BytesIO(b"not json")
-        self.assertEqual(handler._read_body(), {})
+        with self.assertRaises(_main.InvalidJsonBody):
+            handler._read_body()
+
+    def test_read_body_excessive_integer_raises_typed_error(self):
+        body = b'{"value":' + (b"9" * 5000) + b"}"
+        handler = _make_handler()
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        with self.assertRaises(_main.InvalidJsonBody):
+            handler._read_body()
+
+    def test_read_body_deeply_nested_json_raises_typed_error(self):
+        depth = 10_000
+        body = b'{"value":' + (b"[" * depth) + b"0" + (b"]" * depth) + b"}"
+        handler = _make_handler()
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        with self.assertRaises(_main.InvalidJsonBody):
+            handler._read_body()
+
+    def test_read_body_short_read_raises_typed_error_and_closes_connection(self):
+        handler = _make_handler()
+        handler.headers = {"Content-Length": "3"}
+        handler.rfile = io.BytesIO(b"{}")
+
+        with self.assertRaises(_main.InvalidJsonBody):
+            handler._read_body()
+
+        self.assertTrue(handler.close_connection)
+
+    def test_read_body_timeout_raises_typed_error_and_closes_connection(self):
+        class TimeoutReader:
+            def __init__(self):
+                self.read_sizes = []
+
+            def read(self, size):
+                self.read_sizes.append(size)
+                raise TimeoutError("fixture timeout")
+
+        class FixtureConnection:
+            def __init__(self):
+                self.timeout = None
+                self.timeout_values = []
+
+            def gettimeout(self):
+                return self.timeout
+
+            def settimeout(self, value):
+                self.timeout = value
+                self.timeout_values.append(value)
+
+        reader = TimeoutReader()
+        connection = FixtureConnection()
+        handler = _make_handler()
+        handler.headers = {"Content-Length": "32"}
+        handler.rfile = reader
+        handler.connection = connection
+
+        with self.assertRaises(_main.InvalidJsonBody):
+            handler._read_body()
+
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(reader.read_sizes, [32])
+        active_timeouts = [
+            value for value in connection.timeout_values if value is not None
+        ]
+        self.assertTrue(active_timeouts)
+        self.assertLessEqual(max(active_timeouts), 2.0)
+        self.assertIsNone(connection.timeout_values[-1])
+
+    def test_read_body_discard_timeout_marks_connection_for_close(self):
+        class TimeoutReader:
+            def __init__(self):
+                self.read_sizes = []
+
+            def read(self, size):
+                self.read_sizes.append(size)
+                raise TimeoutError("fixture timeout")
+
+        class FixtureConnection:
+            def __init__(self):
+                self.timeout = None
+                self.timeout_values = []
+
+            def gettimeout(self):
+                return self.timeout
+
+            def settimeout(self, value):
+                self.timeout = value
+                self.timeout_values.append(value)
+
+        reader = TimeoutReader()
+        connection = FixtureConnection()
+        handler = _make_handler()
+        handler.headers = {
+            "Content-Length": str(_main.MAX_REQUEST_BODY_BYTES + 100),
+        }
+        handler.rfile = reader
+        handler.connection = connection
+
+        with self.assertRaises(_main.RequestBodyTooLarge):
+            handler._read_body()
+
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(reader.read_sizes)
+        self.assertLessEqual(max(reader.read_sizes), 8 * 1024)
+        self.assertTrue(any(value is not None for value in connection.timeout_values))
+        self.assertIsNone(connection.timeout_values[-1])
 
     def test_cors_options_returns_204(self):
-        handler = _make_handler(command="OPTIONS", path="/api/chat")
+        handler = _make_handler(
+            command="OPTIONS",
+            path="/api/chat",
+            headers={"Origin": "http://localhost:5173"},
+        )
         handler.send_response = MagicMock()
         handler.send_header = MagicMock()
         handler.end_headers = MagicMock()
@@ -253,6 +429,14 @@ class TestMainHTTPGETRouting(unittest.TestCase):
         handler.do_GET()
         handler.handle_ollama_chat_stream.assert_called_once()
 
+    def test_do_get_ollama_stream_with_query_routes(self):
+        handler = self._make_routed_handler(
+            "/api/ollama/chat/stream?model=fixture-model"
+        )
+        handler.handle_ollama_chat_stream = MagicMock()
+        handler.do_GET()
+        handler.handle_ollama_chat_stream.assert_called_once()
+
     def test_do_get_plugins_list_routes(self):
         handler = self._make_routed_handler("/api/plugins")
         handler.handle_plugins_list = MagicMock()
@@ -282,6 +466,31 @@ class TestMainHTTPGETRouting(unittest.TestCase):
         handler.handle_orchestrator_history = MagicMock()
         handler.do_GET()
         handler.handle_orchestrator_history.assert_called_once()
+
+    def test_do_get_roles_list_routes(self):
+        handler = self._make_routed_handler("/api/roles")
+        handler.handle_roles_list = MagicMock()
+        handler.do_GET()
+        handler.handle_roles_list.assert_called_once()
+
+    def test_do_get_roles_list_with_capability_query_routes(self):
+        handler = self._make_routed_handler("/api/roles?capability=coding")
+        handler.handle_roles_list = MagicMock()
+        handler.do_GET()
+        handler.handle_roles_list.assert_called_once()
+
+    def test_do_get_single_role_routes(self):
+        handler = self._make_routed_handler("/api/roles/engineer")
+        handler.handle_role_get = MagicMock()
+        handler.do_GET()
+        handler.handle_role_get.assert_called_once_with("engineer")
+
+    def test_do_get_nested_role_path_is_404(self):
+        handler = self._make_routed_handler("/api/roles/engineer/extra")
+        handler._send_error = MagicMock()
+        handler.do_GET()
+        handler._send_error.assert_called_once()
+        self.assertEqual(handler._send_error.call_args[0][1], 404)
 
     def test_do_get_token_usage_routes(self):
         handler = self._make_routed_handler("/api/ollama/token-usage")
@@ -373,6 +582,87 @@ class TestMainHTTPPOSTRouting(unittest.TestCase):
         handler.do_POST()
         handler.handle_orchestrator_dispatch.assert_called_once()
 
+    def test_do_post_role_dispatch_routes(self):
+        handler = self._make_routed_handler("/api/roles/dispatch")
+        handler.handle_role_dispatch = MagicMock()
+        handler.do_POST()
+        handler.handle_role_dispatch.assert_called_once()
+
+    def test_do_post_role_dispatch_by_cap_routes(self):
+        handler = self._make_routed_handler("/api/roles/dispatch_by_cap")
+        handler.handle_role_dispatch_by_cap = MagicMock()
+        handler.do_POST()
+        handler.handle_role_dispatch_by_cap.assert_called_once()
+
+    def test_do_post_role_batch_dispatch_routes(self):
+        handler = self._make_routed_handler("/api/roles/batch_dispatch")
+        handler.handle_role_batch_dispatch = MagicMock()
+        handler.do_POST()
+        handler.handle_role_batch_dispatch.assert_called_once()
+
+    def test_do_post_excessive_integer_returns_invalid_json_without_disconnect(self):
+        body = (
+            b'{"agent_name":"analyzer","prompt":"ping","timeout":'
+            + (b"9" * 5000)
+            + b"}"
+        )
+        handler = self._make_routed_handler("/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+
+        handler.do_POST()
+
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args.args[0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_JSON")
+        self.assertFalse(handler.close_connection)
+
+    def test_do_post_deeply_nested_json_returns_invalid_json_without_disconnect(self):
+        depth = 10_000
+        body = (
+            b'{"agent_name":"analyzer","prompt":"ping","nested":'
+            + (b"[" * depth)
+            + b"0"
+            + (b"]" * depth)
+            + b"}"
+        )
+        handler = self._make_routed_handler("/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+
+        handler.do_POST()
+
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args.args[0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_JSON")
+        self.assertFalse(handler.close_connection)
+
+    def test_do_post_oversized_body_discards_payload_before_413(self):
+        body = b"x" * (_main.MAX_REQUEST_BODY_BYTES + 52)
+        handler = self._make_routed_handler("/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+
+        handler.do_POST()
+
+        self.assertEqual(handler.rfile.tell(), len(body))
+        self.assertFalse(handler.close_connection)
+        handler.send_response.assert_called_once_with(413)
+        parsed = json.loads(handler.wfile.write.call_args.args[0])
+        self.assertEqual(parsed["error"]["code"], "REQUEST_BODY_TOO_LARGE")
+
     def test_do_post_unknown_path_404(self):
         handler = self._make_routed_handler("/api/unknown_post_xyz")
         handler._send_error = MagicMock()
@@ -435,6 +725,29 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         handler.handle_ollama_chat()
         handler.send_response.assert_called_once()
 
+    def test_handle_ollama_stream_uses_nested_error_frame_without_done(self):
+        handler = _make_handler(
+            path="/api/ollama/chat/stream?model=fixture-model"
+        )
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.object(
+            _main.state.ollama,
+            "stream_chat_generator",
+            side_effect=RuntimeError("fixture failure"),
+        ):
+            handler.handle_ollama_chat_stream()
+
+        payload = b"".join(
+            call[0][0] for call in handler.wfile.write.call_args_list
+        )
+        self.assertIn(
+            b'"error": {"code": "OLLAMA_STREAM_ERROR", "message": "fixture failure"}',
+            payload,
+        )
+        self.assertNotIn(b"data: [DONE]", payload)
+
     def test_handle_terminal_execute_missing_command_400(self):
         body_data = json.dumps({}).encode()
         handler = _make_handler(command="POST", path="/api/terminal/execute")
@@ -446,6 +759,47 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         handler.send_response.assert_called_once_with(400)
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertIn("error", parsed)
+
+    def test_handle_terminal_execute_is_disabled_without_capability(self):
+        body_data = json.dumps({"command": "echo", "args": ["blocked"]}).encode()
+        handler = _make_handler(command="POST", path="/api/terminal/execute")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.dict(
+            os.environ,
+            {"JARVIS_TERMINAL_ENABLED": "false", "JARVIS_TERMINAL_TOKEN": ""},
+        ), patch.object(_main.state.terminal, "execute") as execute:
+            handler.handle_terminal_execute()
+
+        execute.assert_not_called()
+        handler.send_response.assert_called_once_with(403)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "TERMINAL_DISABLED")
+
+    def test_handle_terminal_execute_rejects_an_invalid_capability_token(self):
+        body_data = json.dumps({"command": "pwd", "args": []}).encode()
+        handler = _make_handler(command="POST", path="/api/terminal/execute")
+        handler.headers = {
+            "Content-Length": str(len(body_data)),
+            "X-Jarvis-Terminal-Token": "wrong-token",
+        }
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.dict(
+            os.environ,
+            {"JARVIS_TERMINAL_ENABLED": "true", "JARVIS_TERMINAL_TOKEN": "test-token"},
+        ), patch.object(_main.state.terminal, "execute") as execute:
+            handler.handle_terminal_execute()
+
+        execute.assert_not_called()
+        handler.send_response.assert_called_once_with(401)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "TERMINAL_UNAUTHORIZED")
 
     def test_handle_plugins_list_returns_list(self):
         handler = _make_handler()
@@ -489,6 +843,29 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertTrue(parsed.get("success"))
         self.assertIn("path", parsed)
+        self.assertIn("id", parsed)
+
+    def test_handle_memory_delete_removes_only_requested_entry(self):
+        body_data = json.dumps({"cleanup_token": "secret"}).encode()
+        handler = _make_handler(
+            command="DELETE",
+            path="/api/memory/probes/project/probe123",
+        )
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.object(
+            _main.state.memory_store,
+            "delete_probe",
+            return_value=True,
+        ) as delete:
+            handler.do_DELETE()
+
+        delete.assert_called_once_with(_main.MemoryType.PROJECT, "probe123", "secret")
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed, {"success": True, "id": "probe123"})
 
     def test_handle_events_returns_empty_list(self):
         handler = _make_handler()
@@ -528,7 +905,386 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         handler.handle_orchestrator_dispatch()
         handler.send_response.assert_called_once_with(400)
 
+    def test_do_post_orchestrator_dispatch_rejects_non_object_body(self):
+        body_data = json.dumps(["analyzer", "ping"]).encode()
+        handler = _make_handler(command="POST", path="/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
 
+        handler.do_POST()
+
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_dispatch_requires_non_empty_strings(self):
+        invalid_payloads = [
+            {"agent_name": 1, "prompt": "ping"},
+            {"agent_name": [], "prompt": "ping"},
+            {"agent_name": "analyzer", "prompt": 1},
+            {"agent_name": "analyzer", "prompt": []},
+            {"agent_name": "", "prompt": "ping"},
+            {"agent_name": "analyzer", "prompt": ""},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                body_data = json.dumps(payload).encode()
+                handler = _make_handler(
+                    command="POST",
+                    path="/api/orchestrator/dispatch",
+                )
+                handler.headers = {"Content-Length": str(len(body_data))}
+                handler.rfile = io.BytesIO(body_data)
+                for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+                    setattr(handler, attr, MagicMock())
+
+                handler.handle_orchestrator_dispatch()
+
+                handler.send_response.assert_called_once_with(400)
+                parsed = json.loads(handler.wfile.write.call_args[0][0])
+                self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_dispatch_rejects_surrogate_code_points(self):
+        invalid_payloads = [
+            {"agent_name": "\ud800", "prompt": "ping"},
+            {"agent_name": "analyzer\udfff", "prompt": "ping"},
+            {"agent_name": "analyzer", "prompt": "\ud800"},
+            {"agent_name": "analyzer", "prompt": "ping\udfff"},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=repr(payload)):
+                body_data = json.dumps(payload).encode("ascii")
+                handler = _make_handler(
+                    command="POST",
+                    path="/api/orchestrator/dispatch",
+                )
+                handler.headers = {"Content-Length": str(len(body_data))}
+                handler.rfile = io.BytesIO(body_data)
+                for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+                    setattr(handler, attr, MagicMock())
+
+                with patch("builtins.print"), patch.object(
+                    _main.state.orchestrator,
+                    "dispatch",
+                ) as dispatch:
+                    dispatch.return_value.to_dict.return_value = {}
+                    handler.handle_orchestrator_dispatch()
+
+                dispatch.assert_not_called()
+                handler.send_response.assert_called_once_with(400)
+                parsed = json.loads(handler.wfile.write.call_args[0][0])
+                self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_dispatch_rejects_invalid_option_types(self):
+        invalid_payloads = [
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": "45"},
+            {"agent_name": "analyzer", "prompt": "ping", "timeout": True},
+            {"agent_name": "analyzer", "prompt": "ping", "priority": "3"},
+            {"agent_name": "analyzer", "prompt": "ping", "priority": False},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                body_data = json.dumps(payload).encode()
+                handler = _make_handler(
+                    command="POST",
+                    path="/api/orchestrator/dispatch",
+                )
+                handler.headers = {"Content-Length": str(len(body_data))}
+                handler.rfile = io.BytesIO(body_data)
+                for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+                    setattr(handler, attr, MagicMock())
+
+                handler.handle_orchestrator_dispatch()
+
+                handler.send_response.assert_called_once_with(400)
+                parsed = json.loads(handler.wfile.write.call_args[0][0])
+                self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_dispatch_enforces_timeout_range(self):
+        for timeout in (0, 301, 10**100, True):
+            with self.subTest(timeout=timeout):
+                body_data = json.dumps({
+                    "agent_name": "analyzer",
+                    "prompt": "ping",
+                    "timeout": timeout,
+                }).encode()
+                handler = _make_handler(
+                    command="POST",
+                    path="/api/orchestrator/dispatch",
+                )
+                handler.headers = {"Content-Length": str(len(body_data))}
+                handler.rfile = io.BytesIO(body_data)
+                for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+                    setattr(handler, attr, MagicMock())
+
+                with patch("builtins.print"), patch.object(
+                    _main.state.orchestrator,
+                    "dispatch",
+                ) as dispatch:
+                    dispatch.return_value.to_dict.return_value = {}
+                    handler.handle_orchestrator_dispatch()
+
+                dispatch.assert_not_called()
+                handler.send_response.assert_called_once_with(400)
+                parsed = json.loads(handler.wfile.write.call_args[0][0])
+                self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_history_rejects_non_integer_query_limit(self):
+        handler = _make_handler(
+            command="GET",
+            path="/api/orchestrator/history?limit=abc",
+        )
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.object(_main.state.orchestrator, "collect") as collect:
+            handler.handle_orchestrator_history()
+
+        collect.assert_not_called()
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_orchestrator_history_clamps_query_limit(self):
+        for query, expected_limit in (("101", 100), ("0", 1)):
+            with self.subTest(query=query):
+                handler = _make_handler(
+                    command="GET",
+                    path=f"/api/orchestrator/history?limit={query}",
+                )
+                for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+                    setattr(handler, attr, MagicMock())
+
+                with patch.object(
+                    _main.state.orchestrator,
+                    "collect",
+                    return_value=[],
+                ) as collect:
+                    handler.handle_orchestrator_history()
+
+                collect.assert_called_once_with(limit=expected_limit)
+                handler.send_response.assert_called_once_with(200)
+
+    def test_handle_orchestrator_dispatch_forwards_timeout_and_priority(self):
+        body_data = json.dumps({
+            "agent_name": "analyzer",
+            "prompt": "ping",
+            "timeout": 45,
+            "priority": 3,
+        }).encode()
+        handler = _make_handler(command="POST", path="/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch.object(_main.state.orchestrator, "dispatch") as dispatch:
+            dispatch.return_value.to_dict.return_value = {}
+            handler.handle_orchestrator_dispatch()
+
+        task = dispatch.call_args.args[0]
+        self.assertEqual(task.timeout, 45)
+        self.assertEqual(task.priority, 3)
+
+    def test_handle_orchestrator_dispatch_defaults_timeout_to_contract_maximum(self):
+        body_data = json.dumps({
+            "agent_name": "analyzer",
+            "prompt": "ping",
+        }).encode()
+        handler = _make_handler(command="POST", path="/api/orchestrator/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        with patch("builtins.print"), patch.object(
+            _main.state.orchestrator,
+            "dispatch",
+        ) as dispatch:
+            dispatch.return_value.to_dict.return_value = {}
+            handler.handle_orchestrator_dispatch()
+
+        task = dispatch.call_args.args[0]
+        self.assertEqual(task.timeout, 300)
+        handler.send_response.assert_called_once_with(200)
+
+
+
+    def test_handle_roles_list_returns_roles_and_count(self):
+        handler = _make_handler(path="/api/roles")
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_roles_list()
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertIn("roles", parsed)
+        self.assertIn("count", parsed)
+        self.assertEqual(parsed["count"], len(parsed["roles"]))
+        self.assertGreater(parsed["count"], 0)
+
+    def test_handle_roles_list_filters_by_capability(self):
+        handler = _make_handler(path="/api/roles?capability=coding")
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_roles_list()
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        for role in parsed["roles"]:
+            self.assertIn("coding", role["capabilities"])
+
+    def test_handle_role_get_known_role_returns_profile(self):
+        handler = _make_handler(path="/api/roles/engineer")
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_get("engineer")
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["role"]["name"], "engineer")
+
+    def test_handle_role_get_unknown_role_returns_404(self):
+        handler = _make_handler(path="/api/roles/nonexistent_role_xyz")
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_get("nonexistent_role_xyz")
+        handler.send_response.assert_called_once_with(404)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "ROLE_NOT_FOUND")
+
+    def test_handle_role_dispatch_valid_returns_result(self):
+        body_data = json.dumps({
+            "role_name": "engineer",
+            "prompt": "write a test",
+            "timeout": 30,
+        }).encode()
+        handler = _make_handler(command="POST", path="/api/roles/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch()
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["role_name"], "engineer")
+        self.assertIn("status", parsed)
+
+    def test_handle_role_dispatch_missing_role_name_returns_400(self):
+        body_data = json.dumps({"prompt": "test"}).encode()
+        handler = _make_handler(command="POST", path="/api/roles/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch()
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_role_dispatch_unknown_role_returns_404(self):
+        body_data = json.dumps({
+            "role_name": "nonexistent_role_xyz",
+            "prompt": "test",
+        }).encode()
+        handler = _make_handler(command="POST", path="/api/roles/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch()
+        handler.send_response.assert_called_once_with(404)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "ROLE_NOT_FOUND")
+
+    def test_handle_role_dispatch_enforces_timeout_range(self):
+        body_data = json.dumps({
+            "role_name": "engineer",
+            "prompt": "test",
+            "timeout": 9000,
+        }).encode()
+        handler = _make_handler(command="POST", path="/api/roles/dispatch")
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch()
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+
+    def test_handle_role_dispatch_by_cap_valid_returns_result(self):
+        body_data = json.dumps({
+            "capability": "coding",
+            "prompt": "fix bug",
+        }).encode()
+        handler = _make_handler(
+            command="POST",
+            path="/api/roles/dispatch_by_cap",
+        )
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch_by_cap()
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertIn("status", parsed)
+
+    def test_handle_role_dispatch_by_cap_unknown_returns_404(self):
+        body_data = json.dumps({
+            "capability": "nonexistent_cap_xyz",
+            "prompt": "test",
+        }).encode()
+        handler = _make_handler(
+            command="POST",
+            path="/api/roles/dispatch_by_cap",
+        )
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_dispatch_by_cap()
+        handler.send_response.assert_called_once_with(404)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "CAPABILITY_NOT_FOUND")
+
+    def test_handle_role_batch_dispatch_returns_results(self):
+        body_data = json.dumps({
+            "tasks": [
+                {"role": "engineer", "prompt": "task 1"},
+                {"capability": "code_review", "prompt": "task 2"},
+            ]
+        }).encode()
+        handler = _make_handler(
+            command="POST",
+            path="/api/roles/batch_dispatch",
+        )
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_batch_dispatch()
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(len(parsed["results"]), 2)
+
+    def test_handle_role_batch_dispatch_rejects_non_list_tasks(self):
+        body_data = json.dumps({"tasks": {"not": "a list"}}).encode()
+        handler = _make_handler(
+            command="POST",
+            path="/api/roles/batch_dispatch",
+        )
+        handler.headers = {"Content-Length": str(len(body_data))}
+        handler.rfile = io.BytesIO(body_data)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+        handler.handle_role_batch_dispatch()
+        handler.send_response.assert_called_once_with(400)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
 
     def test_handle_ollama_token_usage_returns_dict(self):
         handler = _make_handler()
@@ -536,9 +1292,10 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
             setattr(handler, attr, MagicMock())
         handler.handle_ollama_token_usage()
         parsed = json.loads(handler.wfile.write.call_args[0][0])
-        self.assertIn("prompt_tokens", parsed)
-        self.assertIn("completion_tokens", parsed)
-        self.assertIn("total_tokens", parsed)
+        self.assertIn("latest", parsed)
+        self.assertIn("totals", parsed)
+        self.assertIn("samples", parsed)
+        self.assertIn("session_started_at", parsed)
 
 class TestMainHTTPEdgeCases(unittest.TestCase):
 
@@ -578,7 +1335,11 @@ class TestMainHTTPEdgeCases(unittest.TestCase):
         self.assertEqual(parsed, {})
 
     def test_cors_options_sets_all_required_headers(self):
-        handler = _make_handler(command="OPTIONS", path="/api/test")
+        handler = _make_handler(
+            command="OPTIONS",
+            path="/api/test",
+            headers={"Origin": "http://localhost:5173"},
+        )
         handler.send_response = MagicMock()
         handler.send_header = MagicMock()
         handler.end_headers = MagicMock()

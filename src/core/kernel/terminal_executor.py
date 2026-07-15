@@ -25,6 +25,7 @@ import re
 import time
 import json
 import logging
+import tempfile
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, asdict, field
 from enum import Enum
@@ -145,8 +146,56 @@ class TerminalExecutor:
         self.max_concurrency = max_concurrency
         self.default_timeout = default_timeout
         self.max_output_size = max_output_size
+        self._sandbox_directory = (
+            tempfile.TemporaryDirectory(prefix="jarvis-terminal-")
+            if sandbox
+            else None
+        )
+        self.sandbox_dir = (
+            Path(self._sandbox_directory.name)
+            if self._sandbox_directory is not None
+            else None
+        )
         self._running_count = 0
         self._audit_log: List[Dict[str, Any]] = []
+
+    def close(self) -> None:
+        """Release the executor-owned sandbox directory when the instance is retired."""
+        if self._sandbox_directory is not None:
+            self._sandbox_directory.cleanup()
+            self._sandbox_directory = None
+            self.sandbox_dir = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            # Interpreter shutdown can remove tempfile dependencies before this hook runs.
+            pass
+
+    def _sandbox_environment(self) -> Dict[str, str]:
+        """Return the minimal process environment for an isolated local command."""
+        if self.sandbox_dir is None:
+            raise RuntimeError("Sandbox directory is unavailable")
+
+        def read_environment(name: str) -> Optional[str]:
+            for key, value in os.environ.items():
+                if key.casefold() == name.casefold():
+                    return value
+            return None
+
+        environment = {"PATH": read_environment("PATH") or os.defpath}
+        for name in ("PATHEXT", "SystemRoot", "WINDIR", "ComSpec"):
+            value = read_environment(name)
+            if value:
+                environment[name] = value
+        if os.name == "nt":
+            environment["TEMP"] = str(self.sandbox_dir)
+            environment["TMP"] = str(self.sandbox_dir)
+        else:
+            environment["HOME"] = str(self.sandbox_dir)
+            environment["TMPDIR"] = str(self.sandbox_dir)
+        return environment
 
     def execute(self, cmd: TerminalCommand) -> TerminalResult:
         """
@@ -160,6 +209,17 @@ class TerminalExecutor:
         5. ????
         6. ??????
         """
+        if self.sandbox and self.sandbox_dir is None:
+            return TerminalResult(
+                command_id=cmd.id,
+                exit_code=-1,
+                stdout="",
+                stderr="Sandbox is closed",
+                duration=0.0,
+                success=False,
+                risk_level=cmd.risk_level.value,
+            )
+
         # ???? 1????
         full_command = f"{cmd.command} {' '.join(cmd.args)}"
         for pattern in self.DANGEROUS_PATTERNS:
@@ -175,8 +235,19 @@ class TerminalExecutor:
                     risk_level=CommandRisk.DANGEROUS.value,
                 )
 
+        if self.sandbox and (cmd.cwd is not None or cmd.env):
+            return TerminalResult(
+                command_id=cmd.id,
+                exit_code=-1,
+                stdout="",
+                stderr="Sandbox policy rejects caller working-directory or environment overrides",
+                duration=0.0,
+                success=False,
+                risk_level=cmd.risk_level.value,
+            )
+
         # validate working directory
-        cwd = cmd.cwd or os.getcwd()
+        cwd = self.sandbox_dir if self.sandbox else Path(cmd.cwd or os.getcwd())
         if not os.path.isdir(cwd):
             return TerminalResult(
                 command_id=cmd.id,
@@ -250,7 +321,7 @@ class TerminalExecutor:
             full_cmd = [cmd.command] + cmd.args
 
             # ????
-            cwd = cmd.cwd or os.getcwd()
+            cwd = self.sandbox_dir if self.sandbox else Path(cmd.cwd or os.getcwd())
             if not os.path.isdir(cwd):
                 return TerminalResult(
                     command_id=cmd.id,
@@ -263,7 +334,7 @@ class TerminalExecutor:
                 )
 
             # ????
-            env = {**os.environ, **cmd.env}
+            env = self._sandbox_environment() if self.sandbox else {**os.environ, **cmd.env}
 
             # ??
             process = subprocess.Popen(
@@ -295,7 +366,7 @@ class TerminalExecutor:
             stdout = stdout[:self.max_output_size]
             stderr = stderr[:self.max_output_size // 2]
 
-            duration = time.time() - time.perf_counter() if 'time.perf_counter' in dir() else time.time() - time.time()
+            duration = time.perf_counter() - start_time
 
             return TerminalResult(
                 command_id=cmd.id,

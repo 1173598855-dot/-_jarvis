@@ -1,0 +1,2070 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "J.A.R.V.I.S. Shared Core API",
+    "version": "1.11.0",
+    "description": "Stable response contract shared by Express, Python HTTPServer, and FastAPI."
+  },
+  "x-jarvis-implementations": [
+    "frontend/server.js",
+    "src/main.py",
+    "src/main_fastapi.py"
+  ],
+  "x-jarvis-api-fallback": {
+    "scope": "Express only",
+    "pattern": "/api/*",
+    "status": 404,
+    "error_code": "API_NOT_FOUND",
+    "response_schema": {
+      "$ref": "#/components/schemas/ErrorResponse"
+    },
+    "description": "Unknown Express API routes return a JSON ErrorResponse; Python service route coverage remains explicit and is not implied by this fallback."
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Service health snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/stats": {
+      "get": {
+        "operationId": "getSystemStats",
+        "responses": {
+          "200": {
+            "description": "Host resource snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatsResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "System statistics are unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ollama/status": {
+      "get": {
+        "operationId": "getOllamaStatus",
+        "responses": {
+          "200": {
+            "description": "Ollama runtime status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaStatus"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Ollama status upstream returned an error or invalid JSON.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ollama is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ollama/models": {
+      "get": {
+        "operationId": "getOllamaModels",
+        "responses": {
+          "200": {
+            "description": "Installed Ollama models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaModelsResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Ollama models upstream returned an error or invalid JSON.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ollama is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ollama/token-usage": {
+      "get": {
+        "operationId": "getOllamaTokenUsage",
+        "responses": {
+          "200": {
+            "description": "Token usage for the current service session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenUsageSnapshot"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ollama/chat": {
+      "post": {
+        "operationId": "chatWithOllama",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OllamaChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Non-streaming Ollama chat response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request JSON is invalid or requests streaming on the non-streaming endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Ollama did not provide a valid non-streaming response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ollama/chat/stream": {
+      "get": {
+        "operationId": "streamOllamaChat",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "messages",
+            "in": "query",
+            "required": false,
+            "description": "JSON-encoded chat message array.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical Server-Sent Event stream; each data frame is a content or error object, and successful streams end with [DONE].",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-jarvis-event-schemas": {
+                  "content": {
+                    "$ref": "#/components/schemas/SseContentFrame"
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/SseErrorFrame"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "streamOllamaChatWithBody",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Canonical Server-Sent Event stream; each data frame is a content or error object, and successful streams end with [DONE].",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-jarvis-event-schemas": {
+                  "content": {
+                    "$ref": "#/components/schemas/SseContentFrame"
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/SseErrorFrame"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request JSON is malformed or is not an object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "operationId": "listPlugins",
+        "responses": {
+          "200": {
+            "description": "Installed plugins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginListResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/load": {
+      "post": {
+        "operationId": "loadPlugin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "plugin_id"
+                ],
+                "properties": {
+                  "plugin_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Plugin ID is missing or the request is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plugin does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/entries": {
+      "get": {
+        "operationId": "listMemoryEntries",
+        "responses": {
+          "200": {
+            "description": "Stored memory entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntriesResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "operationId": "listEvents",
+        "responses": {
+          "200": {
+            "description": "Recent event history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventListResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator/agents": {
+      "get": {
+        "operationId": "listOrchestratorAgents",
+        "responses": {
+          "200": {
+            "description": "Registered orchestrator agents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrchestratorAgentsResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator/history": {
+      "get": {
+        "operationId": "getOrchestratorHistory",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent orchestrator task results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrchestratorHistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The history limit is not a valid integer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator/dispatch": {
+      "post": {
+        "operationId": "dispatchOrchestratorTask",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agent_name",
+                  "prompt"
+                ],
+                "properties": {
+                  "agent_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "minimum": 1,
+                    "maximum": 300
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "default": 1,
+                    "minimum": 0,
+                    "maximum": 3
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Orchestrator task result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The task request is missing an agent or prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/terminal/execute": {
+      "post": {
+        "operationId": "executeTerminalCommand",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "command"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Jarvis-Terminal-Token",
+            "in": "header",
+            "required": false,
+            "description": "Capability token required when terminal execution is enabled.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A documented read-only terminal operation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalExecutionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request JSON, fixed operation, arguments, or timeout is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Terminal capability token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Terminal execution is disabled by runtime policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles": {
+      "get": {
+        "operationId": "listRoles",
+        "parameters": [
+          {
+            "name": "capability",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered role list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolesListResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/{role_name}": {
+      "get": {
+        "operationId": "getRole",
+        "parameters": [
+          {
+            "name": "role_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The requested role is not registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/dispatch": {
+      "post": {
+        "operationId": "dispatchByRole",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "role_name",
+                  "prompt"
+                ],
+                "properties": {
+                  "role_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "minimum": 1,
+                    "maximum": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Role dispatch result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The dispatch request is missing a role or prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The requested role is not registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/dispatch_by_cap": {
+      "post": {
+        "operationId": "dispatchByCapability",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "capability",
+                  "prompt"
+                ],
+                "properties": {
+                  "capability": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "minimum": 1,
+                    "maximum": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Capability dispatch result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The dispatch request is missing a capability or prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No registered role provides the requested capability.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/batch_dispatch": {
+      "post": {
+        "operationId": "batchDispatchRoles",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tasks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch dispatch results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchDispatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The batch dispatch request body is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "OllamaChatMessage": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "OllamaChatRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OllamaChatMessage"
+            }
+          },
+          "stream": {
+            "type": "boolean",
+            "const": false
+          }
+        }
+      },
+      "OllamaChatResponse": {
+        "type": "object",
+        "required": [
+          "model",
+          "message",
+          "done"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "$ref": "#/components/schemas/OllamaChatMessage"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "prompt_eval_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "eval_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SseContentFrame": {
+        "type": "object",
+        "required": [
+          "model",
+          "content",
+          "done"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "prompt_eval_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "eval_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SseErrorFrame": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "TerminalExecutionResponse": {
+        "type": "object",
+        "required": [
+          "command_id",
+          "exit_code",
+          "stdout",
+          "stderr",
+          "duration",
+          "success",
+          "risk_level",
+          "timestamp"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "number",
+            "minimum": 0
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "risk_level": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "TokenTotals": {
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "TokenSample": {
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "timestamp"
+        ],
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "number"
+          }
+        }
+      },
+      "TokenUsageSnapshot": {
+        "type": "object",
+        "required": [
+          "latest",
+          "totals",
+          "samples",
+          "session_started_at"
+        ],
+        "properties": {
+          "latest": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "prompt_tokens",
+              "completion_tokens",
+              "total_tokens",
+              "timestamp"
+            ],
+            "properties": {
+              "prompt_tokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "completion_tokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total_tokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "timestamp": {
+                "type": "number"
+              }
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenSample"
+            }
+          },
+          "session_started_at": {
+            "type": "number"
+          }
+        }
+      },
+      "OllamaModel": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": [
+              "number",
+              "string",
+              "null"
+            ]
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modified_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "details": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      },
+      "OllamaModelsResponse": {
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OllamaModel"
+            }
+          }
+        }
+      },
+      "OllamaStatus": {
+        "type": "object",
+        "required": [
+          "running",
+          "models",
+          "gpu_available"
+        ],
+        "properties": {
+          "running": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OllamaModel"
+            }
+          },
+          "gpu_available": {
+            "type": "boolean"
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PluginInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "status",
+          "permissions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PluginListResponse": {
+        "type": "object",
+        "required": [
+          "plugins"
+        ],
+        "properties": {
+          "plugins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginInfo"
+            }
+          }
+        }
+      },
+      "MemoryEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "content",
+          "created_at",
+          "tags",
+          "access_count"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "access_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "MemoryEntriesResponse": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntry"
+            }
+          }
+        }
+      },
+      "EventInfo": {
+        "type": "object",
+        "required": [
+          "type",
+          "payload",
+          "timestamp",
+          "source"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "EventListResponse": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventInfo"
+            }
+          }
+        }
+      },
+      "AgentInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "capabilities",
+          "tasks_completed",
+          "errors_count",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tasks_completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "errors_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "OrchestratorAgentsResponse": {
+        "type": "object",
+        "required": [
+          "agents",
+          "count"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentInfo"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "AgentResult": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "agent_name",
+          "result",
+          "error",
+          "duration_ms",
+          "status"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agent_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result": {},
+          "error": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "OrchestratorHistoryResponse": {
+        "type": "object",
+        "required": [
+          "results",
+          "count"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentResult"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "uptime",
+          "version"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "healthy"
+          },
+          "uptime": {
+            "type": "number",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "number"
+          }
+        }
+      },
+      "SystemStatsResponse": {
+        "type": "object",
+        "required": [
+          "cpu",
+          "memory",
+          "disk",
+          "network"
+        ],
+        "properties": {
+          "cpu": {
+            "$ref": "#/components/schemas/CpuStats"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemoryStats"
+          },
+          "disk": {
+            "$ref": "#/components/schemas/DiskStats"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkStats"
+          },
+          "timestamp": {
+            "type": "number"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "CpuStats": {
+        "type": "object",
+        "required": [
+          "usage",
+          "cores",
+          "model"
+        ],
+        "properties": {
+          "usage": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cores": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MemoryStats": {
+        "type": "object",
+        "required": [
+          "total",
+          "used",
+          "free",
+          "usage"
+        ],
+        "properties": {
+          "total": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "used": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "free": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usage": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "DiskStats": {
+        "type": "object",
+        "required": [
+          "total",
+          "used",
+          "free",
+          "usage"
+        ],
+        "properties": {
+          "total": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "used": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "free": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usage": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "NetworkStats": {
+        "type": "object",
+        "required": [
+          "interfaces"
+        ],
+        "properties": {
+          "interfaces": {
+            "type": "array"
+          },
+          "rx_bytes": {
+            "type": "number"
+          },
+          "tx_bytes": {
+            "type": "number"
+          }
+        }
+      },
+      "RoleProfile": {
+        "type": "object",
+        "required": [
+          "name",
+          "display_name",
+          "capabilities",
+          "priority"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "parent_role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompt_template": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "metadata": {
+            "type": "object"
+          }
+        }
+      },
+      "RolesListResponse": {
+        "type": "object",
+        "required": [
+          "roles",
+          "count"
+        ],
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleProfile"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RoleResponse": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/RoleProfile"
+          }
+        }
+      },
+      "DispatchResult": {
+        "type": "object",
+        "required": [
+          "role_name",
+          "task_id",
+          "status",
+          "message"
+        ],
+        "properties": {
+          "role_name": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "BatchDispatchResponse": {
+        "type": "object",
+        "required": [
+          "results",
+          "count"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DispatchResult"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

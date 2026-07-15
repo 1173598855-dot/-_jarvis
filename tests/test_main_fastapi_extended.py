@@ -15,6 +15,13 @@ client = TestClient(app, raise_server_exceptions=False)
 
 
 class TestAppState(unittest.TestCase):
+    def test_agent_factory_uses_application_ollama_manager(self):
+        state = AppState()
+        try:
+            self.assertIs(state.agent_factory._ollama_manager, state.ollama)
+        finally:
+            state.terminal.close()
+
     def test_default_values(self):
         state = AppState()
         self.assertEqual(state.request_count, 0)
@@ -79,9 +86,11 @@ class TestOllamaEndpoints(unittest.TestCase):
         r = client.get("/api/ollama/models")
         self.assertIn(r.status_code, [200, 500])
 
-    def test_ollama_chat_requires_model(self):
+    def test_ollama_chat_normalizes_unavailable_upstream(self):
         r = client.post("/api/ollama/chat", json={"messages": []})
-        self.assertIn(r.status_code, [200, 400, 500])
+        self.assertIn(r.status_code, [200, 400, 502])
+        if r.status_code == 502:
+            self.assertEqual(r.json()["error"]["code"], "OLLAMA_UPSTREAM_ERROR")
 
 
 class TestTerminalEndpoint(unittest.TestCase):

@@ -1,7 +1,7 @@
 # Production Role Execution Design
 
-**Iteration:** 126  
-**Date:** 2026-07-15  
+**Iteration:** 126
+**Date:** 2026-07-15
 **Status:** Approved by autonomous continuation directive
 
 ## Goal

@@ -28,6 +28,14 @@ class TestSetupDocs(unittest.TestCase):
         self.assertIn("npm run typecheck", self.text)
         self.assertIn("npm run build", self.text)
 
+    def test_documents_optional_local_integration_profile(self):
+        self.assertIn("scripts/local_integration_profile.py", self.text)
+        self.assertIn("--require-services", self.text)
+
+    def test_documents_deterministic_ci_local_integration(self):
+        self.assertIn("scripts/ci_local_integration.py", self.text)
+        self.assertIn("local Ollama fixture", self.text)
+
 
 def run_all_tests():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestSetupDocs)

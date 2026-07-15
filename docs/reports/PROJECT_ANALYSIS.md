@@ -1,32 +1,32 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-10
+**扫描时间**：2026-07-15
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置、浏览器截图与本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 128 本轮测试结果
 
 ## 结论
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
-当前工程重点从“建立可用界面”转为三项长期工作：统一三套服务的机器可读契约、迁移 FastAPI 生命周期钩子、把真实 Ollama/Core API 集成流程纳入持续端到端验证。
+当前工程重点从“建立可用界面”转为三项长期工作：统一三套服务的机器可读契约、把真实 Ollama/Core API 集成流程纳入持续端到端验证，以及维持本地优先的能力边界。FastAPI 生命周期已迁移到当前推荐的 lifespan API。
 
 ## 当前规模
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 11 个文件，约 3,508 行 |
+| `src/` Python | 15 个文件，约 6,043 行 |
 | `src/` TypeScript | 0 个文件 |
-| `frontend/src/` | 38 个 TS/TSX 文件，约 4,186 行 |
-| `tests/` Python | 35 个文件；34 个 `test_*.py` 模块，约 7,258 行 |
-| 规范 Python 聚合套件 | 113 个用例 |
-| 完整 Python discovery | 880 个用例 |
-| 前端 Vitest | 61 个用例 |
+| `frontend/src/` | 38 个 TS/TSX 文件，约 4,616 行 |
+| `tests/` Python | 当前以 discovery 结果为准 |
+| 规范 Python 聚合套件 | 208 个用例 |
+| 完整 Python discovery | 1080 个用例 |
+| 前端 Vitest | 112 个用例 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 84-93） |
+| 滚动审计报告 | 10 份（Iteration 119-128） |
 
 ## 运行架构
 
@@ -38,7 +38,7 @@
 | FastAPI | 8080 | 插件、角色、多代理与完整 Core API |
 | Ollama | 11434 | 本地模型运行时 |
 
-Python HTTPServer 与 FastAPI 是替代入口，不能同时监听 8080。Express 在未配置 `JARVIS_CORE_API_URL` 时仍可提供对话、运行监控、模型和仓库视图；记忆与插件控制会如实显示能力不可用。
+Python HTTPServer 与 FastAPI 是替代入口，不能同时监听 8080。Express 在未配置 `JARVIS_CORE_API_URL` 时仍可提供对话、运行监控、模型和仓库视图；记忆与插件控制会如实显示能力不可用。三种服务默认只监听 `127.0.0.1`，未设置 CORS 时仅允许两个本地 Vite origin；需要外部部署时必须显式配置网络边界。
 
 ## 前端模块地图
 
@@ -76,31 +76,213 @@ frontend/e2e/
 - 新增 Playwright 确定性 API fixture、六视图导航、流式对话、无溢出断言和桌面/移动截图审查。
 - 通过 Lucide 子路径导入与 Vite CommonJS 依赖预构建，消除开发态约 2100 个模块请求及懒加载挂起。
 
+## Iteration 94 已解决
+
+- 将 FastAPI 的 `startup`/`shutdown` 装饰器迁移为异步 lifespan context manager，保留原有资源关闭行为。
+- 新增生命周期回归断言，防止弃用的 `@app.on_event` 钩子回归。
+- 修复标准库 HTTP 服务的 Ollama 模型列表序列化，使其与 FastAPI 的数据类响应保持一致。
+
+## Iteration 95 已解决
+
+- 新增 `contracts/core-api.openapi.json`，以 OpenAPI 3.1 维护三套服务的稳定响应契约。
+- 新增真实跨实现测试，同时启动 Express、Python HTTPServer 和 FastAPI，验证健康与系统遥测响应。
+- 为 Express 补齐真实网络接口遥测，并在 provider 不可用时保留明确 degraded 状态。
+
+## Iteration 96 已解决
+
+- 统一三套服务的终端缺参错误 envelope 与稳定错误码 `MISSING_COMMAND`。
+- 扩展共享 OpenAPI 契约，覆盖终端请求、400 响应和可复用 `ErrorResponse`。
+- FastAPI 显式 HTTP 错误统一经过 exception handler，避免 `detail` 与 `error` 形状漂移。
+
+## Iteration 97 已解决
+
+- 统一三套 `/api/ollama/token-usage` 为会话快照模型，覆盖最新值、累计值、样本和开始时间。
+- Python `OllamaManager` 增加最多 60 个内存样本，同时保留原有扁平累计 getter。
+- Token 快照进入共享 OpenAPI 和真实三服务契约测试。
+
+## Iteration 98 已解决
+
+- 新增可选本机集成 profile，在真实服务可用时执行 SSE、记忆写读和插件读取。
+- 默认模式对缺失服务明确 `SKIPPED`，严格模式将缺失服务作为失败。
+- 区分服务不可用与已响应服务的契约失败，避免把真实回归误判为环境跳过。
+
+## Iteration 99 已解决
+
+- 共享 OpenAPI 与真实三服务测试新增 Ollama status/models 覆盖。
+- 使用单一本地 Ollama HTTP fixture 驱动 Express 与两个 Python adapter，避免外部服务依赖。
+- 修复 Python `gpu_available` 在空列表情况下返回 `[]` 的类型漂移。
+- 修复 Windows 下 Playwright 内置 webServer 清理挂起，改由 Node runner 显式管理 Vite 生命周期。
+
+## Iteration 100 已解决
+
+- Token 统计改为直接消费 Ollama 原生计数字段，并覆盖非流式、内部流式和 SSE generator；三套服务契约测试核对真实增量。
+- FastAPI 新增隔离 app/state 工厂，测试客户端退出只关闭自己的编排器，不再污染模块级全局状态。
+- 本机 profile 只将稳定的 `OLLAMA_UNAVAILABLE` 归类为可选服务不可用，拒绝 502 无效响应及错误或不完整 SSE。
+- 记忆探针清理由 memory type、`.test-local-integration-*` 标题和一次性 token 三重约束，普通记忆及同 ID 其他类型不会被删除。
+- 契约校验补齐本地引用、联合类型、`const`、下界和严格数字类型；E2E runner 在 headed/headless 模式启动前检查并独占 strict port。
+
+## Iteration 101 已解决
+
+- 共享 OpenAPI 升级到 `1.2.0`，新增插件、记忆与事件只读列表路径及六个可复用 schema。
+- 三套服务的真实契约测试覆盖能力响应；Express 通过测试注入的 Core API 地址验证代理结果。
+- Express 监听 host 改为 `JARVIS_HOST` 可配置，契约 harness 与 Vitest 均显式绑定 loopback，避免测试服务暴露到所有接口。
+- 前端服务测试移除 19997-19999 固定端口，两个 fixture 读取 `server.address().port`，Express 从实际启动地址取得动态端口后再执行 health 轮询。
+- 两套 Python 记忆列表序列化补齐 `tags`，与既有前端 `MemoryEntry` 类型保持一致。
+- Schemathesis、openapi-core 与 Ajv 均通过 GitHub 许可和维护评估；当前覆盖无需新增依赖。
+
+## Iteration 102-106 已解决
+
+- 跨 Python HTTPServer、FastAPI 与 Express 的真实契约测试新增损坏 JSON、非对象 JSON、缺少终端命令、缺少插件标识和未知插件场景。
+- 三端现在统一使用 `ErrorResponse`：`INVALID_JSON`、`INVALID_REQUEST`、`MISSING_COMMAND`、`MISSING_PLUGIN_ID` 与 `PLUGIN_NOT_FOUND` 均有稳定 HTTP 状态和机器错误码。
+- OpenAPI 为 `POST /api/plugins/load` 声明了请求体、400 与 404 响应；Express 保持 Core API 代理，因此不复制插件业务逻辑。
+- FastAPI 的框架级请求校验经适配器收敛为共享错误 envelope，测试不再依赖 422 `detail` 形状。
+- GitHub 复查确认 Schemathesis、Spectral 与 Prism 均合格；当前没有为轻量确定性回归引入额外依赖。
+- 静态安全审计识别出既有未鉴权终端执行暴露，已归档到 `RISK_COMPONENTS.log`；该破坏性部署修复保留为独立 P0。
+
+## Iteration 107-111 已解决
+
+- Express 默认绑定改为 loopback，三套服务的 CORS 默认收敛为两个本地 Vite origin；Docker 仅将开发端口发布到宿主机 loopback。
+- 新增 `runtime_security`，终端 HTTP API 必须同时启用 `JARVIS_TERMINAL_ENABLED=true` 并配置能力令牌；缺失配置返回 `403 TERMINAL_DISABLED`，错误令牌返回 `401 TERMINAL_UNAUTHORIZED`。
+- 新增固定 HTTP 操作策略，只允许受限的 `echo`、`pwd`、`whoami`、`hostname` 和 `date`，并对参数和超时设置边界；解释器、包管理器、下载器和环境读取器在进程创建前被拒绝。
+- Express 删除直接 Python 子进程调用，只代理 Core API 并透传能力令牌；同时限制 JSON 请求体为 32 KiB 并移除 `X-Powered-By`。
+- OpenAPI 升级至 `1.3.0`，记录令牌请求头和 401/403 envelope；GitHub 复查仅借鉴 Tauri、Cline、Pydantic AI 的能力边界模型，不新增依赖。
+
+## Iteration 112 已解决
+
+- 将 `GET /api/ollama/chat/stream` 纳入 OpenAPI `1.4.0`，声明规范内容帧、错误帧以及成功终止标记。
+- Python HTTPServer 现在可按带 query 的流路径路由；三端均输出 `{ model, content, done }`，错误统一为 `OLLAMA_STREAM_ERROR` envelope，且失败流不再发送 `[DONE]`。
+- Express 将原生 Ollama NDJSON/SSE 适配为规范帧，保留原生 token 计数；Solid 客户端相应消费 `content`。
+
+## Iteration 113 已解决
+
+- Express Git metadata 端点的子进程启动与退出失败均收敛为 `{ error: { code, message } }`，稳定错误码为 `GIT_COMMAND_FAILED`，不再回显系统可执行文件错误。
+- 新增仅进程环境可配置的 `JARVIS_GIT_COMMAND`，默认仍为 `git`；真实 Node 子进程回归验证缺失可执行文件时服务继续存活。
+
+## Iteration 114 已解决
+
+- 共享 OpenAPI 升级至 `1.5.0`，声明浏览器实际使用的 `POST /api/ollama/chat/stream`，包括 JSON body、SSE 成功帧和 400 ErrorResponse。
+- Python HTTPServer 与 FastAPI 新增 POST SSE 适配器，并复用各自的规范 SSE 写入路径；GET EventSource 兼容入口保持不变。
+- 三端非对象 POST body 一律返回 `400 INVALID_REQUEST`，真实 loopback 契约测试验证同一成功请求的规范帧、唯一 `[DONE]` 和错误 envelope。
+
+## Iteration 115 已解决
+
+- 共享 OpenAPI 升级至 `1.6.0`，为 POST SSE 声明稳定的 `413 REQUEST_BODY_TOO_LARGE` ErrorResponse。
+- Python HTTPServer 在读取前、FastAPI 在 ASGI middleware 中、Express 在 JSON parser 错误边界中统一限制声明的 JSON body 为 32 KiB。
+- 真实三服务 loopback 回归使用同一 32 KiB-plus body，验证超限请求不会开始 Ollama stream，并一律返回嵌套 413 error envelope。
+
+## Iteration 116 已解决
+
+- FastAPI ASGI middleware 已从 `Content-Length` 检查扩展到 `receive` 字节累计，覆盖 headerless/chunked request bodies。
+- 达到 32 KiB 且 `more_body: true` 的序列会在下游读取前直接返回 `413 REQUEST_BODY_TOO_LARGE`，并以 `http.disconnect` 终止应用侧读取。
+- ASGI 单元回归覆盖临界分块与重复响应防护，消除上一轮记录的未知长度 body 缺口。
+
+## Iteration 117-119 已解决
+
+- 非流式 Ollama chat 已由共享成功 schema 约束：三端对上游 HTTP、连接、JSON 和语义不完整的响应统一返回 `502 OLLAMA_UPSTREAM_ERROR`；真实三服务 fixture 回归覆盖伪成功 `200`。
+- Express 系统遥测为每个 provider 探测增加有界超时。超时只会将关联字段标记为 unavailable 并保持其它真实指标可用。
+- 默认内部 `TerminalExecutor` 使用实例专属临时目录和最小环境，拒绝调用者传入的工作目录或环境覆写，并在 FastAPI 与 Python HTTPServer 生命周期结束时清理目录。
+
+## Iteration 120 已解决
+
+- Express 对所有未匹配的 `/api/*` 路由返回稳定的 `404 API_NOT_FOUND` ErrorResponse，不再将 API 请求错误地交给 SPA 页面回退或默认 HTML 错误页。
+- 新增 GET/POST 未知 API 路径的真实 Node 集成回归，验证状态码、JSON content type 和嵌套错误结构。
+- 为真实系统遥测集成测试设置与 3 秒 provider 探测预算相称的 10 秒测试预算，避免全量 Vitest 并发启动开销造成误报；生产探测超时逻辑不变。
+
+## Iteration 124 已解决
+
+- FastAPI orchestrator history now clamps `limit` to the shared `1..100` range, and OpenAPI documents `maximum: 100`.
+- Python HTTPServer orchestrator dispatch now forwards and validates `timeout` and `priority` with the shared defaults and bounds.
+- The local contract shape validator enforces numeric `maximum` constraints.
+- The live loopback harness dispatches through Python HTTPServer, FastAPI, and Express and validates complete `AgentResult` fields plus invalid dispatch errors.
+- Express's deterministic Core fixture now includes `error` and `duration_ms`, closing the false-positive success shape.
+- Shared OpenAPI `1.10.0` records the public defaults, `timeout` range `1..300`, non-blank text fields, and dispatch `413` response.
+- All three adapters reject the same invalid option/type/surrogate matrix, while the live harness proves explicit `45/3` and default `300/1` task values reach the orchestrator.
+- Python HTTPServer converts extreme JSON decoder failures into `400 INVALID_JSON` and uses bounded request draining to preserve stable `413` responses on Windows.
+
+Role-specific routes remain intentionally outside the shared contract because the three adapters still do not expose equivalent behavior.
+
+## Iteration 123 已解决
+
+- 共享 OpenAPI 升级到 `1.9.0`，纳入 `GET /api/orchestrator/agents`、`GET /api/orchestrator/history` 和 `POST /api/orchestrator/dispatch`，并声明 agent、history、dispatch 及代理错误 schema。
+- Express 新增三条 Core API 代理路由；Python HTTPServer 与 FastAPI 的 history 查询统一限制为 `1..100`，三端真实 harness 验证响应形状和代理失败 envelope。
+- 当前共享 orchestrator 子集已完成；role 专属路由仍因三端没有对等实现而保持在共享契约之外。
+
+## Iteration 125-126 已解决
+
+- Python HTTPServer、FastAPI 与 Express Core 代理已对齐角色列表、角色详情、按角色/能力调度和批量调度，并纳入共享 OpenAPI `1.11.0`。
+- 两个 Python 服务状态现在把各自唯一的 `OllamaManager` 注入 `AgentFactory`；生产角色 handler 使用角色提示和原始任务执行真实非流式 Ollama chat，不再返回确定性 “Task received” 占位响应。
+- `JARVIS_ROLE_MODEL` 以受信任进程配置选择角色模型，默认 `llama3.2`；角色 `tools` 仍只是提示元数据，不获得终端或插件权限。
+- 上游错误、异常和空 assistant 内容统一收敛为稳定的 `Ollama role execution failed` 调度错误；fixture 生成的角色 Token 同步进入现有会话遥测。
+- 三端真实 loopback harness 断言 fixture 回复 `OK`，并按共享 manager 边界验证 Python Core、FastAPI 与 Express 的精确 Token 样本。
+
+## Iteration 127 已解决
+
+- `_RegisteredAgent` 现在区分已结束 handler 错误与可能仍在运行的 timeout：两者对外仍是 `error` 状态，但只有普通错误带内部可恢复标记。
+- `Orchestrator.recover_agent()` 提供线程安全的 recoverable `ERROR -> IDLE` 转换，不修改失败结果、历史、错误计数或聚合统计。
+- `AgentFactory` 在向调用者返回原始错误后恢复角色，使下一次独立请求可再次执行；不会隐藏重试失败的请求。
+- timeout 明确标记为不可恢复，避免 daemon handler 尚未退出时接受重叠任务。
+
+## Iteration 128 已解决
+
+- 新增默认拒绝的 `RoleToolPolicy` 与 `RoleToolBroker`；角色声明、精确授权和已注册 handler 必须同时满足，工具调用才可到达 handler。
+- 未声明、未授权和未注册分别产生稳定拒绝原因，拒绝发生在执行前；决策写入线程安全的有界内存审计记录。
+- `AgentFactory` 默认使用空 broker，系统提示明确输出 `[TOOL ACCESS] disabled`，不再把 profile 声明误称为可用工具。
+- 任务元数据拆分为 `declared_tools` 与 `authorized_tools`，为后续模型工具循环保留可验证边界，但本轮不启用自动工具调用。
+- Phase 3 评估 Kontext CLI 与 Doberman Core；两者均是更大的外部控制面，当前只借鉴执行路径强制和 fail-closed 原则，不新增依赖。
+
+## 四维评分
+
+| 维度 | 得分 | 依据 |
+|---|---:|---|
+| 可维护性 | 95 | POST/GET SSE 路径均由 OpenAPI 和真实三服务 harness 回归，Python 适配器复用单一写入路径 |
+| 扩展性 | 92 | 角色工具 broker 为后续受控执行提供独立策略、handler 和审计边界 |
+| 性能 | 84 | 前端按视图拆包，重型视图仍需低端设备实测 |
+| 安全性 | 91 | HTTP 终端和角色工具均默认拒绝，角色声明不再自动进入提示；timeout 角色执行仍缺少可终止 worker |
+
+## 技术债清单
+
+| 位置 | 严重程度 | 问题 | 修复建议 |
+|---|---|---|---|
+| 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
+| 未契约错误路径 | P1 | Express API fallback 与主要 Ollama/Core 代理错误及共享 orchestrator 子集已纳入 `ErrorResponse` 和 OpenAPI 1.10.0；role 专属端点仍保持显式范围 | 持续为新增共享端点补充跨服务 schema |
+| 角色工具执行策略 | P1 | 默认拒绝 broker、精确授权、handler 注册与有界审计已落地；自动模型工具循环尚未接入 | 只为固定只读能力注册 handler，并让每次模型工具请求强制经过 broker；不得复用 HTTP capability token 形成隐式授权 |
+| 编排器 timeout 隔离 | P1 | 普通 handler 错误可安全恢复；timeout 后 daemon 线程可能继续运行，因此角色保持不可恢复 `ERROR` | 将可超时角色工作迁移到可取消的进程/worker 边界，再设计显式恢复 |
+| 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |
+| 重型前端视图 | P2 | Chat/Runtime chunk 约 198/215 kB | 低端设备测量后再决定拆包 |
+
 ## 剩余风险
+
+### P1：内部通用终端执行器
+
+HTTP 路径不再直接使用通用 `TerminalExecutor` 的宽松 allowlist；默认内部实例现在使用最小环境和实例专属工作目录，且拒绝调用者环境与路径覆写。但它仍在服务用户上下文中运行，没有 OS 级隔离。
+
+已完成：默认 HTTP 服务终端已迁移到进程隔离 `TerminalWorker`，使用专用临时目录、最小环境、固定只读操作和可选 POSIX UID/GID 降权；通用 `TerminalExecutor` 仍仅供显式内部注入，不再作为 HTTP 默认入口。
 
 ### P1：多套 API 行为漂移
 
-Express、Python HTTPServer 和 FastAPI 的端点集合重叠，但错误格式、插件能力和流式行为仍未由同一份机器可读契约约束。
+Express、Python HTTPServer 和 FastAPI 已由共享 OpenAPI 文件约束健康、系统遥测、Ollama 状态/模型、Token、插件、记忆、事件、共享 orchestrator 子集、首批写操作错误、非流式 Ollama chat 与 GET/POST 规范 SSE 帧；Express Git 失败和未知 API 路由也已使用稳定 ErrorResponse，其余 role 专属代理错误仍未完全纳入契约。
 
-下一步：维护共享 API schema，并对同名端点执行跨实现响应测试。
+已完成：OpenAPI 升级到 1.10.0，增加 Express-only `x-jarvis-api-fallback`，并为 Ollama 状态/模型、系统遥测、Core API 代理及共享 orchestrator 路径声明 `ErrorResponse`；role 专属路径不纳入共享契约，因三端没有对等实现。
 
 ### P1：真实集成仍依赖本机服务
 
-Playwright 使用确定性 API fixture 验证 UI；真实 Ollama、Express、FastAPI 的联合启动仍属于手工集成流程。
+Playwright 使用确定性 API fixture 验证 UI；真实 Ollama、Express、FastAPI 流程已有可选 profile，但当前默认验证环境没有持续运行 Ollama。
 
-下一步：增加可选的本机集成 profile，在服务可用时运行非模拟 SSE、记忆和插件流程。
-
-### P1：FastAPI 生命周期 API 已弃用
-
-`src/main_fastapi.py` 仍使用 `@app.on_event("startup")` 和 `@app.on_event("shutdown")`，测试输出持续产生弃用告警。
-
-下一步：迁移到 FastAPI lifespan context manager。
+已完成：GitHub Actions 通过 `scripts/ci_local_integration.py --require-services` 启动仓库自有 fixture、FastAPI 与 Express，验证真实 HTTP/SSE、记忆与插件路径，并在退出时清理子进程和临时数据。
 
 ### P2：前端重型视图仍有优化空间
 
 Markdown 和 Chart.js 已按视图懒加载，但对话与运行监控生产 chunk 仍分别约 198 kB 和 215 kB。
 
 下一步：在真实低端设备上测量交互延迟，再决定是否拆分 Markdown/Chart.js 或按需加载图表。
+
+### P1：角色工具自动调用尚未接入
+
+默认拒绝的策略与 broker 已落地，角色声明、显式授权和已注册 handler 必须同时匹配，拒绝决策不会到达 handler。`AgentFactory` 当前只把授权后的名称写入提示和任务元数据，尚未解析或执行模型工具请求。下一步只能从固定只读能力开始，并保证每次调用都经过 broker；不得直接暴露任意命令、插件生命周期或 HTTP capability token。
+
+### P1：timeout 后的执行隔离
+
+普通 handler 异常已在保留错误结果和统计后恢复角色，但 `_run_with_timeout()` 的 daemon 线程无法被 Python 安全取消。timeout 状态因此保持不可恢复，避免后续请求与迟到线程重叠。下一步需要进程/worker 执行边界与明确的终止确认，不能简单重置状态。
 
 ## 维护规则
 

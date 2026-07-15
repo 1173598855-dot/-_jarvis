@@ -162,7 +162,8 @@ class TestOllamaManagerChat(unittest.TestCase):
         mgr = OllamaManager()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "message": {"content": "Hello!"},
+            "model": "llama2",
+            "message": {"role": "assistant", "content": "Hello!"},
             "done": True,
         }
         mock_resp.raise_for_status = MagicMock()
