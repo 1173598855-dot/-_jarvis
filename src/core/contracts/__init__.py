@@ -1,3 +1,8 @@
+from core.contracts.context_budget import (
+    ContextBudgetProvider,
+    ContextBudgetSnapshot,
+    ContextWatermarkChanged,
+)
 from core.contracts.run_state import (
     ContextLevel,
     RunState,
@@ -7,7 +12,10 @@ from core.contracts.run_state import (
 )
 
 __all__ = [
+    "ContextBudgetProvider",
+    "ContextBudgetSnapshot",
     "ContextLevel",
+    "ContextWatermarkChanged",
     "RunState",
     "RunStatus",
     "StageState",
