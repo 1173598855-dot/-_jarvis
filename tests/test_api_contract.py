@@ -188,6 +188,34 @@ def _resolve_schema(document, schema):
 
 def _assert_json_shape(test_case, document, schema, value, path="response"):
     schema = _resolve_schema(document, schema)
+
+    for index, child_schema in enumerate(schema.get("allOf", [])):
+        _assert_json_shape(
+            test_case,
+            document,
+            child_schema,
+            value,
+            f"{path}.allOf[{index}]",
+        )
+    if "anyOf" in schema:
+        test_case.assertTrue(
+            any(
+                _json_shape_matches(document, child_schema, value)
+                for child_schema in schema["anyOf"]
+            ),
+            f"{path}: value does not match anyOf",
+        )
+    if "if" in schema:
+        branch = "then" if _json_shape_matches(document, schema["if"], value) else "else"
+        if branch in schema:
+            _assert_json_shape(
+                test_case,
+                document,
+                schema[branch],
+                value,
+                f"{path}.{branch}",
+            )
+
     expected_types = schema.get("type")
     if isinstance(expected_types, str):
         expected_types = [expected_types]
@@ -232,7 +260,11 @@ def _assert_json_shape(test_case, document, schema, value, path="response"):
 
     if value is None:
         return
-    if expected_type == "object":
+    is_object_schema = expected_type == "object" or (
+        isinstance(value, dict)
+        and ("properties" in schema or "required" in schema)
+    )
+    if is_object_schema:
         for key in schema.get("required", []):
             test_case.assertIn(key, value, f"{path}.{key}")
         for key, child_schema in schema.get("properties", {}).items():
@@ -247,6 +279,14 @@ def _assert_json_shape(test_case, document, schema, value, path="response"):
                 item,
                 f"{path}[{index}]",
             )
+
+
+def _json_shape_matches(document, schema, value):
+    try:
+        _assert_json_shape(unittest.TestCase(), document, schema, value)
+    except AssertionError:
+        return False
+    return True
 
 
 def _assert_contract_document(test_case, document):
@@ -373,7 +413,15 @@ class TestSharedApiContract(unittest.TestCase):
 
     def test_agent_worker_outcomes_are_declared(self):
         outcomes = self.spec["components"]["schemas"]["AgentResult"]["properties"]["status"]["enum"]
-        for outcome in ("timeout", "cancelled", "crashed", "failed"):
+        for outcome in (
+            "completed",
+            "error",
+            "busy",
+            "timeout",
+            "cancelled",
+            "crashed",
+            "failed",
+        ):
             self.assertIn(outcome, outcomes)
 
     def test_role_task_lifecycle_paths_are_declared(self):
@@ -488,6 +536,59 @@ class TestSharedApiContract(unittest.TestCase):
             "capabilityToken",
         }
         self.assertTrue(forbidden.isdisjoint(request_schema["properties"]))
+
+    def test_role_task_terminal_status_requires_confirmed_termination(self):
+        schema = {"$ref": "#/components/schemas/WorkerTaskRecord"}
+        record = {
+            "protocol_version": 1,
+            "task_id": "task-abc",
+            "attempt_id": "attempt-abc",
+            "role_name": "engineer",
+            "status": "running",
+            "created_at": "2026-07-19T00:00:00+00:00",
+            "updated_at": "2026-07-19T00:00:00+00:00",
+            "timeout_seconds": 30,
+            "result": None,
+            "error": "",
+            "worker_pid": 42,
+            "last_heartbeat": None,
+            "last_event_sequence": 0,
+            "termination_confirmed": False,
+        }
+
+        for unconfirmed_status in (
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "crashed",
+        ):
+            valid = {**record, "status": unconfirmed_status}
+            _assert_json_shape(
+                self,
+                self.spec,
+                schema,
+                valid,
+                f"unconfirmed {unconfirmed_status}",
+            )
+        for terminal_status in ("timeout", "cancelled"):
+            invalid = {**record, "status": terminal_status}
+            with self.assertRaises(AssertionError):
+                _assert_json_shape(
+                    self,
+                    self.spec,
+                    schema,
+                    invalid,
+                    terminal_status,
+                )
+            valid = {**invalid, "termination_confirmed": True}
+            _assert_json_shape(
+                self,
+                self.spec,
+                schema,
+                valid,
+                f"confirmed {terminal_status}",
+            )
 
     def test_express_api_fallback_is_documented(self):
         fallback = self.contract["x-jarvis-api-fallback"]

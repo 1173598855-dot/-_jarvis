@@ -1937,7 +1937,9 @@
             "enum": [
               "unknown",
               "success",
+              "completed",
               "error",
+              "busy",
               "timeout",
               "cancelled",
               "crashed",
@@ -1975,6 +1977,33 @@
       "WorkerTaskRecord": {
         "type": "object",
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "timeout",
+                    "cancelled"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "termination_confirmed"
+              ],
+              "properties": {
+                "termination_confirmed": {
+                  "const": true
+                }
+              }
+            }
+          }
+        ],
         "required": [
           "protocol_version",
           "task_id",
