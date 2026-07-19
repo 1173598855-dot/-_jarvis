@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "J.A.R.V.I.S. Shared Core API",
-    "version": "1.11.0",
+    "version": "1.12.0",
     "description": "Stable response contract shared by Express, Python HTTPServer, and FastAPI."
   },
   "x-jarvis-implementations": [
@@ -816,6 +816,197 @@
           },
           "503": {
             "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/tasks": {
+      "get": {
+        "operationId": "listRoleTasks",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Most recent role worker tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTaskListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The list limit is outside the supported range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRoleTask",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerTaskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Role worker task accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTaskRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body, role name, prompt, or timeout is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The requested role is not registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The role worker supervisor is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/tasks/{task_id}": {
+      "get": {
+        "operationId": "getRoleTask",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role worker task record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTaskRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The requested role worker task does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/roles/tasks/{task_id}/cancel": {
+      "post": {
+        "operationId": "cancelRoleTask",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role worker task cancelled with confirmed process termination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTaskRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The requested role worker task does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The task is terminal or worker termination could not be confirmed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1743,7 +1934,151 @@
           },
           "status": {
             "type": "string",
-            "minLength": 1
+            "enum": [
+              "unknown",
+              "success",
+              "error",
+              "timeout",
+              "cancelled",
+              "crashed",
+              "failed"
+            ]
+          }
+        }
+      },
+      "WorkerTaskRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role_name",
+          "prompt"
+        ],
+        "properties": {
+          "role_name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 300,
+            "minimum": 1,
+            "maximum": 300
+          }
+        }
+      },
+      "WorkerTaskRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "task_id",
+          "attempt_id",
+          "role_name",
+          "status",
+          "created_at",
+          "updated_at",
+          "timeout_seconds",
+          "result",
+          "error",
+          "worker_pid",
+          "last_heartbeat",
+          "last_event_sequence",
+          "termination_confirmed"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "attempt_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "role_name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "timeout",
+              "cancelled",
+              "crashed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "result": {},
+          "error": {
+            "type": "string"
+          },
+          "worker_pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "last_heartbeat": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_event_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "termination_confirmed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WorkerTaskListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tasks",
+          "count"
+        ],
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/WorkerTaskRecord"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
           }
         }
       },

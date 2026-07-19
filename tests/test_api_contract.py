@@ -365,10 +365,129 @@ class TestSharedApiContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        cls.spec = cls.contract
 
     def test_contract_is_openapi_31_document(self):
         _assert_contract_document(self, self.contract)
-        self.assertEqual(self.contract["info"]["version"], "1.11.0")
+        self.assertEqual(self.spec["info"]["version"], "1.12.0")
+
+    def test_agent_worker_outcomes_are_declared(self):
+        outcomes = self.spec["components"]["schemas"]["AgentResult"]["properties"]["status"]["enum"]
+        for outcome in ("timeout", "cancelled", "crashed", "failed"):
+            self.assertIn(outcome, outcomes)
+
+    def test_role_task_lifecycle_paths_are_declared(self):
+        for path in (
+            "/api/roles/tasks",
+            "/api/roles/tasks/{task_id}",
+            "/api/roles/tasks/{task_id}/cancel",
+        ):
+            self.assertIn(path, self.spec["paths"])
+
+    def test_role_task_lifecycle_schemas_and_errors_are_declared(self):
+        schemas = self.spec["components"]["schemas"]
+        for schema_name in (
+            "WorkerTaskRequest",
+            "WorkerTaskRecord",
+            "WorkerTaskListResponse",
+        ):
+            self.assertIn(schema_name, schemas)
+
+        create = self.spec["paths"]["/api/roles/tasks"]["post"]
+        request_schema = create["requestBody"]["content"]["application/json"]["schema"]
+        _assert_json_shape(
+            self,
+            self.spec,
+            request_schema,
+            {"role_name": "engineer", "prompt": "review", "timeout": 30},
+            "role task request",
+        )
+        record = {
+            "protocol_version": 1,
+            "task_id": "task-abc",
+            "attempt_id": "attempt-abc",
+            "role_name": "engineer",
+            "status": "running",
+            "created_at": "2026-07-19T00:00:00+00:00",
+            "updated_at": "2026-07-19T00:00:00+00:00",
+            "timeout_seconds": 30,
+            "result": None,
+            "error": "",
+            "worker_pid": 42,
+            "last_heartbeat": None,
+            "last_event_sequence": 0,
+            "termination_confirmed": False,
+        }
+        create_schema = create["responses"]["202"]["content"]["application/json"]["schema"]
+        _assert_json_shape(self, self.spec, create_schema, record, "role task create")
+
+        record_fields = set(record)
+        record_schema = schemas["WorkerTaskRecord"]
+        self.assertEqual(set(record_schema["required"]), record_fields)
+        self.assertEqual(set(record_schema["properties"]), record_fields)
+        self.assertFalse(record_schema["additionalProperties"])
+
+        for path, method, status in (
+            ("/api/roles/tasks/{task_id}", "get", "200"),
+            ("/api/roles/tasks/{task_id}/cancel", "post", "200"),
+        ):
+            success_schema = self.spec["paths"][path][method]["responses"][status][
+                "content"
+            ]["application/json"]["schema"]
+            self.assertEqual(
+                success_schema,
+                {"$ref": "#/components/schemas/WorkerTaskRecord"},
+            )
+            _assert_json_shape(
+                self,
+                self.spec,
+                success_schema,
+                record,
+                f"{method} {path}",
+            )
+
+        list_operation = self.spec["paths"]["/api/roles/tasks"]["get"]
+        self.assertEqual(list_operation["parameters"][0]["schema"]["maximum"], 100)
+        list_schema = list_operation["responses"]["200"]["content"]["application/json"]["schema"]
+        _assert_json_shape(
+            self,
+            self.spec,
+            list_schema,
+            {"tasks": [record], "count": 1},
+            "role task list",
+        )
+
+        expected_errors = {
+            ("/api/roles/tasks", "post"): {"400", "404", "413", "503"},
+            ("/api/roles/tasks", "get"): {"400"},
+            ("/api/roles/tasks/{task_id}", "get"): {"404"},
+            ("/api/roles/tasks/{task_id}/cancel", "post"): {"404", "409"},
+        }
+        for (path, method), statuses in expected_errors.items():
+            responses = self.spec["paths"][path][method]["responses"]
+            self.assertTrue(statuses.issubset(responses), f"{method} {path}")
+            for status in statuses:
+                self.assertEqual(
+                    responses[status]["content"]["application/json"]["schema"],
+                    {"$ref": "#/components/schemas/ErrorResponse"},
+                )
+
+    def test_role_task_request_does_not_expose_worker_execution_controls(self):
+        request_schema = self.spec["components"]["schemas"]["WorkerTaskRequest"]
+        self.assertFalse(request_schema["additionalProperties"])
+        self.assertEqual(
+            set(request_schema["properties"]),
+            {"role_name", "prompt", "timeout"},
+        )
+        forbidden = {
+            "runner",
+            "command",
+            "env",
+            "cwd",
+            "capability_token",
+            "capabilityToken",
+        }
+        self.assertTrue(forbidden.isdisjoint(request_schema["properties"]))
 
     def test_express_api_fallback_is_documented(self):
         fallback = self.contract["x-jarvis-api-fallback"]
