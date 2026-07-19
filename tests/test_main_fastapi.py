@@ -3,6 +3,7 @@ Test main_fastapi.py - Phase 11 FastAPI REST API integration tests
 Run: python3 tests/test_main_fastapi.py
 """
 import asyncio
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -186,6 +187,139 @@ class TestRunRecoveryLifespan(unittest.TestCase):
                     self.assertEqual(client.get("/api/health").status_code, 200)
 
             self.assertIsNone(app_state.recovery_outcome)
+
+
+class _FakeRoleTasks:
+    def __init__(self):
+        self.records = {}
+        self.shutdown_calls = 0
+
+    def submit(self, request):
+        from core.contracts.worker_protocol import WorkerTaskRecord, WorkerTaskStatus
+
+        record = WorkerTaskRecord.from_request(request).evolve(
+            status=WorkerTaskStatus.RUNNING,
+            worker_pid=4242,
+        )
+        self.records[record.task_id] = record
+        return record
+
+    def list(self, limit=100):
+        return list(reversed(tuple(self.records.values())[-limit:]))
+
+    def get(self, task_id):
+        return self.records.get(task_id)
+
+    def cancel(self, task_id):
+        from core.brain.role_worker import WorkerTaskTerminalError
+        from core.contracts.worker_protocol import WorkerTaskStatus
+
+        record = self.records.get(task_id)
+        if record is None:
+            return None
+        if record.status.is_terminal:
+            raise WorkerTaskTerminalError(record)
+        record = record.evolve(
+            status=WorkerTaskStatus.CANCELLED,
+            error="Worker task cancelled",
+            termination_confirmed=True,
+        )
+        self.records[task_id] = record
+        return record
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
+class TestRoleTaskLifecycleEndpoints(unittest.TestCase):
+    @contextmanager
+    def client(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        role_tasks = _FakeRoleTasks()
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                role_tasks=role_tasks,
+            )
+            application = main_fastapi.create_app(app_state)
+            with TestClient(application) as client:
+                yield client, role_tasks
+
+    def create_task(self, client):
+        response = client.post(
+            "/api/roles/tasks",
+            json={
+                "role_name": "engineer",
+                "prompt": "Review recovery state",
+                "timeout": 30,
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        return response.json()
+
+    def test_create_list_and_get_task(self):
+        with self.client() as (client, _role_tasks):
+            created = self.create_task(client)
+            task_id = created["task_id"]
+
+            listed = client.get("/api/roles/tasks").json()
+            fetched = client.get(f"/api/roles/tasks/{task_id}")
+
+            self.assertEqual(created["status"], "running")
+            self.assertEqual(listed["count"], 1)
+            self.assertEqual(listed["tasks"][0]["task_id"], task_id)
+            self.assertEqual(fetched.status_code, 200)
+            self.assertEqual(fetched.json()["task_id"], task_id)
+
+    def test_cancel_is_confirmed_and_terminal_conflict_is_stable(self):
+        with self.client() as (client, _role_tasks):
+            task_id = self.create_task(client)["task_id"]
+
+            cancelled = client.post(f"/api/roles/tasks/{task_id}/cancel")
+            conflict = client.post(f"/api/roles/tasks/{task_id}/cancel")
+
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json()["status"], "cancelled")
+            self.assertTrue(cancelled.json()["termination_confirmed"])
+            self.assertEqual(conflict.status_code, 409)
+            self.assertEqual(conflict.json()["error"]["code"], "ROLE_TASK_TERMINAL")
+
+    def test_unknown_tasks_and_invalid_requests_use_stable_errors(self):
+        with self.client() as (client, _role_tasks):
+            missing_get = client.get("/api/roles/tasks/task-missing")
+            missing_cancel = client.post("/api/roles/tasks/task-missing/cancel")
+            invalid = client.post(
+                "/api/roles/tasks",
+                json={"role_name": " ", "prompt": "work", "timeout": 0},
+            )
+
+            self.assertEqual(missing_get.status_code, 404)
+            self.assertEqual(
+                missing_get.json()["error"]["code"],
+                "ROLE_TASK_NOT_FOUND",
+            )
+            self.assertEqual(missing_cancel.status_code, 404)
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(invalid.json()["error"]["code"], "INVALID_REQUEST")
+
+    def test_lifespan_shuts_down_role_tasks(self):
+        role_tasks = _FakeRoleTasks()
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        with tempfile.TemporaryDirectory() as memory_dir:
+            application = main_fastapi.create_app(
+                main_fastapi.AppState(
+                    memory_dir=memory_dir,
+                    role_tasks=role_tasks,
+                )
+            )
+            with TestClient(application) as client:
+                self.assertEqual(client.get("/api/health").status_code, 200)
+
+        self.assertEqual(role_tasks.shutdown_calls, 1)
 
 
 

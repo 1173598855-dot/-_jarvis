@@ -42,7 +42,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -57,7 +57,14 @@ from app.run_lifecycle import RunLifecycleCoordinator
 from core.brain.agent_factory import AgentFactory
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType
 from core.brain.orchestrator import AgentTask, Orchestrator
+from core.brain.role_worker import (
+    RoleWorkerSupervisor,
+    WorkerTaskTerminalError,
+    apply_worker_token_usage,
+    execute_role_task,
+)
 from core.brain.role_registry import create_default_registry
+from core.contracts.worker_protocol import WorkerTaskRequest, WorkerTaskStatus
 
 # Phase 11 imports (moved to top to resolve E402)
 from core.kernel.ollama_manager import OllamaManager
@@ -197,6 +204,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         try:
+            app_state.role_tasks.shutdown()
             app_state.orchestrator.shutdown()
             app_state.agent_factory.shutdown()
         finally:
@@ -256,6 +264,7 @@ async def request_validation_exception_handler(
         for error in errors
     )
     is_orchestrator_history = request.url.path == "/api/orchestrator/history"
+    is_role_task_path = request.url.path.startswith("/api/roles/tasks")
     status_code = (
         400
         if (
@@ -263,6 +272,7 @@ async def request_validation_exception_handler(
             or is_missing_plugin_id
             or is_missing_command
             or is_orchestrator_history
+            or is_role_task_path
             or request.url.path == "/api/terminal/execute"
             or request.url.path == "/api/ollama/chat/stream"
         )
@@ -309,6 +319,7 @@ class AppState:
         memory_dir: str = ".auto-memory",
         terminal=None,
         run_lifecycle: RunLifecycleCoordinator | None = None,
+        role_tasks: RoleWorkerSupervisor | None = None,
     ):
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
@@ -320,6 +331,19 @@ class AppState:
             orchestrator=self.orchestrator,
             ollama_manager=self.ollama,
         )
+        if role_tasks is None:
+            role_tasks = RoleWorkerSupervisor(
+                execute_role_task,
+                runner_config={
+                    "ollama_base_url": self.ollama.base_url,
+                    "role_model": self.agent_factory._role_model,
+                },
+                on_terminal=lambda record: apply_worker_token_usage(
+                    record,
+                    self.ollama,
+                ),
+            )
+        self.role_tasks = role_tasks
         if run_lifecycle is None:
             repository = FileRunStateRepository(
                 Path(memory_dir),
@@ -903,20 +927,6 @@ async def list_roles(capability: Optional[str] = None):
         "count": len(roles),
     }
 
-@app.get("/api/roles/{role_name}")
-async def get_role(role_name: str):
-    """Get specific role details"""
-    profile = state.role_registry.get(role_name)
-    if not profile:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "ROLE_NOT_FOUND",
-                "message": f"Role '{role_name}' not found",
-            },
-        )
-    return {"role": profile.to_dict()}
-
 async def _read_role_body(request: Request) -> dict:
     try:
         data = await request.json()
@@ -961,6 +971,124 @@ def _validate_role_timeout(timeout: object) -> int:
             },
         )
     return timeout
+
+
+@app.post("/api/roles/tasks", status_code=202)
+async def create_role_task(request: Request):
+    data = await _read_role_body(request)
+    role_name = _normalize_dispatch_text(data.get("role_name", ""))
+    prompt = _normalize_dispatch_text(data.get("prompt", ""))
+    if role_name is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "role_name must be a non-empty string",
+            },
+        )
+    if prompt is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "prompt must be a non-empty string",
+            },
+        )
+    timeout = _validate_role_timeout(data.get("timeout", 300))
+    if state.role_registry.get(role_name) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_NOT_FOUND",
+                "message": f"Role '{role_name}' not found",
+            },
+        )
+    worker_request = WorkerTaskRequest.new(
+        role_name,
+        prompt,
+        timeout,
+        task_id=f"task-{uuid.uuid4().hex}",
+    )
+    try:
+        record = state.role_tasks.submit(worker_request)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ROLE_WORKER_UNAVAILABLE",
+                "message": "Role worker is unavailable",
+            },
+        ) from exc
+    return record.to_dict()
+
+
+@app.get("/api/roles/tasks")
+async def list_role_tasks(limit: int = Query(default=100, ge=1, le=100)):
+    records = state.role_tasks.list(limit=limit)
+    return {
+        "tasks": [record.to_dict() for record in records],
+        "count": len(records),
+    }
+
+
+@app.get("/api/roles/tasks/{task_id}")
+async def get_role_task(task_id: str):
+    record = state.role_tasks.get(task_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_TASK_NOT_FOUND",
+                "message": "Role task was not found",
+            },
+        )
+    return record.to_dict()
+
+
+@app.post("/api/roles/tasks/{task_id}/cancel")
+async def cancel_role_task(task_id: str):
+    try:
+        record = state.role_tasks.cancel(task_id)
+    except WorkerTaskTerminalError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ROLE_TASK_TERMINAL",
+                "message": "Role task is already terminal",
+            },
+        ) from exc
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_TASK_NOT_FOUND",
+                "message": "Role task was not found",
+            },
+        )
+    if record.status is not WorkerTaskStatus.CANCELLED:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ROLE_TASK_TERMINATION_UNCONFIRMED",
+                "message": "Worker process termination is not confirmed",
+            },
+        )
+    return record.to_dict()
+
+
+@app.get("/api/roles/{role_name}")
+async def get_role(role_name: str):
+    """Get specific role details"""
+    profile = state.role_registry.get(role_name)
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ROLE_NOT_FOUND",
+                "message": f"Role '{role_name}' not found",
+            },
+        )
+    return {"role": profile.to_dict()}
 
 
 @app.post("/api/roles/dispatch")
