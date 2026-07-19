@@ -10,6 +10,14 @@ from core.contracts.run_state import (
     StageState,
     WorkPackageState,
 )
+from core.contracts.worker_protocol import (
+    WORKER_PROTOCOL_VERSION,
+    WorkerEvent,
+    WorkerEventKind,
+    WorkerTaskRecord,
+    WorkerTaskRequest,
+    WorkerTaskStatus,
+)
 
 __all__ = [
     "ContextBudgetProvider",
@@ -20,4 +28,10 @@ __all__ = [
     "RunStatus",
     "StageState",
     "WorkPackageState",
+    "WORKER_PROTOCOL_VERSION",
+    "WorkerEvent",
+    "WorkerEventKind",
+    "WorkerTaskRecord",
+    "WorkerTaskRequest",
+    "WorkerTaskStatus",
 ]
