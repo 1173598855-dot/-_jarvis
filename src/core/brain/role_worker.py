@@ -34,6 +34,71 @@ class _WorkerOutputLimitError(RuntimeError):
     pass
 
 
+def execute_role_task(
+    request_value: Mapping[str, Any],
+    trusted_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    from core.brain.agent_factory import AgentFactory
+    from core.kernel.ollama_manager import OllamaManager
+
+    request = WorkerTaskRequest.from_dict(request_value)
+    base_url = trusted_config.get("ollama_base_url")
+    role_model = trusted_config.get("role_model")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise RuntimeError("trusted Ollama base URL is not configured")
+    if not isinstance(role_model, str) or not role_model.strip():
+        raise RuntimeError("trusted role model is not configured")
+
+    manager = OllamaManager(
+        base_url=base_url,
+        timeout=request.timeout_seconds,
+    )
+    factory = AgentFactory(
+        ollama_manager=manager,
+        role_model=role_model,
+    )
+    try:
+        dispatch = factory.dispatch_by_role(
+            request.role_name,
+            request.prompt,
+            request.timeout_seconds,
+        )
+        if dispatch.status not in {"success", "completed", "dispatched"}:
+            raise RuntimeError(dispatch.message or "Role worker execution failed")
+        return {
+            "dispatch": dispatch.to_dict(),
+            "usage": manager.get_token_usage().to_dict(),
+        }
+    finally:
+        factory.shutdown()
+
+
+def apply_worker_token_usage(record: WorkerTaskRecord, ollama_manager: object) -> bool:
+    if record.status is not WorkerTaskStatus.SUCCEEDED:
+        return False
+    if not isinstance(record.result, Mapping):
+        return False
+    usage = record.result.get("usage")
+    if not isinstance(usage, Mapping):
+        return False
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    if (
+        not isinstance(prompt_tokens, int)
+        or isinstance(prompt_tokens, bool)
+        or prompt_tokens < 0
+        or not isinstance(completion_tokens, int)
+        or isinstance(completion_tokens, bool)
+        or completion_tokens < 0
+    ):
+        return False
+    recorder = getattr(ollama_manager, "record_token_usage", None)
+    if not callable(recorder):
+        return False
+    recorder(prompt_tokens, completion_tokens)
+    return True
+
+
 @dataclass(slots=True)
 class _TaskRuntime:
     request: WorkerTaskRequest
@@ -421,7 +486,6 @@ class RoleWorkerSupervisor:
         error: str = "",
         termination_confirmed: bool,
     ) -> WorkerTaskRecord | None:
-        callback = None
         with self._lock:
             record = self._records.get(task_id)
             if record is None:
@@ -435,13 +499,12 @@ class RoleWorkerSupervisor:
                 termination_confirmed=termination_confirmed,
             )
             self._records[task_id] = terminal
-            callback = self._on_terminal
-        if callback is not None:
-            try:
-                callback(terminal)
-            except Exception:
-                pass
-        return terminal
+            if self._on_terminal is not None:
+                try:
+                    self._on_terminal(terminal)
+                except Exception:
+                    pass
+            return terminal
 
     def _update_nonterminal_error(self, task_id: str, error: str) -> None:
         with self._lock:

@@ -1,7 +1,15 @@
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
+from threading import Thread
 import unittest
 
-from core.brain.role_worker import RoleWorkerSupervisor, WorkerTaskTerminalError
+from core.brain.role_worker import (
+    RoleWorkerSupervisor,
+    WorkerTaskTerminalError,
+    apply_worker_token_usage,
+    execute_role_task,
+)
 from core.contracts.worker_protocol import (
     WorkerEvent,
     WorkerEventKind,
@@ -9,6 +17,33 @@ from core.contracts.worker_protocol import (
     WorkerTaskStatus,
 )
 from tests import worker_fixtures
+
+
+class _OllamaWorkerFixture(BaseHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        return
+
+    def do_POST(self):
+        if self.path != "/api/chat":
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        body = json.dumps(
+            {
+                "model": "fixture-model:latest",
+                "message": {"role": "assistant", "content": "WORKER OK"},
+                "done": True,
+                "prompt_eval_count": 11,
+                "eval_count": 7,
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 class TestRoleWorkerSupervisor(unittest.TestCase):
@@ -160,6 +195,43 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
                 supervisor.get(request.task_id).status,
                 WorkerTaskStatus.CANCELLED,
             )
+
+    def test_fixed_role_runner_returns_content_and_parent_token_usage(self):
+        from core.kernel.ollama_manager import OllamaManager
+
+        server = HTTPServer(("127.0.0.1", 0), _OllamaWorkerFixture)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        parent_manager = OllamaManager(base_url=base_url)
+        try:
+            supervisor = self.make_supervisor(
+                execute_role_task,
+                runner_config={
+                    "ollama_base_url": base_url,
+                    "role_model": "fixture-model:latest",
+                },
+                on_terminal=lambda record: apply_worker_token_usage(
+                    record,
+                    parent_manager,
+                ),
+            )
+            request = WorkerTaskRequest.new("engineer", "Use the fixture", 10)
+
+            supervisor.submit(request)
+            terminal = self.wait_terminal(supervisor, request.task_id)
+
+            self.assertEqual(terminal.status, WorkerTaskStatus.SUCCEEDED)
+            self.assertEqual(terminal.result["dispatch"]["message"], "WORKER OK")
+            self.assertEqual(terminal.result["usage"]["prompt_tokens"], 11)
+            self.assertEqual(terminal.result["usage"]["completion_tokens"], 7)
+            usage = parent_manager.get_token_usage()
+            self.assertEqual(usage.prompt_tokens, 11)
+            self.assertEqual(usage.completion_tokens, 7)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":
