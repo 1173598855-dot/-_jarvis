@@ -113,6 +113,81 @@ class TestMainFastapiSyntax(unittest.TestCase):
         self.assertIn('version="1.1.0"', text)
 
 
+class TestRunRecoveryLifespan(unittest.TestCase):
+    class FakeRunLifecycle:
+        def __init__(self, outcome=None, error=None):
+            self.outcome = outcome
+            self.error = error
+            self.calls = 0
+
+        def recover_active(self):
+            self.calls += 1
+            if self.error is not None:
+                raise self.error
+            return self.outcome
+
+    def test_lifespan_recovers_once_before_serving_requests(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        lifecycle = self.FakeRunLifecycle(outcome=None)
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                run_lifecycle=lifecycle,
+            )
+            application = main_fastapi.create_app(app_state)
+
+            with TestClient(application) as client:
+                self.assertEqual(lifecycle.calls, 1)
+                self.assertEqual(client.get("/api/health").status_code, 200)
+
+            self.assertEqual(lifecycle.calls, 1)
+            self.assertIsNone(app_state.recovery_outcome)
+
+    def test_integrity_failure_aborts_startup_without_logging_details(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        lifecycle = self.FakeRunLifecycle(
+            error=main_fastapi.RunStateIntegrityError("tampered-secret-detail")
+        )
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                run_lifecycle=lifecycle,
+            )
+            application = main_fastapi.create_app(app_state)
+
+            with patch.object(main_fastapi.logger, "error") as log_error:
+                with self.assertRaisesRegex(
+                    main_fastapi.RunStateIntegrityError,
+                    "tampered-secret-detail",
+                ):
+                    with TestClient(application):
+                        pass
+
+            self.assertEqual(lifecycle.calls, 1)
+            logged = " ".join(str(value) for call in log_error.call_args_list for value in call.args)
+            self.assertIn("RUN_STATE_INTEGRITY_ERROR", logged)
+            self.assertNotIn("tampered-secret-detail", logged)
+
+    def test_default_lifecycle_needs_no_key_without_active_manifest(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        with tempfile.TemporaryDirectory() as memory_dir:
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("JARVIS_RUN_STATE_KEY", None)
+                app_state = main_fastapi.AppState(memory_dir=memory_dir)
+                application = main_fastapi.create_app(app_state)
+
+                with TestClient(application) as client:
+                    self.assertEqual(client.get("/api/health").status_code, 200)
+
+            self.assertIsNone(app_state.recovery_outcome)
+
+
 
 class TestRequestBodyLimitMiddleware(unittest.TestCase):
     def test_rejects_headerless_chunked_overflow(self):

@@ -48,6 +48,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from adapters.file_run_state_repository import (
+    FileRunStateRepository,
+    RunStateIntegrityError,
+)
+from adapters.git_workspace import GitWorkspaceInspector
+from app.run_lifecycle import RunLifecycleCoordinator
 from core.brain.agent_factory import AgentFactory
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType
 from core.brain.orchestrator import AgentTask, Orchestrator
@@ -180,9 +186,14 @@ class _RequestBodyLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    logger.info("J.A.R.V.I.S. FastAPI server started on http://127.0.0.1:8080")
     app_state = _app.state.jarvis_state
     try:
+        try:
+            app_state.recovery_outcome = app_state.run_lifecycle.recover_active()
+        except RunStateIntegrityError:
+            logger.error("RUN_STATE_INTEGRITY_ERROR: startup recovery rejected")
+            raise
+        logger.info("J.A.R.V.I.S. FastAPI server started on http://127.0.0.1:8080")
         yield
     finally:
         try:
@@ -293,7 +304,12 @@ async def request_validation_exception_handler(
 
 class AppState:
     """Application global state"""
-    def __init__(self, memory_dir: str = ".auto-memory", terminal=None):
+    def __init__(
+        self,
+        memory_dir: str = ".auto-memory",
+        terminal=None,
+        run_lifecycle: RunLifecycleCoordinator | None = None,
+    ):
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
         self.memory_store = MemoryStore(memory_dir=memory_dir)
@@ -304,8 +320,24 @@ class AppState:
             orchestrator=self.orchestrator,
             ollama_manager=self.ollama,
         )
+        if run_lifecycle is None:
+            repository = FileRunStateRepository(
+                Path(memory_dir),
+                key_provider=self._run_state_key,
+            )
+            run_lifecycle = RunLifecycleCoordinator(
+                repository,
+                GitWorkspaceInspector(Path.cwd()),
+            )
+        self.run_lifecycle = run_lifecycle
+        self.recovery_outcome = None
         self.start_time = time.time()
         self.request_count = 0
+
+    @staticmethod
+    def _run_state_key() -> bytes | None:
+        value = os.environ.get("JARVIS_RUN_STATE_KEY")
+        return value.encode("utf-8") if value else None
 
 
 _active_state: ContextVar[Optional[AppState]] = ContextVar(
