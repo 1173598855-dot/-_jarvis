@@ -1,3 +1,109 @@
+## Iteration #130 - 2026-07-19
+
+**Protocol**: Terminable asynchronous role-task lifecycle
+**Status**: Complete
+
+### Achievements
+
+- Added protocol-version-1 Worker requests, events, terminal states, strict serialization, and confirmed-termination invariants.
+- Added a parent-authoritative, Windows-spawn-compatible role Worker supervisor with timeout, cancellation, crash, late-event, bounded-output, bounded-history, and shutdown cleanup behavior.
+- Added a fixed production runner that builds child-local Ollama and AgentFactory dependencies and writes returned Token usage into the parent service telemetry.
+- Added FastAPI create/list/get/cancel lifecycle endpoints without allowing HTTP callers to choose execution controls.
+- Upgraded OpenAPI to `1.12.0` with Worker schemas, stable success/error responses, and conditional confirmation for timeout/cancelled records.
+- Registered Worker protocol, supervisor, and API lifecycle coverage in the canonical aggregate suite.
+- Kept legacy synchronous role dispatch unchanged and explicitly outside the new cancellation guarantee.
+
+### Verification
+
+- `python -m unittest tests.test_worker_protocol tests.test_role_worker tests.test_main_fastapi.TestRoleTaskLifecycleEndpoints tests.test_api_contract.TestSharedApiContract -v`: 40/40 passed
+- `python -m unittest tests.test_role_worker tests.test_agent_factory tests.test_agent_factory_extended tests.test_ollama_manager tests.test_ollama_manager_extended`: 140/140 passed
+- `python tests/run_all.py`: 262/262 passed
+- `python -m unittest discover -s tests -p "test_*.py"`: 1136/1136 passed
+- `python -m compileall -q src tests`: passed
+- `cd frontend; npm test -- --run`: 112/112 passed
+- `cd frontend; npm run test:e2e`: 5 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+
+### Files Changed
+
+- `src/core/contracts/worker_protocol.py`
+- `src/core/contracts/__init__.py`
+- `src/core/brain/role_worker.py`
+- `src/main_fastapi.py`
+- `contracts/core-api.openapi.json`
+- `tests/worker_fixtures.py`
+- `tests/test_worker_protocol.py`
+- `tests/test_role_worker.py`
+- `tests/test_main_fastapi.py`
+- `tests/test_api_contract.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_130.md`
+- `docs/superpowers/specs/2026-07-19-role-worker-lifecycle-design.md`
+- `docs/superpowers/plans/2026-07-19-role-worker-lifecycle.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #129 - 2026-07-16
+
+**Protocol**: Authenticated context continuity and startup recovery
+**Status**: Complete
+
+### Achievements
+
+- Added versioned immutable run state and concrete next-action contracts with monotonic revisions.
+- Added context budget watermarks and deterministic Red-level checkpoint behavior.
+- Added shared secret redaction, fixed-section resume documents, and an HMAC-authenticated atomic recovery repository.
+- Added Git drift inspection and recovery coordination for Red context, changed HEAD/branch, partial work, and dirty paths.
+- Integrated fail-closed one-time active-run recovery into FastAPI startup.
+- Added a combined recovery gate covering Red context, dirty work, and a partial agent handoff.
+
+### Verification
+
+- `python -m unittest tests.test_run_state tests.test_context_budget tests.test_resume_document tests.test_file_run_state_repository tests.test_run_lifecycle tests.test_main_fastapi.TestRunRecoveryLifespan tests.test_phase_a_recovery ... -v`: 35/35 passed
+- `python tests/run_all.py`: 262/262 passed in the final Iteration 130 branch verification
+- `python -m unittest discover -s tests -p "test_*.py"`: 1136/1136 passed in the final Iteration 130 branch verification
+- `python -m compileall -q src tests`: passed
+- `cd frontend; npm test -- --run`: 112/112 passed
+- `cd frontend; npm run test:e2e`: 5 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+
+### Files Changed
+
+- `src/core/contracts/run_state.py`
+- `src/core/brain/context_budget.py`
+- `src/core/brain/resume_document.py`
+- `src/core/kernel/secret_redaction.py`
+- `src/adapters/file_run_state_repository.py`
+- `src/adapters/git_workspace.py`
+- `src/app/run_lifecycle.py`
+- `src/main_fastapi.py`
+- `tests/test_run_state.py`
+- `tests/test_context_budget.py`
+- `tests/test_resume_document.py`
+- `tests/test_file_run_state_repository.py`
+- `tests/test_run_lifecycle.py`
+- `tests/test_phase_a_recovery.py`
+- `tests/test_main_fastapi.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_129.md`
+- `docs/superpowers/plans/2026-07-16-phase-a-context-continuity.md`
+- `CHANGELOG.md`
+
+---
+
 ## Iteration #128 - 2026-07-15
 
 **Protocol**: Default-deny role tool authorization boundary

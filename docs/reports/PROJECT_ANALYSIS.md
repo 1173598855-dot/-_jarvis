@@ -1,10 +1,10 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-15
+**扫描时间**：2026-07-19
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 128 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 130 本轮测试结果
 
 ## 结论
 
@@ -16,17 +16,17 @@
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 15 个文件，约 6,043 行 |
+| `src/` Python | 28 个文件，约 7,617 行 |
 | `src/` TypeScript | 0 个文件 |
-| `frontend/src/` | 38 个 TS/TSX 文件，约 4,616 行 |
-| `tests/` Python | 当前以 discovery 结果为准 |
-| 规范 Python 聚合套件 | 208 个用例 |
-| 完整 Python discovery | 1080 个用例 |
+| `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
+| `tests/` Python | 49 个 `test_*.py` 文件 |
+| 规范 Python 聚合套件 | 262 个用例 |
+| 完整 Python discovery | 1136 个用例 |
 | 前端 Vitest | 112 个用例 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 119-128） |
+| 滚动审计报告 | 10 份（Iteration 121-130） |
 
 ## 运行架构
 
@@ -230,6 +230,23 @@ Role-specific routes remain intentionally outside the shared contract because th
 - 任务元数据拆分为 `declared_tools` 与 `authorized_tools`，为后续模型工具循环保留可验证边界，但本轮不启用自动工具调用。
 - Phase 3 评估 Kontext CLI 与 Doberman Core；两者均是更大的外部控制面，当前只借鉴执行路径强制和 fail-closed 原则，不新增依赖。
 
+## Iteration 129 已解决
+
+- 新增版本化 `RunState`、工作包状态和精确下一动作约束，修订号只能单调递增。
+- 新增上下文 Green/Yellow/Red 水位监控；Red 会持久化停止调度的恢复 checkpoint。
+- 新增固定章节恢复文档、统一秘密脱敏和 HMAC 认证文件仓库，状态、清单、事件链与文档使用原子替换。
+- 新增 Git HEAD/分支/脏路径漂移检测和恢复优先级；FastAPI 在开始服务前只恢复一次 active run，并对完整性失败保持 fail-closed。
+- 组合门禁覆盖 Red 水位、脏工作树和部分工作包同时存在时，恢复结果仍只有一个安全下一动作。
+
+## Iteration 130 已解决
+
+- 新增协议版本 `1` 的 Worker 请求、事件和任务记录，父进程是任务状态唯一权威。
+- 新增 Windows `spawn` 兼容的 `RoleWorkerSupervisor`，覆盖成功、失败、崩溃、超时、取消、迟到事件、历史上限和 shutdown 清理。
+- `timeout` 与 `cancelled` 只有在子进程确认退出后才能发布；固定生产 runner 在子进程内构造 Ollama 与角色依赖，并把 Token 用量回写父进程。
+- FastAPI 新增角色任务创建、列表、详情和取消 API；HTTP 不能选择 runner、命令、环境、工作目录或 capability token。
+- OpenAPI 升级到 `1.12.0`，声明 Worker task schema、成功/错误响应，并用条件 schema 约束终止确认。
+- 旧同步角色 dispatch 保持兼容且仍不可取消；持久任务恢复与旧路径迁移继续作为 Phase B 后续工作。
+
 ## 四维评分
 
 | 维度 | 得分 | 依据 |
@@ -237,7 +254,7 @@ Role-specific routes remain intentionally outside the shared contract because th
 | 可维护性 | 95 | POST/GET SSE 路径均由 OpenAPI 和真实三服务 harness 回归，Python 适配器复用单一写入路径 |
 | 扩展性 | 92 | 角色工具 broker 为后续受控执行提供独立策略、handler 和审计边界 |
 | 性能 | 84 | 前端按视图拆包，重型视图仍需低端设备实测 |
-| 安全性 | 91 | HTTP 终端和角色工具均默认拒绝，角色声明不再自动进入提示；timeout 角色执行仍缺少可终止 worker |
+| 安全性 | 93 | HTTP 终端和角色工具均默认拒绝；新异步角色通道使用固定 runner 和可确认终止的进程 Worker |
 
 ## 技术债清单
 
@@ -246,7 +263,8 @@ Role-specific routes remain intentionally outside the shared contract because th
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
 | 未契约错误路径 | P1 | Express API fallback 与主要 Ollama/Core 代理错误及共享 orchestrator 子集已纳入 `ErrorResponse` 和 OpenAPI 1.10.0；role 专属端点仍保持显式范围 | 持续为新增共享端点补充跨服务 schema |
 | 角色工具执行策略 | P1 | 默认拒绝 broker、精确授权、handler 注册与有界审计已落地；自动模型工具循环尚未接入 | 只为固定只读能力注册 handler，并让每次模型工具请求强制经过 broker；不得复用 HTTP capability token 形成隐式授权 |
-| 编排器 timeout 隔离 | P1 | 普通 handler 错误可安全恢复；timeout 后 daemon 线程可能继续运行，因此角色保持不可恢复 `ERROR` | 将可超时角色工作迁移到可取消的进程/worker 边界，再设计显式恢复 |
+| 旧同步调度 timeout 隔离 | P1 | 新异步任务通道可确认终止，但旧 dispatch 仍由不可取消 daemon handler 执行 | 逐步迁移旧调用方；迁移前保持旧 timeout 不可恢复且不得宣称可取消 |
+| 异步任务持久恢复 | P1 | Worker 状态当前由父进程内存权威维护，服务重启后没有持久任务核对 | 将任务记录接入 RunState，启动时核对孤儿 Worker 后再确定终态 |
 | 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |
 | 重型前端视图 | P2 | Chat/Runtime chunk 约 198/215 kB | 低端设备测量后再决定拆包 |
 
@@ -282,7 +300,7 @@ Markdown 和 Chart.js 已按视图懒加载，但对话与运行监控生产 chu
 
 ### P1：timeout 后的执行隔离
 
-普通 handler 异常已在保留错误结果和统计后恢复角色，但 `_run_with_timeout()` 的 daemon 线程无法被 Python 安全取消。timeout 状态因此保持不可恢复，避免后续请求与迟到线程重叠。下一步需要进程/worker 执行边界与明确的终止确认，不能简单重置状态。
+FastAPI 已提供新的异步角色任务通道：父进程拥有权威记录，timeout/cancelled 必须等待子进程确认退出，迟到事件不能覆盖终态。旧同步 dispatch 的 `_run_with_timeout()` 仍使用无法安全取消的 daemon 线程，因此继续保持 timeout 不可恢复。下一步是迁移旧调用方，并把异步任务记录接入 RunState 与启动恢复；不能把新通道的保证倒推到旧路径。
 
 ## 维护规则
 

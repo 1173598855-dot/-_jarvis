@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 84
+J.A.R.V.I.S. test suite - Iteration 130
 Run: python tests/run_all.py
 """
 import sys
@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 from core.brain.context_compressor import ContextCompressor, MemoryEntry, MemoryStore, MemoryType
 from core.brain.role_registry import AgentProfile, RoleRegistry, create_default_registry
@@ -16,15 +17,28 @@ from core.kernel.ollama_manager import OllamaModel
 from core.kernel.terminal_executor import CommandRisk, TerminalCommand, TerminalExecutor
 from test_terminal_worker import TestTerminalWorker
 from test_api_contract import TestSharedApiContract
+from test_context_budget import TestContextBudgetMonitor
 from test_docs_setup import TestSetupDocs
+from test_file_run_state_repository import TestFileRunStateRepository
 from test_iteration_ledger import TestIterationLedger
 from test_main import TestMainHTTPHelpers, TestMainHTTPGETRouting, TestMainHTTPPOSTRouting, TestMainHTTPHandleMethodsRouting, TestMainHTTPEdgeCases
-from test_main_fastapi import TestMainFastapiIntegration, TestRequestBodyLimitMiddleware
+from test_main_fastapi import (
+    TestMainFastapiIntegration,
+    TestRequestBodyLimitMiddleware,
+    TestRoleTaskLifecycleEndpoints,
+    TestRunRecoveryLifespan,
+)
 from test_local_integration_profile import TestLocalIntegrationProfile
 from test_local_integration_runner import TestLocalIntegrationRunner
+from test_phase_a_recovery import TestPhaseARecoveryGate
 from test_project_config import TestPythonDependencies
 from test_readme import TestReadme
+from test_resume_document import TestResumeDocument
+from test_role_worker import TestRoleWorkerSupervisor
+from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordinator
+from test_run_state import TestRunState
 from test_plugin_installation import TestPluginInstallation
+from test_worker_protocol import TestWorkerProtocol
 
 
 class TestContextCompressor(unittest.TestCase):
@@ -248,9 +262,20 @@ AGGREGATE_TEST_CASES = [
     TestMainHTTPEdgeCases,
     TestMainFastapiIntegration,
     TestRequestBodyLimitMiddleware,
+    TestRoleTaskLifecycleEndpoints,
+    TestRunRecoveryLifespan,
     TestLocalIntegrationProfile,
     TestLocalIntegrationRunner,
     TestPluginInstallation,
+    TestRunState,
+    TestContextBudgetMonitor,
+    TestResumeDocument,
+    TestFileRunStateRepository,
+    TestRunLifecycleCoordinator,
+    TestGitWorkspaceInspector,
+    TestPhaseARecoveryGate,
+    TestWorkerProtocol,
+    TestRoleWorkerSupervisor,
 ]
 
 
@@ -263,7 +288,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 84 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 130 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [

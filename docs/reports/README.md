@@ -6,7 +6,9 @@
 
 | 閺傚洦銆?| 閻劑鈧?|
 |---|---|
-| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-15 current project analysis |
+| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-19 current project analysis |
+| [AUDIT_REPORT_130.md](AUDIT_REPORT_130.md) | Terminable asynchronous role-task lifecycle and OpenAPI 1.12 |
+| [AUDIT_REPORT_129.md](AUDIT_REPORT_129.md) | Phase A authenticated context continuity and startup recovery |
 | [AUDIT_REPORT_128.md](AUDIT_REPORT_128.md) | Default-deny role tool policy, broker, and prompt filtering |
 | [AUDIT_REPORT_127.md](AUDIT_REPORT_127.md) | Recoverable role errors with timeout-safe state semantics |
 | [AUDIT_REPORT_126.md](AUDIT_REPORT_126.md) | Production Ollama role execution and shared token evidence |
@@ -15,15 +17,13 @@
 | [AUDIT_REPORT_123.md](AUDIT_REPORT_123.md) | Shared orchestrator route contract across three service adapters |
 | [AUDIT_REPORT_122.md](AUDIT_REPORT_122.md) | Deterministic required-services integration gate |
 | [AUDIT_REPORT_121.md](AUDIT_REPORT_121.md) | Process-isolated terminal worker and shared proxy error contracts |
-| [AUDIT_REPORT_120.md](AUDIT_REPORT_120.md) | Machine-readable Express API fallback and stable browser verification |
-| [AUDIT_REPORT_119.md](AUDIT_REPORT_119.md) | Non-streaming Ollama validation, bounded telemetry, and terminal hardening |
 | [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 缂佸嫪娆㈢€瑰顥婄拋鏉跨秿 |
 | [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 閹垛偓閺堫垱鍎忛幎銉ょ瑢闁插洨鎾奸崘宕囩摜 |
 | [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 瑜版挸澧?19 娑?Skill 閻ㄥ嫮娲拌ぐ鏇犲偍瀵?|
 
 ## 鐎孤ゎ吀閸欐媽澶?
 
-- Current iteration: 128; retain the latest 10 `AUDIT_REPORT_N.md` files, currently 119-128.
+- Current iteration: 130; retain the latest 10 `AUDIT_REPORT_N.md` files, currently 121-130.
 - 閺堚偓閺傛媽鍑禒锝嗘喅鐟曚椒缍呮禍搴ㄣ€嶉惄顔界壌閻╊喖缍?[CHANGELOG.md](../../CHANGELOG.md)閵?
 
 ## 缂佸瓨濮㈢憴鍕灟

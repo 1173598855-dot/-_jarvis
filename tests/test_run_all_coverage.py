@@ -92,6 +92,31 @@ class TestRunAllCoverage(unittest.TestCase):
         self.assertIn("TestLocalIntegrationProfile", case_names)
         self.assertIn("TestRequestBodyLimitMiddleware", case_names)
 
+    def test_aggregate_runner_includes_phase_a_recovery_guards(self):
+        case_names = {case.__name__ for case in run_all.AGGREGATE_TEST_CASES}
+        expected = {
+            "TestRunState",
+            "TestContextBudgetMonitor",
+            "TestResumeDocument",
+            "TestFileRunStateRepository",
+            "TestRunLifecycleCoordinator",
+            "TestGitWorkspaceInspector",
+            "TestRunRecoveryLifespan",
+            "TestPhaseARecoveryGate",
+        }
+
+        self.assertLessEqual(expected, case_names)
+
+    def test_aggregate_runner_includes_role_worker_lifecycle_guards(self):
+        case_names = {case.__name__ for case in run_all.AGGREGATE_TEST_CASES}
+        expected = {
+            "TestWorkerProtocol",
+            "TestRoleWorkerSupervisor",
+            "TestRoleTaskLifecycleEndpoints",
+        }
+
+        self.assertLessEqual(expected, case_names)
+
     def test_build_aggregate_suite_loads_every_declared_case(self):
         expected = sum(
             unittest.defaultTestLoader.loadTestsFromTestCase(case).countTestCases()
