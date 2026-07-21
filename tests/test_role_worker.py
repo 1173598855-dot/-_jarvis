@@ -4,6 +4,7 @@ import threading
 import time
 from threading import Thread
 import unittest
+from unittest.mock import Mock, patch
 
 import core.brain.role_worker as role_worker_module
 from core.brain.role_worker import (
@@ -876,6 +877,59 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_fixed_role_runner_uses_direct_execution_without_transport_timeout(self):
+        request = WorkerTaskRequest.new("engineer", "inspect", 17)
+        manager = Mock()
+        manager.get_token_usage.return_value.to_dict.return_value = {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        }
+        dispatch = Mock(status="success")
+        dispatch.to_dict.return_value = {
+            "role_name": "engineer",
+            "task_id": request.task_id,
+            "status": "success",
+            "message": "done",
+        }
+        factory = Mock()
+        factory.execute_role_once.return_value = dispatch
+
+        with (
+            patch(
+                "core.kernel.ollama_manager.OllamaManager",
+                return_value=manager,
+            ) as manager_type,
+            patch(
+                "core.brain.agent_factory.AgentFactory",
+                return_value=factory,
+            ) as factory_type,
+        ):
+            result = execute_role_task(
+                request.to_dict(),
+                {
+                    "ollama_base_url": "http://fixture.local",
+                    "role_model": "fixture-model",
+                },
+            )
+
+        manager_type.assert_called_once_with(
+            base_url="http://fixture.local",
+            timeout=None,
+        )
+        factory_type.assert_called_once_with(
+            ollama_manager=manager,
+            role_model="fixture-model",
+        )
+        factory.execute_role_once.assert_called_once_with(
+            "engineer",
+            "inspect",
+            task_id=request.task_id,
+        )
+        factory.dispatch_by_role.assert_not_called()
+        factory.shutdown.assert_called_once_with()
+        self.assertEqual(result["dispatch"]["task_id"], request.task_id)
 
 
 if __name__ == "__main__":

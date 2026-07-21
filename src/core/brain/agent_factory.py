@@ -54,6 +54,66 @@ class AgentFactory:
         self._role_tool_broker = role_tool_broker or RoleToolBroker()
         self._lock = threading.Lock()
 
+    def _build_role_task(
+        self,
+        profile: AgentProfile,
+        task_prompt: str,
+        *,
+        task_id: str,
+        timeout: int,
+    ) -> AgentTask:
+        authorized_tools = self._role_tool_broker.authorized_tools(profile)
+        system_prompt = profile.resolve_prompt(task_prompt)
+        full_prompt = self._build_full_prompt(
+            profile,
+            task_prompt,
+            system_prompt,
+            authorized_tools=authorized_tools,
+        )
+        return AgentTask(
+            task_id=task_id,
+            agent_name=profile.name,
+            prompt=full_prompt,
+            timeout=timeout,
+            priority=profile.priority,
+            metadata={
+                "role_name": profile.name,
+                "capabilities": profile.capabilities,
+                "constraints": profile.constraints,
+                "declared_tools": list(profile.tools),
+                "authorized_tools": authorized_tools,
+                "task_prompt": task_prompt,
+            },
+        )
+
+    def execute_role_once(
+        self,
+        role_name: str,
+        task_prompt: str,
+        *,
+        task_id: str,
+    ) -> DispatchResult:
+        profile = self.registry.get(role_name)
+        if profile is None:
+            return DispatchResult(
+                role_name,
+                task_id,
+                "no_role",
+                f"Role '{role_name}' not found",
+            )
+        task = self._build_role_task(
+            profile,
+            task_prompt,
+            task_id=task_id,
+            timeout=300,
+        )
+        try:
+            output = self._default_handler(profile)(task)
+        except Exception:
+            logger.warning("Direct role execution failed for role %s", profile.name)
+            return DispatchResult(role_name, task_id, "error", ROLE_EXECUTION_ERROR)
+        return DispatchResult(role_name, task_id, "success", output)
+
     def dispatch_by_role(self, role_name: str, task_prompt: str, timeout: int = 300) -> DispatchResult:
         profile = self.registry.get(role_name)
         if profile is None:
@@ -66,29 +126,11 @@ class AgentFactory:
                 capabilities=profile.capabilities,
             )
 
-        authorized_tools = self._role_tool_broker.authorized_tools(profile)
-        system_prompt = profile.resolve_prompt(task_prompt)
-        full_prompt = self._build_full_prompt(
+        task = self._build_role_task(
             profile,
             task_prompt,
-            system_prompt,
-            authorized_tools=authorized_tools,
-        )
-
-        task = AgentTask(
             task_id=f"{role_name}_{abs(hash(task_prompt)) % 100000}",
-            agent_name=profile.name,
-            prompt=full_prompt,
             timeout=timeout,
-            priority=profile.priority,
-            metadata={
-                "role_name": role_name,
-                "capabilities": profile.capabilities,
-                "constraints": profile.constraints,
-                "declared_tools": list(profile.tools),
-                "authorized_tools": authorized_tools,
-                "task_prompt": task_prompt,
-            },
         )
         result = self.orchestrator.dispatch(task)
         if result.status == "error":

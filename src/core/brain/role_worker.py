@@ -53,17 +53,17 @@ def execute_role_task(
 
     manager = OllamaManager(
         base_url=base_url,
-        timeout=request.timeout_seconds,
+        timeout=None,
     )
     factory = AgentFactory(
         ollama_manager=manager,
         role_model=role_model,
     )
     try:
-        dispatch = factory.dispatch_by_role(
+        dispatch = factory.execute_role_once(
             request.role_name,
             request.prompt,
-            request.timeout_seconds,
+            task_id=request.task_id,
         )
         if dispatch.status not in {"success", "completed", "dispatched"}:
             raise RuntimeError(dispatch.message or "Role worker execution failed")

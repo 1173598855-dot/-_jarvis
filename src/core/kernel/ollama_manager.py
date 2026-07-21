@@ -76,7 +76,7 @@ class TokenUsage:
 class OllamaManager:
     """???? LLM ??? ? ??? AnythingLLM ??"""
 
-    def __init__(self, base_url: Optional[str] = None, timeout: int = 30):
+    def __init__(self, base_url: Optional[str] = None, timeout: Optional[int] = 30):
         # ????????????? Ollama ??
         if base_url is None:
             base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
