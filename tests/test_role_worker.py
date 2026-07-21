@@ -71,6 +71,186 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"task {task_id} did not reach a terminal state")
 
+    def test_wait_returns_none_for_unknown_task(self):
+        supervisor = self.make_supervisor(worker_fixtures.succeed)
+
+        self.assertIsNone(supervisor.wait("task-missing", 0.1))
+
+    def test_wait_returns_current_record_when_budget_expires(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 2},
+        )
+        request = WorkerTaskRequest.new("engineer", "still running", 10)
+        supervisor.submit(request)
+
+        started = time.monotonic()
+        snapshot = supervisor.wait(request.task_id, 0.05)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(snapshot.task_id, request.task_id)
+        self.assertEqual(snapshot.status, WorkerTaskStatus.RUNNING)
+        self.assertGreaterEqual(elapsed, 0.04)
+
+    def test_wait_is_notified_by_success_and_confirmed_timeout(self):
+        success_supervisor = self.make_supervisor(worker_fixtures.succeed)
+        success_request = WorkerTaskRequest.new("engineer", "succeed", 10)
+        success_supervisor.submit(success_request)
+
+        succeeded = success_supervisor.wait(success_request.task_id, 4)
+
+        timeout_supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 5},
+            termination_grace=0.05,
+        )
+        timeout_request = WorkerTaskRequest.new("reviewer", "timeout", 1)
+        timeout_supervisor.submit(timeout_request)
+
+        timed_out = timeout_supervisor.wait(timeout_request.task_id, 2)
+
+        self.assertEqual(succeeded.status, WorkerTaskStatus.SUCCEEDED)
+        self.assertTrue(succeeded.termination_confirmed)
+        self.assertEqual(timed_out.status, WorkerTaskStatus.TIMEOUT)
+        self.assertTrue(timed_out.termination_confirmed)
+
+    def test_wait_rejects_invalid_timeout(self):
+        supervisor = self.make_supervisor(worker_fixtures.succeed)
+
+        for timeout in (-0.01, float("nan"), float("inf"), True, "1"):
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "timeout must be a finite non-negative number",
+                ):
+                    supervisor.wait("task-missing", timeout)
+
+    def test_terminal_wait_budget_covers_deadline_and_both_termination_graces(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.succeed,
+            termination_grace=0.4,
+        )
+
+        self.assertEqual(supervisor.terminal_wait_budget(3), 4.05)
+        for timeout_seconds in (0, 301, True, 1.0):
+            with self.subTest(timeout_seconds=timeout_seconds):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "timeout_seconds must be an integer from 1 through 300",
+                ):
+                    supervisor.terminal_wait_budget(timeout_seconds)
+
+    def test_terminal_observers_are_isolated_and_run_outside_supervisor_lock(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        final_called = threading.Event()
+        observer_calls = []
+
+        def first_observer(record):
+            observer_calls.append(("first", record.task_id))
+            first_started.set()
+            release_first.wait(timeout=4)
+
+        def raising_observer(record):
+            observer_calls.append(("raising", record.task_id))
+            raise RuntimeError("observer failed")
+
+        def final_observer(record):
+            observer_calls.append(("final", record.task_id))
+            final_called.set()
+
+        supervisor = self.make_supervisor(
+            worker_fixtures.succeed,
+            on_terminal=first_observer,
+        )
+        supervisor.add_terminal_observer(raising_observer)
+        supervisor.add_terminal_observer(final_observer)
+        request = WorkerTaskRequest.new("engineer", "observe", 10)
+        supervisor.submit(request)
+
+        self.assertTrue(first_started.wait(timeout=4))
+        outcomes = {}
+        completed = {
+            "get": threading.Event(),
+            "list": threading.Event(),
+            "wait": threading.Event(),
+        }
+
+        def call_api(name, operation):
+            outcomes[name] = operation()
+            completed[name].set()
+
+        threads = [
+            threading.Thread(
+                target=call_api,
+                args=("get", lambda: supervisor.get(request.task_id)),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=call_api,
+                args=("list", supervisor.list),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=call_api,
+                args=("wait", lambda: supervisor.wait(request.task_id, 1)),
+                daemon=True,
+            ),
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for name, event in completed.items():
+                self.assertTrue(event.wait(timeout=1), f"{name} remained blocked")
+            self.assertFalse(final_called.is_set())
+        finally:
+            release_first.set()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertTrue(final_called.wait(timeout=2))
+        self.assertTrue(outcomes["get"].status.is_terminal)
+        self.assertEqual(outcomes["list"][0], outcomes["get"])
+        self.assertEqual(outcomes["wait"], outcomes["get"])
+        self.assertEqual(
+            observer_calls,
+            [
+                ("first", request.task_id),
+                ("raising", request.task_id),
+                ("final", request.task_id),
+            ],
+        )
+
+    def test_terminal_observer_runs_before_record_can_be_pruned(self):
+        publication_order = []
+
+        def observe(record):
+            publication_order.append(("observer", record.task_id))
+
+        supervisor = self.make_supervisor(
+            worker_fixtures.succeed,
+            max_records=1,
+            on_terminal=observe,
+        )
+        original_prune = supervisor._prune_records
+
+        def track_prune():
+            publication_order.append(("prune", None))
+            original_prune()
+
+        supervisor._prune_records = track_prune
+        request = WorkerTaskRequest.new("engineer", "observer first", 10)
+        supervisor.submit(request)
+
+        terminal = self.wait_terminal(supervisor, request.task_id)
+        deadline = time.monotonic() + 2
+        while request.task_id in supervisor._runtimes and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(terminal.status, WorkerTaskStatus.SUCCEEDED)
+        self.assertEqual(publication_order[0], ("observer", request.task_id))
+        self.assertIn(("prune", None), publication_order)
+
     def test_success_is_published_only_after_process_exit(self):
         supervisor = self.make_supervisor(
             worker_fixtures.succeed,

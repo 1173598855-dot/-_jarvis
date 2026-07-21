@@ -4,6 +4,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import json
+import math
 import multiprocessing
 from multiprocessing.connection import Connection
 import threading
@@ -22,6 +23,7 @@ from core.kernel.secret_redaction import redact_text
 
 DEFAULT_MAX_RECORDS = 100
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
+MONITOR_WAIT_SLACK = 0.25
 
 
 class WorkerTaskTerminalError(RuntimeError):
@@ -226,17 +228,78 @@ class RoleWorkerSupervisor:
         self._heartbeat_interval = float(heartbeat_interval)
         self._termination_grace = float(termination_grace)
         self._max_output_bytes = max_output_bytes
-        self._on_terminal = on_terminal
+        self._terminal_observers: list[Callable[[WorkerTaskRecord], None]] = []
+        if on_terminal is not None:
+            if not callable(on_terminal):
+                raise TypeError("on_terminal must be callable")
+            self._terminal_observers.append(on_terminal)
         self._context = mp_context or multiprocessing.get_context("spawn")
         self._records: OrderedDict[str, WorkerTaskRecord] = OrderedDict()
         self._runtimes: dict[str, _TaskRuntime] = {}
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._waiters: dict[str, int] = {}
         self._shutdown = False
+
+    def terminal_wait_budget(self, timeout_seconds: int) -> float:
+        if (
+            not isinstance(timeout_seconds, int)
+            or isinstance(timeout_seconds, bool)
+            or not 1 <= timeout_seconds <= 300
+        ):
+            raise ValueError("timeout_seconds must be an integer from 1 through 300")
+        return (
+            float(timeout_seconds)
+            + (2 * self._termination_grace)
+            + MONITOR_WAIT_SLACK
+        )
+
+    def add_terminal_observer(
+        self,
+        observer: Callable[[WorkerTaskRecord], None],
+    ) -> None:
+        if not callable(observer):
+            raise TypeError("observer must be callable")
+        with self._condition:
+            self._terminal_observers.append(observer)
+
+    def wait(self, task_id: str, timeout: float) -> WorkerTaskRecord | None:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be a finite non-negative number")
+        deadline = time.monotonic() + float(timeout)
+        with self._condition:
+            record = self._records.get(task_id)
+            if record is None:
+                return None
+            self._waiters[task_id] = self._waiters.get(task_id, 0) + 1
+            try:
+                while not record.status.is_terminal:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return record
+                    self._condition.wait(remaining)
+                    latest = self._records.get(task_id)
+                    if latest is None:
+                        return None
+                    record = latest
+                return record
+            finally:
+                remaining_waiters = self._waiters[task_id] - 1
+                if remaining_waiters:
+                    self._waiters[task_id] = remaining_waiters
+                else:
+                    self._waiters.pop(task_id, None)
+                self._prune_records()
 
     def submit(self, request: WorkerTaskRequest) -> WorkerTaskRecord:
         if not isinstance(request, WorkerTaskRequest):
             raise TypeError("request must be a WorkerTaskRequest")
-        with self._lock:
+        with self._condition:
             if self._shutdown:
                 raise RuntimeError("role worker supervisor is shut down")
             if request.task_id in self._records:
@@ -277,6 +340,7 @@ class RoleWorkerSupervisor:
                 receiver.close()
                 sender.close()
                 self._records.pop(request.task_id, None)
+                self._condition.notify_all()
                 raise
             finally:
                 sender.close()
@@ -300,6 +364,7 @@ class RoleWorkerSupervisor:
             )
             runtime.monitor = monitor
             monitor.start()
+            self._condition.notify_all()
             return running
 
     def get(self, task_id: str) -> WorkerTaskRecord | None:
@@ -314,7 +379,7 @@ class RoleWorkerSupervisor:
             return list(reversed(tuple(self._records.values())[-bounded_limit:]))
 
     def cancel(self, task_id: str) -> WorkerTaskRecord | None:
-        with self._lock:
+        with self._condition:
             record = self._records.get(task_id)
             if record is None:
                 return None
@@ -325,6 +390,7 @@ class RoleWorkerSupervisor:
                 return record
             intent = runtime.termination_intent or WorkerTaskStatus.CANCELLED
             runtime.termination_intent = intent
+            self._condition.notify_all()
         confirmed = self._terminate(runtime)
         if confirmed:
             error = (
@@ -488,39 +554,34 @@ class RoleWorkerSupervisor:
                                     f"{runtime.request.timeout_seconds}s"
                                 )
                             )
-                            self._finalize(
-                                task_id,
-                                intent,
-                                error=error,
-                                termination_confirmed=True,
-                            )
+                            terminal_status = intent
+                            terminal_result = None
+                            terminal_error = error
                         elif pending is not None:
                             if pending.kind is WorkerEventKind.RESULT:
-                                self._finalize(
-                                    task_id,
-                                    WorkerTaskStatus.SUCCEEDED,
-                                    result=pending.payload.get("result"),
-                                    termination_confirmed=True,
-                                )
+                                terminal_status = WorkerTaskStatus.SUCCEEDED
+                                terminal_result = pending.payload.get("result")
+                                terminal_error = ""
                             else:
-                                self._finalize(
-                                    task_id,
-                                    WorkerTaskStatus.FAILED,
-                                    error=str(
-                                        pending.payload.get("error", "Worker task failed")
-                                    ),
-                                    termination_confirmed=True,
+                                terminal_status = WorkerTaskStatus.FAILED
+                                terminal_result = None
+                                terminal_error = str(
+                                    pending.payload.get("error", "Worker task failed")
                                 )
                         else:
-                            self._finalize(
-                                task_id,
-                                WorkerTaskStatus.CRASHED,
-                                error=(
-                                    "Worker process exited without a terminal event "
-                                    f"(exit code {runtime.process.exitcode})"
-                                ),
-                                termination_confirmed=True,
+                            terminal_status = WorkerTaskStatus.CRASHED
+                            terminal_result = None
+                            terminal_error = (
+                                "Worker process exited without a terminal event "
+                                f"(exit code {runtime.process.exitcode})"
                             )
+                    self._finalize(
+                        task_id,
+                        terminal_status,
+                        result=terminal_result,
+                        error=terminal_error,
+                        termination_confirmed=True,
+                    )
                     return
         finally:
             self._cleanup_runtime(task_id)
@@ -541,7 +602,7 @@ class RoleWorkerSupervisor:
             return False
 
     def _accept_event(self, task_id: str, event: WorkerEvent) -> bool:
-        with self._lock:
+        with self._condition:
             runtime = self._runtimes.get(task_id)
             record = self._records.get(task_id)
             if runtime is None or record is None or record.status.is_terminal:
@@ -565,6 +626,7 @@ class RoleWorkerSupervisor:
             )
             if event.kind in {WorkerEventKind.RESULT, WorkerEventKind.FAILURE}:
                 runtime.pending_event = event
+            self._condition.notify_all()
             return True
 
     def _finalize(
@@ -576,7 +638,7 @@ class RoleWorkerSupervisor:
         error: str = "",
         termination_confirmed: bool,
     ) -> WorkerTaskRecord | None:
-        with self._lock:
+        with self._condition:
             record = self._records.get(task_id)
             if record is None:
                 return None
@@ -589,19 +651,21 @@ class RoleWorkerSupervisor:
                 termination_confirmed=termination_confirmed,
             )
             self._records[task_id] = terminal
-            self._prune_records()
-            if self._on_terminal is not None:
-                try:
-                    self._on_terminal(terminal)
-                except Exception:
-                    pass
-            return terminal
+            self._condition.notify_all()
+            observers = tuple(self._terminal_observers)
+        for observer in observers:
+            try:
+                observer(terminal)
+            except Exception:
+                pass
+        return terminal
 
     def _update_nonterminal_error(self, task_id: str, error: str) -> None:
-        with self._lock:
+        with self._condition:
             record = self._records.get(task_id)
             if record is not None and not record.status.is_terminal:
                 self._records[task_id] = record.evolve(error=redact_text(error))
+                self._condition.notify_all()
 
     @staticmethod
     def _process_is_alive(runtime: _TaskRuntime) -> bool:
@@ -635,7 +699,7 @@ class RoleWorkerSupervisor:
                 return True
 
     def _cleanup_runtime(self, task_id: str) -> None:
-        with self._lock:
+        with self._condition:
             runtime = self._runtimes.get(task_id)
             if runtime is None:
                 return
@@ -658,17 +722,26 @@ class RoleWorkerSupervisor:
                     except ValueError:
                         pass
             self._prune_records()
+            self._condition.notify_all()
 
     def _prune_records(self) -> None:
+        pruned = False
         while len(self._records) > self._max_records:
             removable = next(
                 (
                     task_id
                     for task_id, record in self._records.items()
-                    if record.status.is_terminal and task_id not in self._runtimes
+                    if (
+                        record.status.is_terminal
+                        and task_id not in self._runtimes
+                        and task_id not in self._waiters
+                    )
                 ),
                 None,
             )
             if removable is None:
-                return
+                break
             self._records.pop(removable, None)
+            pruned = True
+        if pruned:
+            self._condition.notify_all()
