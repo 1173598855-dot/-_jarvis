@@ -8,6 +8,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -231,13 +233,58 @@ class _FakeRoleTasks:
         self.shutdown_calls += 1
 
 
+class _BlockingRoleTasks(_FakeRoleTasks):
+    def __init__(self):
+        super().__init__()
+        self.cancel_started = threading.Event()
+        self.release_cancel = threading.Event()
+
+    def cancel(self, task_id):
+        self.cancel_started.set()
+        self.release_cancel.wait(timeout=2)
+        return super().cancel(task_id)
+
+
+class _BlockingSubmitRoleTasks(_FakeRoleTasks):
+    def __init__(self):
+        super().__init__()
+        self.submit_started = threading.Event()
+        self.release_submit = threading.Event()
+
+    def submit(self, request):
+        self.submit_started.set()
+        self.release_submit.wait(timeout=2)
+        return super().submit(request)
+
+
+class _UnavailableRoleTasks(_FakeRoleTasks):
+    def submit(self, _request):
+        raise OSError("spawn unavailable")
+
+
+class _TimeoutOnCancelRoleTasks(_FakeRoleTasks):
+    def cancel(self, task_id):
+        from core.contracts.worker_protocol import WorkerTaskStatus
+
+        record = self.records.get(task_id)
+        if record is None:
+            return None
+        record = record.evolve(
+            status=WorkerTaskStatus.TIMEOUT,
+            error="Worker task timed out after 30s",
+            termination_confirmed=True,
+        )
+        self.records[task_id] = record
+        return record
+
+
 class TestRoleTaskLifecycleEndpoints(unittest.TestCase):
     @contextmanager
-    def client(self):
+    def client(self, role_tasks=None):
         from fastapi.testclient import TestClient
         import main_fastapi
 
-        role_tasks = _FakeRoleTasks()
+        role_tasks = role_tasks or _FakeRoleTasks()
         with tempfile.TemporaryDirectory() as memory_dir:
             app_state = main_fastapi.AppState(
                 memory_dir=memory_dir,
@@ -303,6 +350,100 @@ class TestRoleTaskLifecycleEndpoints(unittest.TestCase):
             self.assertEqual(missing_cancel.status_code, 404)
             self.assertEqual(invalid.status_code, 400)
             self.assertEqual(invalid.json()["error"]["code"], "INVALID_REQUEST")
+
+    def test_create_rejects_fields_outside_the_wire_contract(self):
+        with self.client() as (client, _role_tasks):
+            response = client.post(
+                "/api/roles/tasks",
+                json={
+                    "role_name": "engineer",
+                    "prompt": "work",
+                    "runner": "tests.worker_fixtures.succeed",
+                    "env": {"INJECTED": "1"},
+                },
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["error"]["code"], "INVALID_REQUEST")
+
+    def test_spawn_errors_use_the_declared_unavailable_envelope(self):
+        with self.client(_UnavailableRoleTasks()) as (client, _role_tasks):
+            response = client.post(
+                "/api/roles/tasks",
+                json={"role_name": "engineer", "prompt": "work"},
+            )
+
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(
+                response.json()["error"]["code"],
+                "ROLE_WORKER_UNAVAILABLE",
+            )
+
+    def test_cancel_race_reports_a_confirmed_timeout_as_terminal(self):
+        with self.client(_TimeoutOnCancelRoleTasks()) as (client, _role_tasks):
+            task_id = self.create_task(client)["task_id"]
+
+            response = client.post(f"/api/roles/tasks/{task_id}/cancel")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                response.json()["error"]["code"],
+                "ROLE_TASK_TERMINAL",
+            )
+
+    def test_cancel_does_not_block_the_application_event_loop(self):
+        role_tasks = _BlockingRoleTasks()
+        with self.client(role_tasks) as (client, _role_tasks):
+            task_id = self.create_task(client)["task_id"]
+            result = {}
+
+            def cancel_task():
+                result["response"] = client.post(
+                    f"/api/roles/tasks/{task_id}/cancel"
+                )
+
+            cancel_thread = threading.Thread(target=cancel_task, daemon=True)
+            cancel_thread.start()
+            self.assertTrue(role_tasks.cancel_started.wait(timeout=1))
+            started = time.monotonic()
+            try:
+                health = client.get("/api/health")
+            finally:
+                role_tasks.release_cancel.set()
+            elapsed = time.monotonic() - started
+            cancel_thread.join(timeout=2)
+
+            self.assertEqual(health.status_code, 200)
+            self.assertLess(elapsed, 0.75)
+            self.assertFalse(cancel_thread.is_alive())
+            self.assertEqual(result["response"].status_code, 200)
+
+    def test_create_does_not_block_the_application_event_loop(self):
+        role_tasks = _BlockingSubmitRoleTasks()
+        with self.client(role_tasks) as (client, _role_tasks):
+            result = {}
+
+            def create_task():
+                result["response"] = client.post(
+                    "/api/roles/tasks",
+                    json={"role_name": "engineer", "prompt": "work"},
+                )
+
+            create_thread = threading.Thread(target=create_task, daemon=True)
+            create_thread.start()
+            self.assertTrue(role_tasks.submit_started.wait(timeout=1))
+            started = time.monotonic()
+            try:
+                health = client.get("/api/health")
+            finally:
+                role_tasks.release_submit.set()
+            elapsed = time.monotonic() - started
+            create_thread.join(timeout=2)
+
+            self.assertEqual(health.status_code, 200)
+            self.assertLess(elapsed, 0.75)
+            self.assertFalse(create_thread.is_alive())
+            self.assertEqual(result["response"].status_code, 202)
 
     def test_lifespan_shuts_down_role_tasks(self):
         role_tasks = _FakeRoleTasks()

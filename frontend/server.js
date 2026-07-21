@@ -615,6 +615,22 @@ app.get('/api/roles', async (req, res) => {
   await proxyCoreRequest(req, res, 'roles');
 });
 
+app.get('/api/roles/tasks', async (req, res) => {
+  await proxyCoreRequest(req, res, 'role_tasks');
+});
+
+app.post('/api/roles/tasks', async (req, res) => {
+  await proxyCoreRequest(req, res, 'role_tasks');
+});
+
+app.get('/api/roles/tasks/:taskId', async (req, res) => {
+  await proxyCoreRequest(req, res, 'role_tasks');
+});
+
+app.post('/api/roles/tasks/:taskId/cancel', async (req, res) => {
+  await proxyCoreRequest(req, res, 'role_tasks');
+});
+
 app.get('/api/roles/:roleName', async (req, res) => {
   await proxyCoreRequest(req, res, 'roles');
 });

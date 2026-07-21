@@ -1,9 +1,11 @@
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 import time
 from threading import Thread
 import unittest
 
+import core.brain.role_worker as role_worker_module
 from core.brain.role_worker import (
     RoleWorkerSupervisor,
     WorkerTaskTerminalError,
@@ -128,6 +130,325 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
         self.assertEqual(timeout_supervisor.active_process_count(), 0)
         self.assertEqual(cancel_supervisor.active_process_count(), 0)
 
+    def test_unconfirmed_timeout_retains_runtime_and_blocks_role_reuse(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_crash,
+            runner_config={"delay": 1.4},
+            termination_grace=0.05,
+        )
+        request = WorkerTaskRequest.new("engineer", "timeout", 1)
+        original_terminate = supervisor._terminate
+        termination_attempted = threading.Event()
+        call_lock = threading.Lock()
+        terminate_calls = 0
+
+        def fail_first_termination(process):
+            nonlocal terminate_calls
+            with call_lock:
+                terminate_calls += 1
+                call_number = terminate_calls
+            if call_number == 1:
+                termination_attempted.set()
+                return False
+            return original_terminate(process)
+
+        supervisor._terminate = fail_first_termination
+        supervisor.submit(request)
+        self.assertTrue(termination_attempted.wait(4))
+
+        error_deadline = time.monotonic() + 2
+        snapshot = supervisor.get(request.task_id)
+        while time.monotonic() < error_deadline and not snapshot.error:
+            time.sleep(0.01)
+            snapshot = supervisor.get(request.task_id)
+        time.sleep(0.05)
+        runtime_retained = request.task_id in supervisor._runtimes
+        active_while_unconfirmed = supervisor.active_process_count()
+        stable_snapshot = supervisor.get(request.task_id)
+
+        replacement = WorkerTaskRequest.new("engineer", "replacement", 10)
+        replacement_rejected = False
+        try:
+            supervisor.submit(replacement)
+        except RuntimeError:
+            replacement_rejected = True
+        else:
+            supervisor.cancel(replacement.task_id)
+
+        terminal_deadline = time.monotonic() + 3
+        terminal = supervisor.get(request.task_id)
+        while time.monotonic() < terminal_deadline and not terminal.status.is_terminal:
+            time.sleep(0.02)
+            terminal = supervisor.get(request.task_id)
+
+        self.assertEqual(snapshot.status, WorkerTaskStatus.RUNNING)
+        self.assertEqual(
+            snapshot.error,
+            "Worker timeout could not confirm process termination",
+        )
+        self.assertFalse(snapshot.termination_confirmed)
+        self.assertTrue(runtime_retained)
+        self.assertEqual(active_while_unconfirmed, 1)
+        self.assertEqual(stable_snapshot, snapshot)
+        self.assertTrue(replacement_rejected)
+        self.assertEqual(terminal.status, WorkerTaskStatus.TIMEOUT)
+        self.assertTrue(terminal.termination_confirmed)
+
+    def test_confirmed_terminal_allows_role_reuse_before_runtime_cleanup(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 10},
+        )
+        request = WorkerTaskRequest.new("engineer", "cancel before cleanup", 10)
+        replacement = WorkerTaskRequest.new("engineer", "replacement", 10)
+        original_cleanup = supervisor._cleanup_runtime
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def pause_cleanup(task_id):
+            if task_id == request.task_id:
+                cleanup_started.set()
+                release_cleanup.wait(timeout=4)
+            original_cleanup(task_id)
+
+        supervisor._cleanup_runtime = pause_cleanup
+        submitted = None
+        try:
+            supervisor.submit(request)
+            terminal = supervisor.cancel(request.task_id)
+            self.assertTrue(cleanup_started.wait(timeout=2))
+
+            submitted = supervisor.submit(replacement)
+        finally:
+            release_cleanup.set()
+            supervisor._cleanup_runtime = original_cleanup
+            supervisor.shutdown()
+
+        self.assertEqual(terminal.status, WorkerTaskStatus.CANCELLED)
+        self.assertTrue(terminal.termination_confirmed)
+        self.assertEqual(submitted.status, WorkerTaskStatus.RUNNING)
+
+    def test_missing_record_runtime_remains_fail_closed_until_shutdown(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 10},
+        )
+        request = WorkerTaskRequest.new("engineer", "missing record", 10)
+        replacement = WorkerTaskRequest.new("engineer", "replacement", 10)
+        supervisor.submit(request)
+        runtime = supervisor._runtimes[request.task_id]
+        missing_record_observed = threading.Event()
+
+        class ObservedRecords(type(supervisor._records)):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if (
+                    key == request.task_id
+                    and key not in self
+                    and threading.current_thread() is runtime.monitor
+                ):
+                    missing_record_observed.set()
+                return value
+
+        runtime_retained = False
+        monitor_retained = False
+        shutdown_cleaned = False
+        monitor_stopped = False
+        connection_closed = False
+
+        try:
+            with supervisor._lock:
+                supervisor._records = ObservedRecords(supervisor._records)
+                supervisor._records.pop(request.task_id)
+
+            self.assertTrue(missing_record_observed.wait(timeout=2))
+            runtime.monitor.join(timeout=0.2)
+            with supervisor._lock:
+                runtime_retained = request.task_id in supervisor._runtimes
+            monitor_retained = runtime.monitor.is_alive()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "termination is unconfirmed",
+            ):
+                supervisor.submit(replacement)
+
+            supervisor.shutdown()
+            runtime.monitor.join(timeout=2)
+            monitor_stopped = not runtime.monitor.is_alive()
+            connection_closed = runtime.connection.closed
+            with supervisor._lock:
+                shutdown_cleaned = request.task_id not in supervisor._runtimes
+            try:
+                process_stopped = not runtime.process.is_alive()
+            except ValueError:
+                process_stopped = True
+            shutdown_cleaned = shutdown_cleaned and process_stopped
+        finally:
+            try:
+                if runtime.process.is_alive():
+                    runtime.process.terminate()
+                    runtime.process.join(timeout=2)
+            except ValueError:
+                pass
+            supervisor.shutdown()
+
+        self.assertTrue(runtime_retained)
+        self.assertTrue(monitor_retained)
+        self.assertTrue(shutdown_cleaned)
+        self.assertTrue(monitor_stopped)
+        self.assertTrue(connection_closed)
+
+    def test_shutdown_preserves_an_unconfirmed_timeout_intent(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 10},
+            termination_grace=0.05,
+        )
+        request = WorkerTaskRequest.new("engineer", "timeout", 1)
+        original_terminate = supervisor._terminate
+        termination_attempted = threading.Event()
+        terminate_calls = 0
+
+        def fail_first_termination(process):
+            nonlocal terminate_calls
+            terminate_calls += 1
+            if terminate_calls == 1:
+                termination_attempted.set()
+                return False
+            return original_terminate(process)
+
+        supervisor._terminate = fail_first_termination
+        supervisor.submit(request)
+        self.assertTrue(termination_attempted.wait(4))
+
+        supervisor.shutdown()
+        terminal = supervisor.get(request.task_id)
+
+        self.assertEqual(terminal.status, WorkerTaskStatus.TIMEOUT)
+        self.assertTrue(terminal.termination_confirmed)
+        self.assertEqual(supervisor.active_process_count(), 0)
+
+    def test_deadline_does_not_overwrite_a_concurrent_cancel_intent(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 10},
+            termination_grace=0.05,
+        )
+        request = WorkerTaskRequest.new("engineer", "cancel race", 10)
+        supervisor.submit(request)
+        runtime = supervisor._runtimes[request.task_id]
+        original_monotonic = role_worker_module.time.monotonic
+        original_terminate = supervisor._terminate
+        monitor_waiting = threading.Event()
+        cancel_terminating = threading.Event()
+        deadline_released = threading.Event()
+
+        def controlled_monotonic():
+            if (
+                threading.current_thread() is runtime.monitor
+                and not deadline_released.is_set()
+            ):
+                monitor_waiting.set()
+                cancel_terminating.wait(timeout=2)
+                deadline_released.set()
+                return runtime.deadline + 1
+            return original_monotonic()
+
+        def leave_process_running(_process):
+            if threading.current_thread().name == "cancel-race":
+                cancel_terminating.set()
+                deadline_released.wait(timeout=2)
+            return False
+
+        role_worker_module.time.monotonic = controlled_monotonic
+        supervisor._terminate = leave_process_running
+        cancel_thread = threading.Thread(
+            target=supervisor.cancel,
+            args=(request.task_id,),
+            name="cancel-race",
+            daemon=True,
+        )
+        try:
+            self.assertTrue(monitor_waiting.wait(timeout=2))
+            cancel_thread.start()
+            cancel_thread.join(timeout=2)
+            self.assertFalse(cancel_thread.is_alive())
+            time.sleep(0.05)
+            intent = runtime.termination_intent
+        finally:
+            role_worker_module.time.monotonic = original_monotonic
+            supervisor._terminate = original_terminate
+            supervisor.shutdown()
+
+        self.assertEqual(intent, WorkerTaskStatus.CANCELLED)
+
+    def test_exit_finalization_honors_a_concurrent_cancel_intent(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 0.2},
+        )
+        request = WorkerTaskRequest.new("engineer", "cancel after exit", 10)
+        supervisor.submit(request)
+        runtime = supervisor._runtimes[request.task_id]
+        original_is_alive = runtime.process.is_alive
+        original_terminate = supervisor._terminate
+        monitor_observed_exit = threading.Event()
+        release_monitor = threading.Event()
+        cancel_intent_set = threading.Event()
+        release_cancel = threading.Event()
+        cancel_results = []
+        cancel_errors = []
+
+        def pause_monitor_at_exit():
+            alive = original_is_alive()
+            if (
+                threading.current_thread() is runtime.monitor
+                and not alive
+                and not monitor_observed_exit.is_set()
+            ):
+                monitor_observed_exit.set()
+                release_monitor.wait(timeout=4)
+            return alive
+
+        def pause_cancel_after_intent(process):
+            if threading.current_thread().name == "cancel-after-exit":
+                cancel_intent_set.set()
+                release_cancel.wait(timeout=4)
+            return original_terminate(process)
+
+        def cancel_task():
+            try:
+                cancel_results.append(supervisor.cancel(request.task_id))
+            except Exception as exc:
+                cancel_errors.append(exc)
+
+        runtime.process.is_alive = pause_monitor_at_exit
+        supervisor._terminate = pause_cancel_after_intent
+        cancel_thread = threading.Thread(
+            target=cancel_task,
+            name="cancel-after-exit",
+            daemon=True,
+        )
+        try:
+            self.assertTrue(monitor_observed_exit.wait(timeout=4))
+            cancel_thread.start()
+            self.assertTrue(cancel_intent_set.wait(timeout=2))
+            release_monitor.set()
+            terminal = self.wait_terminal(supervisor, request.task_id, timeout=2)
+            release_cancel.set()
+            cancel_thread.join(timeout=4)
+        finally:
+            release_monitor.set()
+            release_cancel.set()
+            runtime.process.is_alive = original_is_alive
+            supervisor._terminate = original_terminate
+
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertEqual(cancel_errors, [])
+        self.assertEqual(terminal.status, WorkerTaskStatus.CANCELLED)
+        self.assertEqual(cancel_results[0].status, WorkerTaskStatus.CANCELLED)
+
     def test_unknown_and_terminal_cancellation_are_distinguished(self):
         supervisor = self.make_supervisor(worker_fixtures.succeed)
         self.assertIsNone(supervisor.cancel("task-missing"))
@@ -157,6 +478,86 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             self.wait_terminal(bounded, item.task_id)
         self.assertEqual(len(bounded.list()), 2)
 
+    def test_terminal_publication_prunes_history_before_cleanup_finishes(self):
+        supervisor = self.make_supervisor(worker_fixtures.succeed, max_records=2)
+        retained = []
+        for index in range(2):
+            item = WorkerTaskRequest.new("engineer", f"retained-{index}", 10)
+            supervisor.submit(item)
+            self.wait_terminal(supervisor, item.task_id)
+            deadline = time.monotonic() + 2
+            while item.task_id in supervisor._runtimes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            retained.append(item.task_id)
+
+        blocked = WorkerTaskRequest.new("engineer", "blocked cleanup", 10)
+        original_cleanup = supervisor._cleanup_runtime
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+
+        def pause_cleanup(task_id):
+            if task_id == blocked.task_id:
+                cleanup_started.set()
+                release_cleanup.wait(timeout=4)
+            original_cleanup(task_id)
+
+        supervisor._cleanup_runtime = pause_cleanup
+        try:
+            supervisor.submit(blocked)
+            self.wait_terminal(supervisor, blocked.task_id)
+            self.assertTrue(cleanup_started.wait(timeout=2))
+            visible_ids = [record.task_id for record in supervisor.list()]
+        finally:
+            release_cleanup.set()
+            deadline = time.monotonic() + 2
+            while blocked.task_id in supervisor._runtimes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            supervisor._cleanup_runtime = original_cleanup
+
+        self.assertEqual(visible_ids, [blocked.task_id, retained[-1]])
+
+    def test_concurrent_terminal_publication_bounds_history_before_cleanup(self):
+        supervisor = self.make_supervisor(worker_fixtures.succeed, max_records=1)
+        requests = [
+            WorkerTaskRequest.new("engineer", "first terminal", 10),
+            WorkerTaskRequest.new("reviewer", "second terminal", 10),
+        ]
+        original_cleanup = supervisor._cleanup_runtime
+        cleanup_started = {
+            request.task_id: threading.Event() for request in requests
+        }
+        release_cleanup = threading.Event()
+        runtimes = {}
+
+        def pause_cleanup(task_id):
+            cleanup_started[task_id].set()
+            release_cleanup.wait(timeout=4)
+            original_cleanup(task_id)
+
+        supervisor._cleanup_runtime = pause_cleanup
+        try:
+            for request in requests:
+                supervisor.submit(request)
+                runtimes[request.task_id] = supervisor._runtimes[request.task_id]
+            for request in requests:
+                self.assertTrue(cleanup_started[request.task_id].wait(timeout=4))
+            visible_records = supervisor.list()
+            active_processes = supervisor.active_process_count()
+        finally:
+            release_cleanup.set()
+            deadline = time.monotonic() + 2
+            while supervisor._runtimes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            supervisor._cleanup_runtime = original_cleanup
+
+        self.assertEqual(len(visible_records), 1)
+        self.assertEqual(active_processes, 0)
+        self.assertEqual(supervisor._runtimes, {})
+        for runtime in runtimes.values():
+            self.assertTrue(runtime.connection.closed)
+            with self.assertRaises(ValueError):
+                runtime.process.is_alive()
+
     def test_late_event_cannot_change_terminal_record(self):
         supervisor = self.make_supervisor(worker_fixtures.succeed)
         request = WorkerTaskRequest.new("engineer", "done", 10)
@@ -173,6 +574,28 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
 
         self.assertFalse(accepted)
         self.assertEqual(supervisor.get(request.task_id), terminal)
+
+    def test_termination_intent_drains_without_accepting_late_events(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 10},
+        )
+        request = WorkerTaskRequest.new("engineer", "ignore late heartbeat", 10)
+        submitted = supervisor.submit(request)
+        runtime = supervisor._runtimes[request.task_id]
+        with supervisor._lock:
+            runtime.termination_intent = WorkerTaskStatus.TIMEOUT
+        heartbeat = WorkerEvent.new(
+            request,
+            sequence=submitted.last_event_sequence + 1,
+            kind=WorkerEventKind.HEARTBEAT,
+            payload={},
+        )
+
+        accepted = supervisor._accept_event(request.task_id, heartbeat)
+
+        self.assertFalse(accepted)
+        self.assertEqual(supervisor.get(request.task_id), submitted)
 
     def test_shutdown_terminates_all_live_children(self):
         supervisor = self.make_supervisor(
@@ -195,6 +618,47 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
                 supervisor.get(request.task_id).status,
                 WorkerTaskStatus.CANCELLED,
             )
+
+    def test_cancel_serializes_termination_with_runtime_cleanup(self):
+        supervisor = self.make_supervisor(
+            worker_fixtures.sleep_then_succeed,
+            runner_config={"delay": 30},
+            termination_grace=0.5,
+        )
+        request = WorkerTaskRequest.new("engineer", "cancel cleanup race", 30)
+        supervisor.submit(request)
+        runtime = supervisor._runtimes[request.task_id]
+        original_terminate = runtime.process.terminate
+        original_join = runtime.process.join
+        original_close = runtime.process.close
+        process_closed = threading.Event()
+
+        def terminate_then_pause():
+            original_terminate()
+            process_closed.wait(timeout=0.25)
+
+        def reject_join_after_close(timeout=None):
+            if process_closed.is_set():
+                raise OSError(6, "invalid process handle")
+            return original_join(timeout=timeout)
+
+        def close_and_signal():
+            try:
+                return original_close()
+            finally:
+                process_closed.set()
+
+        runtime.process.terminate = terminate_then_pause
+        runtime.process.join = reject_join_after_close
+        runtime.process.close = close_and_signal
+        try:
+            terminal = supervisor.cancel(request.task_id)
+        finally:
+            supervisor.shutdown()
+
+        self.assertEqual(terminal.status, WorkerTaskStatus.CANCELLED)
+        self.assertTrue(terminal.termination_confirmed)
+        self.assertTrue(process_closed.wait(timeout=2))
 
     def test_fixed_role_runner_returns_content_and_parent_token_usage(self):
         from core.kernel.ollama_manager import OllamaManager

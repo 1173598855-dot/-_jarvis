@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import multiprocessing
 from multiprocessing.connection import Connection
@@ -108,6 +108,10 @@ class _TaskRuntime:
     monitor: threading.Thread | None = None
     pending_event: WorkerEvent | None = None
     termination_intent: WorkerTaskStatus | None = None
+    process_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
 
 
 def _bounded_json_value(value: object, max_output_bytes: int) -> object:
@@ -237,6 +241,21 @@ class RoleWorkerSupervisor:
                 raise RuntimeError("role worker supervisor is shut down")
             if request.task_id in self._records:
                 raise ValueError(f"duplicate worker task_id: {request.task_id}")
+            for task_id, runtime in self._runtimes.items():
+                if runtime.request.role_name != request.role_name:
+                    continue
+                record = self._records.get(task_id)
+                if record is None:
+                    raise RuntimeError(
+                        f"role worker termination is unconfirmed: {request.role_name}"
+                    )
+                if runtime.termination_intent is None:
+                    continue
+                if record.status.is_terminal and record.termination_confirmed:
+                    continue
+                raise RuntimeError(
+                    f"role worker termination is unconfirmed: {request.role_name}"
+                )
             receiver, sender = self._context.Pipe(duplex=False)
             process = self._context.Process(
                 target=_worker_process_entry,
@@ -291,7 +310,8 @@ class RoleWorkerSupervisor:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValueError("limit must be an integer from 1 through 100")
         with self._lock:
-            return list(reversed(tuple(self._records.values())[-limit:]))
+            bounded_limit = min(limit, self._max_records)
+            return list(reversed(tuple(self._records.values())[-bounded_limit:]))
 
     def cancel(self, task_id: str) -> WorkerTaskRecord | None:
         with self._lock:
@@ -303,19 +323,33 @@ class RoleWorkerSupervisor:
             runtime = self._runtimes.get(task_id)
             if runtime is None:
                 return record
-            runtime.termination_intent = WorkerTaskStatus.CANCELLED
-        confirmed = self._terminate(runtime.process)
+            intent = runtime.termination_intent or WorkerTaskStatus.CANCELLED
+            runtime.termination_intent = intent
+        confirmed = self._terminate(runtime)
         if confirmed:
+            error = (
+                "Worker task cancelled"
+                if intent is WorkerTaskStatus.CANCELLED
+                else (
+                    "Worker task timed out after "
+                    f"{runtime.request.timeout_seconds}s"
+                )
+            )
             self._finalize(
                 task_id,
-                WorkerTaskStatus.CANCELLED,
-                error="Worker task cancelled",
+                intent,
+                error=error,
                 termination_confirmed=True,
             )
         else:
+            error = (
+                "Worker cancellation could not confirm process termination"
+                if intent is WorkerTaskStatus.CANCELLED
+                else "Worker timeout could not confirm process termination"
+            )
             self._update_nonterminal_error(
                 task_id,
-                "Worker cancellation could not confirm process termination",
+                error,
             )
         return self.get(task_id)
 
@@ -324,17 +358,28 @@ class RoleWorkerSupervisor:
             if self._shutdown and not self._runtimes:
                 return
             self._shutdown = True
-            active_ids = [
-                task_id
-                for task_id, record in self._records.items()
-                if not record.status.is_terminal
-            ]
+            runtime_ids = list(self._runtimes)
             monitors = [
                 runtime.monitor
                 for runtime in self._runtimes.values()
                 if runtime.monitor is not None
             ]
-        for task_id in active_ids:
+        for task_id in runtime_ids:
+            with self._lock:
+                runtime = self._runtimes.get(task_id)
+                record = self._records.get(task_id)
+                if runtime is None:
+                    continue
+                if record is None:
+                    runtime.termination_intent = (
+                        runtime.termination_intent or WorkerTaskStatus.CANCELLED
+                    )
+                elif record.status.is_terminal:
+                    continue
+            if record is None:
+                if self._terminate(runtime):
+                    self._cleanup_runtime(task_id)
+                continue
             try:
                 self.cancel(task_id)
             except WorkerTaskTerminalError:
@@ -345,9 +390,8 @@ class RoleWorkerSupervisor:
 
     def active_process_count(self) -> int:
         with self._lock:
-            return sum(
-                1 for runtime in self._runtimes.values() if runtime.process.is_alive()
-            )
+            runtimes = tuple(self._runtimes.values())
+        return sum(1 for runtime in runtimes if self._process_is_alive(runtime))
 
     def _monitor(self, task_id: str) -> None:
         try:
@@ -355,18 +399,40 @@ class RoleWorkerSupervisor:
                 with self._lock:
                     runtime = self._runtimes.get(task_id)
                     record = self._records.get(task_id)
-                    if runtime is None or record is None:
+                    if runtime is None:
                         return
-                    if record.status.is_terminal:
+                    if record is None:
+                        record_missing = True
+                    else:
+                        record_missing = False
+                        if record.status.is_terminal:
+                            return
+                        intent = runtime.termination_intent
+                        pending = runtime.pending_event
+                if record_missing:
+                    if not self._process_is_alive(runtime):
                         return
-                    intent = runtime.termination_intent
-                    pending = runtime.pending_event
-                if intent is WorkerTaskStatus.CANCELLED:
-                    if not runtime.process.is_alive():
+                    time.sleep(0.01)
+                    continue
+                if intent in {
+                    WorkerTaskStatus.CANCELLED,
+                    WorkerTaskStatus.TIMEOUT,
+                }:
+                    if self._connection_ready(runtime.connection, 0.01):
+                        self._receive_event(task_id, runtime)
+                    if not self._process_is_alive(runtime):
+                        error = (
+                            "Worker task cancelled"
+                            if intent is WorkerTaskStatus.CANCELLED
+                            else (
+                                "Worker task timed out after "
+                                f"{runtime.request.timeout_seconds}s"
+                            )
+                        )
                         self._finalize(
                             task_id,
-                            WorkerTaskStatus.CANCELLED,
-                            error="Worker task cancelled",
+                            intent,
+                            error=error,
                             termination_confirmed=True,
                         )
                     else:
@@ -374,8 +440,12 @@ class RoleWorkerSupervisor:
                     continue
                 if time.monotonic() >= runtime.deadline:
                     with self._lock:
-                        runtime.termination_intent = WorkerTaskStatus.TIMEOUT
-                    confirmed = self._terminate(runtime.process)
+                        if runtime.termination_intent is None:
+                            runtime.termination_intent = WorkerTaskStatus.TIMEOUT
+                        intent = runtime.termination_intent
+                    if intent is not WorkerTaskStatus.TIMEOUT:
+                        continue
+                    confirmed = self._terminate(runtime)
                     if confirmed:
                         self._finalize(
                             task_id,
@@ -391,47 +461,66 @@ class RoleWorkerSupervisor:
                             task_id,
                             "Worker timeout could not confirm process termination",
                         )
-                    return
+                    continue
                 if self._connection_ready(runtime.connection, 0.05):
                     self._receive_event(task_id, runtime)
                     with self._lock:
                         pending = runtime.pending_event
-                if not runtime.process.is_alive():
-                    runtime.process.join(timeout=0)
+                if not self._process_is_alive(runtime):
+                    self._join_process(runtime, timeout=0)
                     while self._connection_ready(runtime.connection):
                         self._receive_event(task_id, runtime)
                     with self._lock:
                         pending = runtime.pending_event
                         record = self._records.get(task_id)
-                    if record is not None and record.status.is_terminal:
-                        return
-                    if pending is not None:
-                        if pending.kind is WorkerEventKind.RESULT:
+                        intent = runtime.termination_intent
+                        if record is not None and record.status.is_terminal:
+                            return
+                        if intent in {
+                            WorkerTaskStatus.CANCELLED,
+                            WorkerTaskStatus.TIMEOUT,
+                        }:
+                            error = (
+                                "Worker task cancelled"
+                                if intent is WorkerTaskStatus.CANCELLED
+                                else (
+                                    "Worker task timed out after "
+                                    f"{runtime.request.timeout_seconds}s"
+                                )
+                            )
                             self._finalize(
                                 task_id,
-                                WorkerTaskStatus.SUCCEEDED,
-                                result=pending.payload.get("result"),
+                                intent,
+                                error=error,
                                 termination_confirmed=True,
                             )
+                        elif pending is not None:
+                            if pending.kind is WorkerEventKind.RESULT:
+                                self._finalize(
+                                    task_id,
+                                    WorkerTaskStatus.SUCCEEDED,
+                                    result=pending.payload.get("result"),
+                                    termination_confirmed=True,
+                                )
+                            else:
+                                self._finalize(
+                                    task_id,
+                                    WorkerTaskStatus.FAILED,
+                                    error=str(
+                                        pending.payload.get("error", "Worker task failed")
+                                    ),
+                                    termination_confirmed=True,
+                                )
                         else:
                             self._finalize(
                                 task_id,
-                                WorkerTaskStatus.FAILED,
-                                error=str(
-                                    pending.payload.get("error", "Worker task failed")
+                                WorkerTaskStatus.CRASHED,
+                                error=(
+                                    "Worker process exited without a terminal event "
+                                    f"(exit code {runtime.process.exitcode})"
                                 ),
                                 termination_confirmed=True,
                             )
-                    else:
-                        self._finalize(
-                            task_id,
-                            WorkerTaskStatus.CRASHED,
-                            error=(
-                                "Worker process exited without a terminal event "
-                                f"(exit code {runtime.process.exitcode})"
-                            ),
-                            termination_confirmed=True,
-                        )
                     return
         finally:
             self._cleanup_runtime(task_id)
@@ -458,7 +547,8 @@ class RoleWorkerSupervisor:
             if runtime is None or record is None or record.status.is_terminal:
                 return False
             if (
-                event.task_id != task_id
+                runtime.termination_intent is not None
+                or event.task_id != task_id
                 or event.attempt_id != record.attempt_id
                 or event.sequence <= record.last_event_sequence
                 or runtime.pending_event is not None
@@ -499,6 +589,7 @@ class RoleWorkerSupervisor:
                 termination_confirmed=termination_confirmed,
             )
             self._records[task_id] = terminal
+            self._prune_records()
             if self._on_terminal is not None:
                 try:
                     self._on_terminal(terminal)
@@ -512,30 +603,60 @@ class RoleWorkerSupervisor:
             if record is not None and not record.status.is_terminal:
                 self._records[task_id] = record.evolve(error=redact_text(error))
 
-    def _terminate(self, process: multiprocessing.Process) -> bool:
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=self._termination_grace)
-        if process.is_alive() and hasattr(process, "kill"):
-            process.kill()
-            process.join(timeout=self._termination_grace)
-        return not process.is_alive()
+    @staticmethod
+    def _process_is_alive(runtime: _TaskRuntime) -> bool:
+        with runtime.process_lock:
+            try:
+                return runtime.process.is_alive()
+            except ValueError:
+                return False
+
+    @staticmethod
+    def _join_process(runtime: _TaskRuntime, timeout: float) -> None:
+        with runtime.process_lock:
+            try:
+                runtime.process.join(timeout=timeout)
+            except (AssertionError, ValueError):
+                pass
+
+    def _terminate(self, runtime: _TaskRuntime) -> bool:
+        with runtime.process_lock:
+            process = runtime.process
+            try:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=self._termination_grace)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=self._termination_grace)
+                return not process.is_alive()
+            except ValueError:
+                # Cleanup closes a handle only after confirming process exit.
+                return True
 
     def _cleanup_runtime(self, task_id: str) -> None:
         with self._lock:
-            runtime = self._runtimes.pop(task_id, None)
-        if runtime is None:
-            return
-        try:
-            runtime.connection.close()
-        finally:
-            if not runtime.process.is_alive():
-                runtime.process.join(timeout=0)
+            runtime = self._runtimes.get(task_id)
+            if runtime is None:
+                return
+            with runtime.process_lock:
                 try:
-                    runtime.process.close()
+                    if runtime.process.is_alive():
+                        return
                 except ValueError:
                     pass
-        with self._lock:
+                self._runtimes.pop(task_id, None)
+                try:
+                    runtime.connection.close()
+                finally:
+                    try:
+                        runtime.process.join(timeout=0)
+                    except (AssertionError, ValueError):
+                        pass
+                    try:
+                        runtime.process.close()
+                    except ValueError:
+                        pass
             self._prune_records()
 
     def _prune_records(self) -> None:

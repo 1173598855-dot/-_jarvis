@@ -23,5 +23,10 @@ def crash(_request, _config):
     os._exit(17)
 
 
+def sleep_then_crash(_request, config):
+    time.sleep(float(config.get("delay", 2)))
+    os._exit(19)
+
+
 def oversized(_request, config):
     return "x" * int(config.get("size", 2 * 1024 * 1024))

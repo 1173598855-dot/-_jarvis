@@ -29,6 +29,7 @@ Endpoints:
 - POST /api/roles/dispatch_by_cap - Dispatch by capability
 """
 
+import asyncio
 import atexit
 import json
 import logging
@@ -976,6 +977,14 @@ def _validate_role_timeout(timeout: object) -> int:
 @app.post("/api/roles/tasks", status_code=202)
 async def create_role_task(request: Request):
     data = await _read_role_body(request)
+    if set(data) - {"role_name", "prompt", "timeout"}:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body contains unsupported fields",
+            },
+        )
     role_name = _normalize_dispatch_text(data.get("role_name", ""))
     prompt = _normalize_dispatch_text(data.get("prompt", ""))
     if role_name is None:
@@ -1010,8 +1019,8 @@ async def create_role_task(request: Request):
         task_id=f"task-{uuid.uuid4().hex}",
     )
     try:
-        record = state.role_tasks.submit(worker_request)
-    except RuntimeError as exc:
+        record = await asyncio.to_thread(state.role_tasks.submit, worker_request)
+    except (OSError, RuntimeError) as exc:
         raise HTTPException(
             status_code=503,
             detail={
@@ -1048,7 +1057,7 @@ async def get_role_task(task_id: str):
 @app.post("/api/roles/tasks/{task_id}/cancel")
 async def cancel_role_task(task_id: str):
     try:
-        record = state.role_tasks.cancel(task_id)
+        record = await asyncio.to_thread(state.role_tasks.cancel, task_id)
     except WorkerTaskTerminalError as exc:
         raise HTTPException(
             status_code=409,
@@ -1063,6 +1072,14 @@ async def cancel_role_task(task_id: str):
             detail={
                 "code": "ROLE_TASK_NOT_FOUND",
                 "message": "Role task was not found",
+            },
+        )
+    if record.status.is_terminal and record.status is not WorkerTaskStatus.CANCELLED:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ROLE_TASK_TERMINAL",
+                "message": "Role task is already terminal",
             },
         )
     if record.status is not WorkerTaskStatus.CANCELLED:

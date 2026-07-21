@@ -18,6 +18,8 @@ let coreHistoryUrl;
 let coreDispatchBody;
 let coreRoleUrl;
 let coreRoleBody;
+let coreRoleTaskUrl;
+let coreRoleTaskBody;
 
 function getServerPort(server) {
   const address = server.address();
@@ -212,6 +214,47 @@ beforeAll(async () => {
           priority: 7,
         },
       }));
+      return;
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/api/roles/tasks?')) {
+      coreRoleTaskUrl = req.url;
+      res.end(JSON.stringify({ tasks: [], count: 0 }));
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/api/roles/tasks/task-fixture') {
+      coreRoleTaskUrl = req.url;
+      res.end(JSON.stringify({
+        protocol_version: 1,
+        task_id: 'task-fixture',
+        attempt_id: 'attempt-fixture',
+        role_name: 'engineer',
+        status: 'running',
+      }));
+      return;
+    }
+    if (
+      req.method === 'POST'
+      && (
+        req.url === '/api/roles/tasks'
+        || req.url === '/api/roles/tasks/task-fixture/cancel'
+      )
+    ) {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk.toString(); });
+      req.on('end', () => {
+        coreRoleTaskUrl = req.url;
+        coreRoleTaskBody = JSON.parse(body || '{}');
+        const cancelled = req.url.endsWith('/cancel');
+        res.writeHead(cancelled ? 200 : 202);
+        res.end(JSON.stringify({
+          protocol_version: 1,
+          task_id: 'task-fixture',
+          attempt_id: 'attempt-fixture',
+          role_name: 'engineer',
+          status: cancelled ? 'cancelled' : 'running',
+          termination_confirmed: cancelled,
+        }));
+      });
       return;
     }
     if (
@@ -610,6 +653,55 @@ describe('Core API bridge', () => {
       tasks: [{ role: 'engineer', prompt: 'task' }],
     });
     await expect(batch.json()).resolves.toEqual({ results: [], count: 0 });
+  });
+
+  test('proxies every asynchronous role task lifecycle route', async () => {
+    coreRoleTaskUrl = undefined;
+    coreRoleTaskBody = undefined;
+
+    const created = await fetch(`http://127.0.0.1:${apiPort}/api/roles/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role_name: 'engineer',
+        prompt: 'review state',
+        timeout: 30,
+      }),
+    });
+    expect(created.status).toBe(202);
+    expect(coreRoleTaskUrl).toBe('/api/roles/tasks');
+    expect(coreRoleTaskBody).toEqual({
+      role_name: 'engineer',
+      prompt: 'review state',
+      timeout: 30,
+    });
+
+    const listed = await fetch(
+      `http://127.0.0.1:${apiPort}/api/roles/tasks?limit=5`,
+    );
+    expect(listed.status).toBe(200);
+    expect(coreRoleTaskUrl).toBe('/api/roles/tasks?limit=5');
+
+    const fetched = await fetch(
+      `http://127.0.0.1:${apiPort}/api/roles/tasks/task-fixture`,
+    );
+    expect(fetched.status).toBe(200);
+    await expect(fetched.json()).resolves.toMatchObject({
+      task_id: 'task-fixture',
+      status: 'running',
+    });
+
+    const cancelled = await fetch(
+      `http://127.0.0.1:${apiPort}/api/roles/tasks/task-fixture/cancel`,
+      { method: 'POST' },
+    );
+    expect(cancelled.status).toBe(200);
+    expect(coreRoleTaskUrl).toBe('/api/roles/tasks/task-fixture/cancel');
+    await expect(cancelled.json()).resolves.toMatchObject({
+      task_id: 'task-fixture',
+      status: 'cancelled',
+      termination_confirmed: true,
+    });
   });
 
   test.each([
