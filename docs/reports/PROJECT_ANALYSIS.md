@@ -1,10 +1,10 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-19
+**扫描时间**：2026-07-21
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 130 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 131 本轮测试结果
 
 ## 结论
 
@@ -16,17 +16,17 @@
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 28 个文件，约 7,617 行 |
+| `src/` Python | 28 个文件，约 8,369 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
 | `tests/` Python | 49 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 262 个用例 |
-| 完整 Python discovery | 1136 个用例 |
-| 前端 Vitest | 112 个用例 |
+| 规范 Python 聚合套件 | 295 个用例（293 通过、2 跳过） |
+| 完整 Python discovery | 1170 个用例（1168 通过、2 跳过） |
+| 前端 Vitest | 113 个用例 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 121-130） |
+| 滚动审计报告 | 10 份（Iteration 122-131） |
 
 ## 运行架构
 
@@ -247,6 +247,15 @@ Role-specific routes remain intentionally outside the shared contract because th
 - OpenAPI 升级到 `1.12.0`，声明 Worker task schema、成功/错误响应，并用条件 schema 约束终止确认。
 - 旧同步角色 dispatch 保持兼容且仍不可取消；持久任务恢复与旧路径迁移继续作为 Phase B 后续工作。
 
+## Iteration 131 已解决
+
+- `FileRunStateRepository` 改为先发布不可变 revision 快照，再原子切换认证 active manifest；同 root 实例通过共享线程锁、Windows 机器级 named mutex 或 POSIX no-follow `flock` 串行读写，并在发布前复核 active revision。
+- HMAC 认证的 save-request 指纹允许已提交 manifest 在 read-back 失败后精确重试；初始发布只接受同 revision 的 canonical staging 残留。归档先保存认证 manifest，再移除 active pointer；重试会验证 marker 一致性，避免部分归档或已归档 `run_id` 被重新激活。
+- POSIX 仅清理身份持续匹配、内容已知的正整数 revision；Windows 与能力不足平台保守保留旧 revision/staging，非法名称、未知内容和 reparse point 均留待检查。
+- 未确认终止或记录缺失的角色 Worker 继续驻留监督且只阻止同角色复用；timeout/cancel 保留先到意图，process-handle 操作按 runtime 串行化，shutdown 不会提前关闭仍在使用的句柄。
+- FastAPI 严格拒绝异步任务额外字段，把 submit/cancel 移出事件循环，并稳定映射 spawn 失败与取消终态竞态；Express 补齐任务创建、列表、详情与取消代理。
+- 多轮独立复查发现并修复了 reader/pruning、终止竞态、归档重激活和 Windows handle 关闭窗口；旧同步 dispatch、异步任务持久恢复和模型工具循环仍保持为明确的 Phase 11 后续项。
+
 ## 四维评分
 
 | 维度 | 得分 | 依据 |
@@ -261,7 +270,7 @@ Role-specific routes remain intentionally outside the shared contract because th
 | 位置 | 严重程度 | 问题 | 修复建议 |
 |---|---|---|---|
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
-| 未契约错误路径 | P1 | Express API fallback 与主要 Ollama/Core 代理错误及共享 orchestrator 子集已纳入 `ErrorResponse` 和 OpenAPI 1.10.0；role 专属端点仍保持显式范围 | 持续为新增共享端点补充跨服务 schema |
+| Express-only Git API | P1 | OpenAPI `1.12.0` 已覆盖共享 orchestrator、角色路由和异步角色任务；`/api/git/*` 仍是仅由 Express 提供的稳定实现面 | 用独立契约或明确的 OpenAPI 扩展记录 Git 响应与错误 schema |
 | 角色工具执行策略 | P1 | 默认拒绝 broker、精确授权、handler 注册与有界审计已落地；自动模型工具循环尚未接入 | 只为固定只读能力注册 handler，并让每次模型工具请求强制经过 broker；不得复用 HTTP capability token 形成隐式授权 |
 | 旧同步调度 timeout 隔离 | P1 | 新异步任务通道可确认终止，但旧 dispatch 仍由不可取消 daemon handler 执行 | 逐步迁移旧调用方；迁移前保持旧 timeout 不可恢复且不得宣称可取消 |
 | 异步任务持久恢复 | P1 | Worker 状态当前由父进程内存权威维护，服务重启后没有持久任务核对 | 将任务记录接入 RunState，启动时核对孤儿 Worker 后再确定终态 |
@@ -278,9 +287,9 @@ HTTP 路径不再直接使用通用 `TerminalExecutor` 的宽松 allowlist；默
 
 ### P1：多套 API 行为漂移
 
-Express、Python HTTPServer 和 FastAPI 已由共享 OpenAPI 文件约束健康、系统遥测、Ollama 状态/模型、Token、插件、记忆、事件、共享 orchestrator 子集、首批写操作错误、非流式 Ollama chat 与 GET/POST 规范 SSE 帧；Express Git 失败和未知 API 路由也已使用稳定 ErrorResponse，其余 role 专属代理错误仍未完全纳入契约。
+Express、Python HTTPServer 和 FastAPI 已由共享 OpenAPI 文件约束健康、系统遥测、Ollama 状态/模型、Token、插件、记忆、事件、共享 orchestrator、角色路由、异步角色任务、首批写操作错误、非流式 Ollama chat 与 GET/POST 规范 SSE 帧。Express Git 失败和未知 API 路由也已使用稳定 ErrorResponse，但 `/api/git/*` 仍是未纳入共享契约的 Express-only 实现面。
 
-已完成：OpenAPI 升级到 1.10.0，增加 Express-only `x-jarvis-api-fallback`，并为 Ollama 状态/模型、系统遥测、Core API 代理及共享 orchestrator 路径声明 `ErrorResponse`；role 专属路径不纳入共享契约，因三端没有对等实现。
+已完成：OpenAPI 升级到 `1.12.0`，增加 Express-only `x-jarvis-api-fallback`，并为 Ollama、Core API、共享 orchestrator、角色路由与异步角色任务声明请求、响应和 `ErrorResponse`。Python HTTPServer 不提供异步任务生命周期，Express-only `/api/git/*` 继续保持显式实现范围，不能被误称为三端共享能力。
 
 ### P1：真实集成仍依赖本机服务
 
@@ -300,7 +309,11 @@ Markdown 和 Chart.js 已按视图懒加载，但对话与运行监控生产 chu
 
 ### P1：timeout 后的执行隔离
 
-FastAPI 已提供新的异步角色任务通道：父进程拥有权威记录，timeout/cancelled 必须等待子进程确认退出，迟到事件不能覆盖终态。旧同步 dispatch 的 `_run_with_timeout()` 仍使用无法安全取消的 daemon 线程，因此继续保持 timeout 不可恢复。下一步是迁移旧调用方，并把异步任务记录接入 RunState 与启动恢复；不能把新通道的保证倒推到旧路径。
+FastAPI 已提供新的异步角色任务通道：父进程拥有权威记录，timeout/cancelled 必须等待子进程确认退出，迟到事件不能覆盖终态。无法确认终止的 Worker 会保持 resident 并阻止同角色复用，这是有意的 fail-closed 行为。`asyncio.to_thread` 避免 submit/cancel 阻塞事件循环，但 HTTP 协程被取消后底层调用仍可能完成。旧同步 dispatch 的 `_run_with_timeout()` 仍使用无法安全取消的 daemon 线程，因此继续保持 timeout 不可恢复。下一步是迁移旧调用方，并把异步任务记录接入 RunState 与启动恢复；不能把新通道的保证倒推到旧路径。
+
+### P2：恢复仓库极端崩溃耐久性
+
+恢复仓库现在通过不可变 revision、文件内容 `fsync`、原子 manifest 切换和同根读写锁防止并发回退或读到被提前清理的快照。POSIX 清理会在每次删除前复核目录身份；Windows 和缺少安全 descriptor API 的平台不自动清理旧 revision/staging。父目录元数据尚未显式执行目录 `fsync`，非协作的同用户进程仍可能在身份检查与删除之间制造极窄竞态；未知或持续不可删除内容会按安全优先策略保留。
 
 ## 维护规则
 

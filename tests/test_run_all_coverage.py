@@ -45,6 +45,27 @@ class TestRunAllCoverage(unittest.TestCase):
         self.assertEqual(payload["success"], False)
         self.assertEqual(payload["timeout_expired"], True)
         self.assertEqual(payload["timeout_seconds"], 1)
+        self.assertEqual(payload["skipped"], 0)
+
+        report.unlink()
+
+    def test_run_suite_reports_skipped_tests_separately(self):
+        report = run_all.ROOT / ".test-run-all-skipped-report.json"
+        if report.exists():
+            report.unlink()
+
+        class SkippedCase(unittest.TestCase):
+            @unittest.skip("platform fixture")
+            def test_skipped(self):
+                pass
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SkippedCase)
+        self.assertEqual(run_all._run_suite(suite, json_report=str(report)), 0)
+
+        payload = __import__("json").loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(payload["tests"], 1)
+        self.assertEqual(payload["passed"], 0)
+        self.assertEqual(payload["skipped"], 1)
 
         report.unlink()
 
@@ -59,6 +80,10 @@ class TestRunAllCoverage(unittest.TestCase):
         payload = __import__("json").loads(report.read_text(encoding="utf-8"))
         self.assertEqual(payload["tests"], run_all.canonical_test_count())
         self.assertEqual(payload["success"], True)
+        self.assertEqual(
+            payload["passed"] + payload["skipped"],
+            payload["tests"],
+        )
         self.assertEqual(payload["timeout_seconds"], timeout)
         self.assertIn(f"{run_all.canonical_test_count()} tests", payload["title"])
 

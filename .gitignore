@@ -40,6 +40,7 @@ Thumbs.db
 test_write.tmp
 frontend/test-results/
 frontend/playwright-report/
+frontend/debug.log
 .superpowers/
 .worktrees/
 

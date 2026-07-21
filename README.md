@@ -123,6 +123,12 @@ declared by the profile, explicitly granted to that role, and backed by a
 registered handler. Automatic model-driven tool invocation is not enabled, and
 no HTTP setting grants terminal or plugin access to roles.
 
+FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
+process-owned asynchronous execution. Clients create a task, poll its task ID,
+and may request cancellation; `timeout` and `cancelled` are terminal only after
+the child process is confirmed stopped. Request bodies cannot select a runner,
+command, environment, working directory, or capability token.
+
 Terminal execution is disabled by default. To expose the five read-only diagnostic operations (`echo`, `pwd`, `whoami`, `hostname`, and `date`) to a local trusted client, explicitly configure both a high-entropy capability token and the enable flag:
 
 ```powershell
@@ -167,7 +173,7 @@ Complete Python discovery and syntax checks:
 
 ```powershell
 .\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-.\venv\Scripts\python.exe -m compileall -q src tests
+.\venv\Scripts\python.exe -m compileall -q src tests scripts
 ```
 
 Configuration and documentation guards:
@@ -233,6 +239,10 @@ The stable cross-implementation response contract is maintained in
 | `/api/orchestrator/dispatch` | Python / FastAPI / Express | Dispatch task |
 | `/api/roles` | Python / FastAPI / Express | Registered role list and capability filter |
 | `/api/roles/{role_name}` | Python / FastAPI / Express | Role profile |
+| `GET /api/roles/tasks` | FastAPI / Express | List asynchronous role tasks |
+| `POST /api/roles/tasks` | FastAPI / Express | Create an asynchronous role task |
+| `GET /api/roles/tasks/{task_id}` | FastAPI / Express | Read an asynchronous role task |
+| `POST /api/roles/tasks/{task_id}/cancel` | FastAPI / Express | Request confirmed task cancellation |
 | `/api/roles/dispatch` | Python / FastAPI / Express | Dispatch by role |
 | `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Dispatch by capability |
 | `/api/roles/batch_dispatch` | Python / FastAPI / Express | Batch role dispatch |

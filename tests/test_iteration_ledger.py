@@ -64,7 +64,7 @@ def latest_changelog_files_changed():
     return re.findall(r"^- `([^`]+)`$", files_match.group("body"), re.MULTILINE)
 
 
-def latest_changelog_run_all_tests():
+def latest_changelog_run_all_metrics():
     entry_match = re.search(
         r"^## Iteration #\d+ - .+?^---$",
         changelog_text(),
@@ -74,14 +74,20 @@ def latest_changelog_run_all_tests():
         raise AssertionError("CHANGELOG.md latest iteration entry must be delimited")
 
     metric_match = re.search(
-        r"^- `python tests/run_all\.py`: (\d+)/\d+ passed$",
+        r"^- `python tests/run_all\.py`: (\d+) total \((\d+) passed, (\d+) skipped\)$",
         entry_match.group(0),
         re.MULTILINE,
     )
     if not metric_match:
-        raise AssertionError("CHANGELOG.md latest iteration entry must record run_all test count")
+        raise AssertionError(
+            "CHANGELOG.md latest iteration entry must record run_all total, passed, and skipped counts"
+        )
 
-    return int(metric_match.group(1))
+    return {
+        "total": int(metric_match.group(1)),
+        "passed": int(metric_match.group(2)),
+        "skipped": int(metric_match.group(3)),
+    }
 
 
 def aggregate_suite_test_count():
@@ -135,17 +141,23 @@ def audit_report_metadata(iteration):
     }
 
 
-def audit_report_run_all_tests(iteration):
+def audit_report_run_all_metrics(iteration):
     path = REPORTS / f"AUDIT_REPORT_{iteration}.md"
     text = path.read_text(encoding="utf-8")
     match = re.search(
-        r"^\| `python tests/run_all\.py` \| Passed: (\d+) tests \|$",
+        r"^\| `python tests/run_all\.py` \| Total: (\d+); passed: (\d+); skipped: (\d+) \|$",
         text,
         re.MULTILINE,
     )
     if not match:
-        raise AssertionError(f"{path.name} must record run_all test count")
-    return int(match.group(1))
+        raise AssertionError(
+            f"{path.name} must record run_all total, passed, and skipped counts"
+        )
+    return {
+        "total": int(match.group(1)),
+        "passed": int(match.group(2)),
+        "skipped": int(match.group(3)),
+    }
 
 
 class TestIterationLedger(unittest.TestCase):
@@ -206,12 +218,17 @@ class TestIterationLedger(unittest.TestCase):
         )
 
     def test_latest_changelog_run_all_metric_matches_aggregate_suite_size(self):
-        self.assertEqual(latest_changelog_run_all_tests(), aggregate_suite_test_count())
+        metrics = latest_changelog_run_all_metrics()
+
+        self.assertEqual(metrics["total"], aggregate_suite_test_count())
+        self.assertEqual(metrics["passed"] + metrics["skipped"], metrics["total"])
 
     def test_latest_audit_report_run_all_metric_matches_aggregate_suite_size(self):
         latest_report = latest_audit_report_iteration()
+        metrics = audit_report_run_all_metrics(latest_report)
 
-        self.assertEqual(audit_report_run_all_tests(latest_report), aggregate_suite_test_count())
+        self.assertEqual(metrics["total"], aggregate_suite_test_count())
+        self.assertEqual(metrics["passed"] + metrics["skipped"], metrics["total"])
 
 
 def run_all_tests():

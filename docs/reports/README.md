@@ -1,35 +1,35 @@
-# 妞ゅ湱娲伴幎銉ユ啞缁便垹绱?
+# 项目报告索引
 
-閺堫剛娲拌ぐ鏇氱箽鐎涙﹢銆嶉惄顔煎瀻閺嬫劑鈧線妯佸▓鍏告唉娴犳ê鎷伴柅鎰枂鐎孤ゎ吀鐠囦焦宓侀妴鍌濈箥鐞涘瞼濮搁幀浣蜂簰娴狅絿鐖滄稉搴＄秼濞嗏剝绁寸拠鏇犵波閺嬫粈璐熼崙鍡礉閸樺棗褰堕幎銉ユ啞娑撳秶鐡戦崥灞肩艾瑜版挸澧犳禍瀣杽閵?
+本目录维护当前项目分析、最近 10 轮迭代审计和仍有长期参考价值的专题报告。判断当前状态时，以代码、配置和本次测试结果为准；历史审计只记录当时的交付证据。
 
-## 瑜版挸澧犻崗銉ュ經
+## 当前报告
 
-| 閺傚洦銆?| 閻劑鈧?|
+| 文档 | 说明 |
 |---|---|
-| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-19 current project analysis |
-| [AUDIT_REPORT_130.md](AUDIT_REPORT_130.md) | Terminable asynchronous role-task lifecycle and OpenAPI 1.12 |
-| [AUDIT_REPORT_129.md](AUDIT_REPORT_129.md) | Phase A authenticated context continuity and startup recovery |
-| [AUDIT_REPORT_128.md](AUDIT_REPORT_128.md) | Default-deny role tool policy, broker, and prompt filtering |
-| [AUDIT_REPORT_127.md](AUDIT_REPORT_127.md) | Recoverable role errors with timeout-safe state semantics |
-| [AUDIT_REPORT_126.md](AUDIT_REPORT_126.md) | Production Ollama role execution and shared token evidence |
-| [AUDIT_REPORT_125.md](AUDIT_REPORT_125.md) | Role routing parity across three service adapters |
-| [AUDIT_REPORT_124.md](AUDIT_REPORT_124.md) | Orchestrator contract integrity and three-adapter dispatch evidence |
-| [AUDIT_REPORT_123.md](AUDIT_REPORT_123.md) | Shared orchestrator route contract across three service adapters |
-| [AUDIT_REPORT_122.md](AUDIT_REPORT_122.md) | Deterministic required-services integration gate |
-| [AUDIT_REPORT_121.md](AUDIT_REPORT_121.md) | Process-isolated terminal worker and shared proxy error contracts |
-| [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 缂佸嫪娆㈢€瑰顥婄拋鏉跨秿 |
-| [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 閹垛偓閺堫垱鍎忛幎銉ょ瑢闁插洨鎾奸崘宕囩摜 |
-| [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 瑜版挸澧?19 娑?Skill 閻ㄥ嫮娲拌ぐ鏇犲偍瀵?|
+| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-21 当前项目分析 |
+| [AUDIT_REPORT_131.md](AUDIT_REPORT_131.md) | 原子恢复发布与角色任务生命周期加固 |
+| [AUDIT_REPORT_130.md](AUDIT_REPORT_130.md) | 可终止异步角色任务生命周期与 OpenAPI 1.12 |
+| [AUDIT_REPORT_129.md](AUDIT_REPORT_129.md) | Phase A 认证上下文连续性与启动恢复 |
+| [AUDIT_REPORT_128.md](AUDIT_REPORT_128.md) | 默认拒绝的角色工具策略、Broker 与提示过滤 |
+| [AUDIT_REPORT_127.md](AUDIT_REPORT_127.md) | 可恢复角色错误与 timeout 安全状态语义 |
+| [AUDIT_REPORT_126.md](AUDIT_REPORT_126.md) | 生产 Ollama 角色执行与共享 Token 证据 |
+| [AUDIT_REPORT_125.md](AUDIT_REPORT_125.md) | 三套服务适配器的角色路由对齐 |
+| [AUDIT_REPORT_124.md](AUDIT_REPORT_124.md) | 编排器契约完整性与三适配器调度证据 |
+| [AUDIT_REPORT_123.md](AUDIT_REPORT_123.md) | 三套服务适配器的共享编排器路由契约 |
+| [AUDIT_REPORT_122.md](AUDIT_REPORT_122.md) | 确定性的 required-services 集成门禁 |
+| [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 安装与环境报告 |
+| [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 学习与项目实践报告 |
+| [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 本地 19 个 Skill 的市场快照 |
 
-## 鐎孤ゎ吀閸欐媽澶?
+## 滚动策略
 
-- Current iteration: 130; retain the latest 10 `AUDIT_REPORT_N.md` files, currently 121-130.
-- 閺堚偓閺傛媽鍑禒锝嗘喅鐟曚椒缍呮禍搴ㄣ€嶉惄顔界壌閻╊喖缍?[CHANGELOG.md](../../CHANGELOG.md)閵?
+- 当前迭代为 131；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 122-131。
+- 完整迭代台账与每轮文件清单见 [CHANGELOG.md](../../CHANGELOG.md)。
 
-## 缂佸瓨濮㈢憴鍕灟
+## 维护规则
 
-1. 閺傜増濮ら崨濠佸▏閻?`AUDIT_REPORT_<iteration>.md` 閸涜棄鎮曢敍灞借嫙閸?`CHANGELOG.md` 妞ゅ爼鍎撮惂鏄忣唶閵?
-2. 閺堚偓閺傜増濮ら崨濠傜箑妞よ锛愰弰?`Iteration`閵嗕梗Date`閵嗕梗Status` 娑撳酣鐛欑拠浣告嚒娴犮們鈧?
-3. 妞ゅ湱娲扮紒鎾寸€崣妯哄閺冭埖娲块弬?`PROJECT_ANALYSIS.md`閿涘奔绗夌憰浣割槻閸掕泛鍤弬鎵畱閳ユ粌缍嬮崜宥囧閳ユ繂鍨庨弸鎰瀮娴犺翰鈧?
-4. 娑撳瓨妞傚ù瀣槸閹躲儱鎲￠妴浣瑰焻閸ユ儳鎷?Playwright 鏉堟挸鍤悽?`.gitignore` 閹烘帡娅庨妴?
-5. 閺傛澘顤冮幎銉ユ啞閸氬骸鍨归梽銈囩崶閸欙絽顦婚張鈧弮褎濮ら崨濠忕礉婵绮撻崣顏冪箽閻ｆ瑦娓舵潻?10 娴犲鈧?
+1. 每次迭代新增 `AUDIT_REPORT_<iteration>.md`，并同步更新 `CHANGELOG.md`。
+2. 最新审计报告必须声明匹配的 `Iteration`、`Date` 和 `Status`。
+3. 当前架构、规模和技术债统一更新到 `PROJECT_ANALYSIS.md`，不要从历史报告推断现状。
+4. 临时测试产物和 Playwright 调试输出必须使用 `.test-*` 或由 `.gitignore` 明确忽略。
+5. 新增审计报告时删除超出滚动窗口的最旧报告，始终保持 10 份。

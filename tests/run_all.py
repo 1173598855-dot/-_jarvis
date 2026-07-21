@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 130
+J.A.R.V.I.S. test suite - Iteration 131
 Run: python tests/run_all.py
 """
 import sys
@@ -288,7 +288,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 130 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 131 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [
@@ -350,6 +350,7 @@ def _run_suite(suite, timeout: int = 0, json_report: str = ""):
             "title": title,
             "tests": 0,
             "passed": 0,
+            "skipped": 0,
             "failures": 0,
             "errors": 0,
             "success": False,
@@ -364,13 +365,18 @@ def _run_suite(suite, timeout: int = 0, json_report: str = ""):
     print()
     print("=" * 60)
     total = result.testsRun
-    passed = total - len(result.failures) - len(result.errors)
-    print(f"Results: {total} tests, {passed} passed, {len(result.failures)} failed, {len(result.errors)} errors")
+    skipped = len(result.skipped)
+    passed = total - len(result.failures) - len(result.errors) - skipped
+    print(
+        f"Results: {total} tests, {passed} passed, {skipped} skipped, "
+        f"{len(result.failures)} failed, {len(result.errors)} errors"
+    )
     print("=" * 60)
     payload = {
         "title": title,
         "tests": total,
         "passed": passed,
+        "skipped": skipped,
         "failures": len(result.failures),
         "errors": len(result.errors),
         "success": result.wasSuccessful(),

@@ -4,9 +4,9 @@
 
 **项目路径**：`C:\GitHub\贾维斯\`
 
-**最后更新**：2026-07-15
+**最后更新**：2026-07-21
 
-**最新迭代**：Iteration 128
+**最新迭代**：Iteration 131
 
 ## 项目目标
 
@@ -65,13 +65,13 @@
 
 ## 当前规模
 
-- `src/`：15 个 Python 文件；服务端源代码统一使用 Python。
+- `src/`：28 个 Python 文件；服务端源代码统一使用 Python。
 - `frontend/src/`：38 个 TypeScript/TSX 文件。
-- `tests/`：42 个 Python 文件；规范聚合套件 208 个用例，完整 discovery 1080 个用例。
-- 前端验证：Vitest 112 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
+- `tests/`：49 个 `test_*.py` 文件；规范聚合套件 295 个用例，完整 discovery 1170 个用例。
+- 前端验证：Vitest 113 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
-- `docs/reports/`：滚动保留最近 10 份审计报告，最新为 `AUDIT_REPORT_128.md`。
+- `docs/reports/`：滚动保留最近 10 份审计报告，当前为 Iteration 122-131。
 
 ## 阶段状态
 
@@ -83,7 +83,7 @@
 | Phase 8 | 进行中 | Plugin SDK、沙箱策略、2 个插件目录 |
 | Phase 9 | 已重构 | Solid.js 六视图指挥中心与响应式导航 |
 | Phase 10 | 已重构 | 真实系统/Token 遥测、状态栏和运行趋势图 |
-| Phase 11 | 进行中 | Python 编排器、角色注册、真实 Ollama 角色执行、错误后恢复、默认拒绝工具 broker 与 TypeScript 多代理协议；模型工具循环和 timeout 隔离待完成 |
+| Phase 11 | 进行中 | 可终止异步角色 Worker、FastAPI/Express 任务通道与终止竞态加固已落地；旧同步 dispatch 迁移、任务持久恢复和模型工具循环待完成 |
 | Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest/Playwright |
 
 ## 启动方式
@@ -116,7 +116,7 @@ npm run dev
 .\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 
 # 静态 AST/语法检查
-.\venv\Scripts\python.exe -m compileall -q src tests
+.\venv\Scripts\python.exe -m compileall -q src tests scripts
 
 # 前端测试与构建
 cd frontend
@@ -135,4 +135,4 @@ npm run build
 - 临时测试输出使用 `.test-*` 命名并保持 Git 忽略。
 - 不把历史审计报告中的测试数量或阶段状态直接当作当前状态。
 
-Current verified test baseline for Iteration 128: aggregate 208; full discovery 1080.
+Current verified test baseline for Iteration 131: aggregate 295 total (293 passed, 2 skipped); full discovery 1170 total (1168 passed, 2 skipped).
