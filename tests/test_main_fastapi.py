@@ -241,13 +241,27 @@ class _FakeRoleTasks:
 
 
 class _FakeRoleDispatch:
-    def __init__(self, *, results=None, error=None, blocking=False):
+    def __init__(
+        self,
+        *,
+        results=None,
+        error=None,
+        blocking=False,
+        supervisor=None,
+    ):
         self.results = results or {}
         self.error = error
         self.calls = []
         self.started = threading.Event()
         self.release = threading.Event()
         self.blocking = blocking
+        self.__supervisor = (
+            supervisor if supervisor is not None else _FakeRoleTasks()
+        )
+
+    @property
+    def supervisor(self):
+        return self.__supervisor
 
     def _call(self, method, args):
         self.calls.append((method, *args))
@@ -553,7 +567,7 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
         from fastapi.testclient import TestClient
         import main_fastapi
 
-        role_tasks = _FakeRoleTasks()
+        role_tasks = role_dispatch.supervisor
         with tempfile.TemporaryDirectory() as memory_dir:
             app_state = main_fastapi.AppState(
                 memory_dir=memory_dir,
@@ -699,7 +713,7 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
         self.assertEqual(resp.json(), {"results": [], "count": 0})
         self.assertEqual(service.calls, [("batch", [])])
 
-    def test_service_failures_have_stable_503_envelopes(self):
+    def test_single_dispatch_failures_have_stable_503_envelopes(self):
         from core.brain.role_dispatch_service import (
             RoleTaskTerminationUnconfirmedError,
             RoleWorkerInvalidResultError,
@@ -724,9 +738,16 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
             ),
         )
         routes = (
-            ("role", "/api/roles/dispatch", {"role_name": "engineer", "prompt": "work"}),
-            ("capability", "/api/roles/dispatch_by_cap", {"capability": "coding", "prompt": "work"}),
-            ("batch", "/api/roles/batch_dispatch", {"tasks": []}),
+            (
+                "role",
+                "/api/roles/dispatch",
+                {"role_name": "engineer", "prompt": "work"},
+            ),
+            (
+                "capability",
+                "/api/roles/dispatch_by_cap",
+                {"capability": "coding", "prompt": "work"},
+            ),
         )
         for method, route, payload in routes:
             for exception_type, code, message in exceptions:
@@ -741,6 +762,84 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
                         "error": {"code": code, "message": message}
                     })
                     self.assertEqual(len(service.calls), 1)
+
+    def test_batch_dispatch_preserves_positional_service_errors_as_200(self):
+        tasks = [
+            {"role": "engineer", "prompt": "first"},
+            {"role": "engineer", "prompt": "second"},
+        ]
+        service = _FakeRoleDispatch(results={"batch": [
+            self.result(task_id="task-first"),
+            self.result(
+                task_id="task-second",
+                status="error",
+                message="Role worker is unavailable",
+            ),
+        ]})
+
+        with self.client(service) as (client, _state):
+            response = client.post(
+                "/api/roles/batch_dispatch",
+                json={"tasks": tasks},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(service.calls, [("batch", tasks)])
+        self.assertEqual(response.json(), {
+            "results": [
+                {
+                    "role_name": "engineer",
+                    "task_id": "task-first",
+                    "status": "success",
+                    "message": "done",
+                },
+                {
+                    "role_name": "engineer",
+                    "task_id": "task-second",
+                    "status": "error",
+                    "message": "Role worker is unavailable",
+                },
+            ],
+            "count": 2,
+        })
+
+    def test_batch_does_not_translate_service_exception_to_top_level_503(self):
+        from core.brain.role_dispatch_service import RoleWorkerUnavailableError
+
+        error = RoleWorkerUnavailableError(
+            "engineer",
+            "task-failed",
+            "Role worker is unavailable",
+        )
+        service = _FakeRoleDispatch(error=error)
+
+        with self.client(service) as (client, _state):
+            with self.assertRaises(RoleWorkerUnavailableError) as raised:
+                client.post(
+                    "/api/roles/batch_dispatch",
+                    json={"tasks": []},
+                )
+
+        self.assertIs(raised.exception, error)
+        self.assertEqual(service.calls, [("batch", [])])
+
+    def test_batch_dispatch_rejects_non_array_tasks_with_exact_400(self):
+        service = _FakeRoleDispatch(results={"batch": []})
+
+        with self.client(service) as (client, _state):
+            response = client.post(
+                "/api/roles/batch_dispatch",
+                json={"tasks": {"role": "engineer"}},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {
+            "error": {
+                "code": "INVALID_REQUEST",
+                "message": "tasks must be an array",
+            }
+        })
+        self.assertEqual(service.calls, [])
 
     def test_compatibility_dispatch_does_not_block_event_loop(self):
         routes = (
@@ -797,7 +896,10 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
 
         order = []
         role_tasks = _FakeRoleTasks(order)
-        role_dispatch = _FakeRoleDispatch(results={})
+        role_dispatch = _FakeRoleDispatch(
+            results={},
+            supervisor=role_tasks,
+        )
         with tempfile.TemporaryDirectory() as memory_dir:
             app_state = main_fastapi.AppState(
                 memory_dir=memory_dir,
@@ -838,8 +940,10 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
         import main_fastapi
 
         role_tasks = _FakeRoleTasks()
-        role_dispatch = _FakeRoleDispatch(results={})
-        role_dispatch._supervisor = role_tasks
+        role_dispatch = _FakeRoleDispatch(
+            results={},
+            supervisor=role_tasks,
+        )
         with tempfile.TemporaryDirectory() as memory_dir:
             with patch.object(
                 main_fastapi,
@@ -857,6 +961,110 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
                 app_state.shutdown()
 
         self.assertEqual(role_tasks.shutdown_calls, 1)
+
+    def test_matching_role_task_and_dispatch_injections_preserve_identity(self):
+        import main_fastapi
+
+        role_tasks = _FakeRoleTasks()
+        role_dispatch = _FakeRoleDispatch(
+            results={},
+            supervisor=role_tasks,
+        )
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                role_tasks=role_tasks,
+                role_dispatch=role_dispatch,
+            )
+            try:
+                self.assertIs(app_state.role_tasks, role_tasks)
+                self.assertIs(app_state.role_dispatch, role_dispatch)
+            finally:
+                app_state.shutdown()
+
+    def test_mismatched_role_task_and_dispatch_injections_are_rejected(self):
+        import main_fastapi
+
+        role_tasks = _FakeRoleTasks()
+        role_dispatch = _FakeRoleDispatch(
+            results={},
+            supervisor=_FakeRoleTasks(),
+        )
+        with tempfile.TemporaryDirectory() as memory_dir:
+            with self.assertRaisesRegex(
+                ValueError,
+                "role_tasks and role_dispatch must share the same supervisor",
+            ):
+                main_fastapi.AppState(
+                    memory_dir=memory_dir,
+                    role_tasks=role_tasks,
+                    role_dispatch=role_dispatch,
+                )
+
+    def test_shutdown_retries_only_resources_that_failed(self):
+        import main_fastapi
+
+        order = []
+        role_tasks = _FakeRoleTasks()
+        role_dispatch = _FakeRoleDispatch(
+            results={},
+            supervisor=role_tasks,
+        )
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                role_tasks=role_tasks,
+                role_dispatch=role_dispatch,
+            )
+            orchestrator_shutdown = app_state.orchestrator.shutdown
+            terminal_close = app_state.terminal.close
+            worker_attempts = 0
+
+            def shutdown_worker():
+                nonlocal worker_attempts
+                worker_attempts += 1
+                order.append("role_tasks")
+                if worker_attempts == 1:
+                    raise RuntimeError("worker shutdown failed")
+
+            def shutdown_orchestrator():
+                order.append("orchestrator")
+                orchestrator_shutdown()
+
+            def shutdown_factory():
+                order.append("agent_factory")
+
+            def close_terminal():
+                order.append("terminal")
+                terminal_close()
+
+            app_state.role_tasks.shutdown = shutdown_worker
+            app_state.orchestrator.shutdown = shutdown_orchestrator
+            app_state.agent_factory.shutdown = shutdown_factory
+            app_state.terminal.close = close_terminal
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "worker shutdown failed",
+            ):
+                app_state.shutdown()
+            self.assertEqual(order, [
+                "role_tasks",
+                "orchestrator",
+                "agent_factory",
+                "terminal",
+            ])
+
+            app_state.shutdown()
+            app_state.shutdown()
+
+        self.assertEqual(order, [
+            "role_tasks",
+            "orchestrator",
+            "agent_factory",
+            "terminal",
+            "role_tasks",
+        ])
 
 
 class TestQueryEndpoints(unittest.TestCase):

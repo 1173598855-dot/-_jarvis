@@ -64,6 +64,10 @@ class RoleDispatchService:
         self._lease_lock = threading.Lock()
         supervisor.add_terminal_observer(self._release_terminal_lease)
 
+    @property
+    def supervisor(self) -> RoleWorkerSupervisor:
+        return self._supervisor
+
     def dispatch_by_role(
         self,
         role_name: str,

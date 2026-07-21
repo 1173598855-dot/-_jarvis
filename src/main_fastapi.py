@@ -325,6 +325,14 @@ class AppState:
         role_tasks: RoleWorkerSupervisor | None = None,
         role_dispatch: RoleDispatchService | None = None,
     ):
+        if role_dispatch is not None:
+            dispatch_supervisor = role_dispatch.supervisor
+            if role_tasks is None:
+                role_tasks = dispatch_supervisor
+            elif role_tasks is not dispatch_supervisor:
+                raise ValueError(
+                    "role_tasks and role_dispatch must share the same supervisor"
+                )
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
         self.memory_store = MemoryStore(memory_dir=memory_dir)
@@ -335,8 +343,6 @@ class AppState:
             orchestrator=self.orchestrator,
             ollama_manager=self.ollama,
         )
-        if role_tasks is None and role_dispatch is not None:
-            role_tasks = role_dispatch._supervisor
         if role_tasks is None:
             role_tasks = RoleWorkerSupervisor(
                 execute_role_task,
@@ -369,7 +375,7 @@ class AppState:
         self.start_time = time.time()
         self.request_count = 0
         self._shutdown_lock = threading.Lock()
-        self._shutdown_complete = False
+        self._shutdown_completed: set[str] = set()
 
     @staticmethod
     def _run_state_key() -> bytes | None:
@@ -378,21 +384,22 @@ class AppState:
 
     def shutdown(self) -> None:
         with self._shutdown_lock:
-            if self._shutdown_complete:
-                return
-            self._shutdown_complete = True
             first_error = None
-            for cleanup in (
-                self.role_tasks.shutdown,
-                self.orchestrator.shutdown,
-                self.agent_factory.shutdown,
-                self.terminal.close,
+            for resource, cleanup in (
+                ("role_tasks", self.role_tasks.shutdown),
+                ("orchestrator", self.orchestrator.shutdown),
+                ("agent_factory", self.agent_factory.shutdown),
+                ("terminal", self.terminal.close),
             ):
+                if resource in self._shutdown_completed:
+                    continue
                 try:
                     cleanup()
                 except Exception as error:
                     if first_error is None:
                         first_error = error
+                else:
+                    self._shutdown_completed.add(resource)
             if first_error is not None:
                 raise first_error
 
@@ -1270,26 +1277,10 @@ async def batch_dispatch(request: Request):
                 "message": "tasks must be an array",
             },
         )
-    try:
-        results = await asyncio.to_thread(
-            state.role_dispatch.batch_dispatch,
-            tasks,
-        )
-    except RoleWorkerUnavailableError:
-        raise _role_dispatch_http_error(
-            "ROLE_WORKER_UNAVAILABLE",
-            "Role worker is unavailable",
-        ) from None
-    except RoleTaskTerminationUnconfirmedError:
-        raise _role_dispatch_http_error(
-            "ROLE_TASK_TERMINATION_UNCONFIRMED",
-            "Worker process termination is not confirmed",
-        ) from None
-    except RoleWorkerInvalidResultError:
-        raise _role_dispatch_http_error(
-            "ROLE_WORKER_INVALID_RESULT",
-            "Role worker returned an invalid result",
-        ) from None
+    results = await asyncio.to_thread(
+        state.role_dispatch.batch_dispatch,
+        tasks,
+    )
     return {"results": [r.to_dict() for r in results], "count": len(results)}
 
 

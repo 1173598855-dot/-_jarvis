@@ -161,6 +161,14 @@ class _FakeSupervisor:
 
 
 class TestRoleDispatchServiceSelectionAndMapping(unittest.TestCase):
+    def test_supervisor_property_is_read_only_and_preserves_identity(self) -> None:
+        supervisor = _FakeSupervisor()
+        service = RoleDispatchService(_registry(), supervisor)
+
+        self.assertIs(service.supervisor, supervisor)
+        with self.assertRaises(AttributeError):
+            service.supervisor = _FakeSupervisor()
+
     def test_role_and_highest_priority_capability_selection(self) -> None:
         supervisor = _FakeSupervisor()
         service = RoleDispatchService(
