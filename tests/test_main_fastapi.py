@@ -192,9 +192,14 @@ class TestRunRecoveryLifespan(unittest.TestCase):
 
 
 class _FakeRoleTasks:
-    def __init__(self):
+    def __init__(self, shutdown_order=None):
         self.records = {}
         self.shutdown_calls = 0
+        self.shutdown_order = shutdown_order
+        self.terminal_observers = []
+
+    def add_terminal_observer(self, observer):
+        self.terminal_observers.append(observer)
 
     def submit(self, request):
         from core.contracts.worker_protocol import WorkerTaskRecord, WorkerTaskStatus
@@ -231,6 +236,36 @@ class _FakeRoleTasks:
 
     def shutdown(self):
         self.shutdown_calls += 1
+        if self.shutdown_order is not None:
+            self.shutdown_order.append("role_tasks")
+
+
+class _FakeRoleDispatch:
+    def __init__(self, *, results=None, error=None, blocking=False):
+        self.results = results or {}
+        self.error = error
+        self.calls = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.blocking = blocking
+
+    def _call(self, method, args):
+        self.calls.append((method, *args))
+        self.started.set()
+        if self.blocking:
+            self.release.wait(timeout=3)
+        if self.error is not None:
+            raise self.error
+        return self.results[method]
+
+    def dispatch_by_role(self, role_name, prompt, timeout):
+        return self._call("role", (role_name, prompt, timeout))
+
+    def dispatch_by_capability(self, capability, prompt, timeout):
+        return self._call("capability", (capability, prompt, timeout))
+
+    def batch_dispatch(self, tasks):
+        return self._call("batch", (tasks,))
 
 
 class _BlockingRoleTasks(_FakeRoleTasks):
@@ -513,62 +548,315 @@ class TestRequestBodyLimitMiddleware(unittest.TestCase):
 # ============================================================
 
 class TestRoleDispatchEndpoints(unittest.TestCase):
-    """Test Phase 11 role-driven dispatch endpoints"""
-
-    @classmethod
-    def setUpClass(cls):
-        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    @contextmanager
+    def client(self, role_dispatch):
         from fastapi.testclient import TestClient
-
         import main_fastapi
-        cls.client = TestClient(main_fastapi.app)
 
-    def test_dispatch_by_role_valid(self):
-        resp = self.client.post("/api/roles/dispatch", json={
-            "role_name": "engineer", "prompt": "write a test", "timeout": 30,
+        role_tasks = _FakeRoleTasks()
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                role_tasks=role_tasks,
+                role_dispatch=role_dispatch,
+            )
+            application = main_fastapi.create_app(app_state)
+            with TestClient(application) as client:
+                yield client, app_state
+
+    @staticmethod
+    def result(role_name="engineer", task_id="task-worker", status="success", message="done"):
+        from core.brain.agent_factory import DispatchResult
+
+        return DispatchResult(role_name, task_id, status, message)
+
+    def test_dispatch_by_role_forwards_exact_arguments_and_response(self):
+        service = _FakeRoleDispatch(results={"role": self.result()})
+        with self.client(service) as (client, _state):
+            response = client.post(
+                "/api/roles/dispatch",
+                json={
+                    "role_name": "engineer",
+                    "prompt": "write a test",
+                    "timeout": 30,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(service.calls, [("role", "engineer", "write a test", 30)])
+        self.assertEqual(response.json(), {
+            "role_name": "engineer",
+            "task_id": "task-worker",
+            "status": "success",
+            "message": "done",
         })
-        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
 
     def test_dispatch_by_role_missing_role_name(self):
-        resp = self.client.post("/api/roles/dispatch", json={"prompt": "test"})
+        service = _FakeRoleDispatch(results={"role": self.result()})
+        with self.client(service) as (client, _state):
+            resp = client.post("/api/roles/dispatch", json={"prompt": "test"})
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(service.calls, [])
 
-    def test_dispatch_by_role_invalid_role(self):
-        resp = self.client.post("/api/roles/dispatch", json={
-            "role_name": "nonexistent_role_xyz", "prompt": "test",
+    def test_dispatch_by_role_maps_service_no_role_without_registry_precheck(self):
+        service = _FakeRoleDispatch(results={
+            "role": self.result(
+                role_name="nonexistent_role_xyz",
+                task_id="",
+                status="no_role",
+                message="service owns selection",
+            )
         })
+        with self.client(service) as (client, app_state):
+            with patch.object(
+                app_state.role_registry,
+                "get",
+                side_effect=AssertionError("adapter registry precheck"),
+            ):
+                resp = client.post("/api/roles/dispatch", json={
+                    "role_name": "nonexistent_role_xyz", "prompt": "test",
+                })
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"]["code"], "ROLE_NOT_FOUND")
+        self.assertEqual(service.calls, [
+            ("role", "nonexistent_role_xyz", "test", 300)
+        ])
 
-    def test_dispatch_by_capability_coding(self):
-        resp = self.client.post("/api/roles/dispatch_by_cap", json={
-            "capability": "coding", "prompt": "fix bug",
+    def test_dispatch_by_capability_forwards_exact_arguments_and_response(self):
+        service = _FakeRoleDispatch(results={
+            "capability": self.result(role_name="reviewer", task_id="task-cap")
         })
-        self.assertIn(resp.status_code, [200, 404])
+        with self.client(service) as (client, _state):
+            resp = client.post("/api/roles/dispatch_by_cap", json={
+                "capability": "coding", "prompt": "fix bug", "timeout": 19,
+            })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(service.calls, [("capability", "coding", "fix bug", 19)])
+        self.assertEqual(resp.json(), {
+            "role_name": "reviewer",
+            "task_id": "task-cap",
+            "status": "success",
+            "message": "done",
+        })
 
-    def test_dispatch_by_capability_unknown(self):
-        resp = self.client.post("/api/roles/dispatch_by_cap", json={
-            "capability": "nonexistent_cap_xyz", "prompt": "test",
+    def test_dispatch_by_capability_maps_service_no_capability(self):
+        service = _FakeRoleDispatch(results={
+            "capability": self.result(
+                role_name="",
+                task_id="",
+                status="no_capability",
+                message="service owns selection",
+            )
         })
+        with self.client(service) as (client, _state):
+            resp = client.post("/api/roles/dispatch_by_cap", json={
+                "capability": "nonexistent_cap_xyz", "prompt": "test",
+            })
         self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"]["code"], "CAPABILITY_NOT_FOUND")
+        self.assertEqual(service.calls, [
+            ("capability", "nonexistent_cap_xyz", "test", 300)
+        ])
 
-    def test_batch_dispatch_returns_results(self):
-        resp = self.client.post("/api/roles/batch_dispatch", json={
-            "tasks": [
-                {"role_name": "engineer", "prompt": "task 1", "timeout": 30},
-                {"role_name": "reviewer", "prompt": "task 2", "timeout": 30},
-            ]
+    def test_batch_dispatch_forwards_tasks_and_serializes_results(self):
+        tasks = [
+            {"role": "engineer", "prompt": "task 1", "timeout": 30},
+            {"capability": "review", "prompt": "task 2"},
+        ]
+        service = _FakeRoleDispatch(results={"batch": [
+            self.result(task_id="task-one"),
+            self.result(role_name="reviewer", task_id="task-two"),
+        ]})
+        with self.client(service) as (client, _state):
+            resp = client.post("/api/roles/batch_dispatch", json={"tasks": tasks})
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(service.calls, [("batch", tasks)])
+        self.assertEqual(resp.json(), {
+            "results": [
+                {
+                    "role_name": "engineer",
+                    "task_id": "task-one",
+                    "status": "success",
+                    "message": "done",
+                },
+                {
+                    "role_name": "reviewer",
+                    "task_id": "task-two",
+                    "status": "success",
+                    "message": "done",
+                },
+            ],
+            "count": 2,
         })
-        self.assertIn(resp.status_code, [200, 500, 502])  # 502 when Ollama unavailable
-        if resp.status_code == 200:
-            data = resp.json()
-            self.assertIn("results", data)
-            self.assertIn("count", data)
 
     def test_batch_dispatch_empty_tasks(self):
-        resp = self.client.post("/api/roles/batch_dispatch", json={"tasks": []})
-        self.assertIn(resp.status_code, [200, 422])
+        service = _FakeRoleDispatch(results={"batch": []})
+        with self.client(service) as (client, _state):
+            resp = client.post("/api/roles/batch_dispatch", json={"tasks": []})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"results": [], "count": 0})
+        self.assertEqual(service.calls, [("batch", [])])
+
+    def test_service_failures_have_stable_503_envelopes(self):
+        from core.brain.role_dispatch_service import (
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+            RoleWorkerUnavailableError,
+        )
+
+        exceptions = (
+            (
+                RoleWorkerUnavailableError,
+                "ROLE_WORKER_UNAVAILABLE",
+                "Role worker is unavailable",
+            ),
+            (
+                RoleTaskTerminationUnconfirmedError,
+                "ROLE_TASK_TERMINATION_UNCONFIRMED",
+                "Worker process termination is not confirmed",
+            ),
+            (
+                RoleWorkerInvalidResultError,
+                "ROLE_WORKER_INVALID_RESULT",
+                "Role worker returned an invalid result",
+            ),
+        )
+        routes = (
+            ("role", "/api/roles/dispatch", {"role_name": "engineer", "prompt": "work"}),
+            ("capability", "/api/roles/dispatch_by_cap", {"capability": "coding", "prompt": "work"}),
+            ("batch", "/api/roles/batch_dispatch", {"tasks": []}),
+        )
+        for method, route, payload in routes:
+            for exception_type, code, message in exceptions:
+                with self.subTest(route=route, exception=exception_type.__name__):
+                    service = _FakeRoleDispatch(
+                        error=exception_type("engineer", "task-failed", message)
+                    )
+                    with self.client(service) as (client, _state):
+                        response = client.post(route, json=payload)
+                    self.assertEqual(response.status_code, 503, response.text)
+                    self.assertEqual(response.json(), {
+                        "error": {"code": code, "message": message}
+                    })
+                    self.assertEqual(len(service.calls), 1)
+
+    def test_compatibility_dispatch_does_not_block_event_loop(self):
+        routes = (
+            (
+                "role",
+                "/api/roles/dispatch",
+                {"role_name": "engineer", "prompt": "work"},
+                self.result(),
+            ),
+            (
+                "capability",
+                "/api/roles/dispatch_by_cap",
+                {"capability": "coding", "prompt": "work"},
+                self.result(),
+            ),
+            (
+                "batch",
+                "/api/roles/batch_dispatch",
+                {"tasks": []},
+                [],
+            ),
+        )
+        for method, route, payload, result in routes:
+            with self.subTest(route=route):
+                service = _FakeRoleDispatch(
+                    results={method: result},
+                    blocking=True,
+                )
+                with self.client(service) as (client, _state):
+                    outcome = {}
+
+                    def dispatch():
+                        outcome["response"] = client.post(route, json=payload)
+
+                    thread = threading.Thread(target=dispatch, daemon=True)
+                    thread.start()
+                    self.assertTrue(service.started.wait(timeout=1))
+                    started = time.monotonic()
+                    try:
+                        health = client.get("/api/health")
+                    finally:
+                        service.release.set()
+                    elapsed = time.monotonic() - started
+                    thread.join(timeout=2)
+
+                self.assertEqual(health.status_code, 200)
+                self.assertLess(elapsed, 0.75)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(outcome["response"].status_code, 200)
+
+    def test_lifespan_shutdown_is_worker_first_and_idempotent(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        order = []
+        role_tasks = _FakeRoleTasks(order)
+        role_dispatch = _FakeRoleDispatch(results={})
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                role_tasks=role_tasks,
+                role_dispatch=role_dispatch,
+            )
+            orchestrator_shutdown = app_state.orchestrator.shutdown
+            terminal_close = app_state.terminal.close
+
+            def shutdown_orchestrator():
+                order.append("orchestrator")
+                orchestrator_shutdown()
+
+            def shutdown_factory():
+                order.append("agent_factory")
+
+            def close_terminal():
+                order.append("terminal")
+                terminal_close()
+
+            app_state.orchestrator.shutdown = shutdown_orchestrator
+            app_state.agent_factory.shutdown = shutdown_factory
+            app_state.terminal.close = close_terminal
+            application = main_fastapi.create_app(app_state)
+            with TestClient(application) as client:
+                self.assertEqual(client.get("/api/health").status_code, 200)
+
+            app_state.shutdown()
+            app_state.shutdown()
+
+        self.assertEqual(role_tasks.shutdown_calls, 1)
+        self.assertEqual(
+            order,
+            ["role_tasks", "orchestrator", "agent_factory", "terminal"],
+        )
+
+    def test_injected_role_dispatch_reuses_its_supervisor(self):
+        import main_fastapi
+
+        role_tasks = _FakeRoleTasks()
+        role_dispatch = _FakeRoleDispatch(results={})
+        role_dispatch._supervisor = role_tasks
+        with tempfile.TemporaryDirectory() as memory_dir:
+            with patch.object(
+                main_fastapi,
+                "RoleWorkerSupervisor",
+                side_effect=AssertionError("constructed a second supervisor"),
+            ):
+                app_state = main_fastapi.AppState(
+                    memory_dir=memory_dir,
+                    role_dispatch=role_dispatch,
+                )
+            try:
+                self.assertIs(app_state.role_tasks, role_tasks)
+                self.assertIs(app_state.role_dispatch, role_dispatch)
+            finally:
+                app_state.shutdown()
+
+        self.assertEqual(role_tasks.shutdown_calls, 1)
 
 
 class TestQueryEndpoints(unittest.TestCase):

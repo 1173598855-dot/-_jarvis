@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -58,6 +59,12 @@ from app.run_lifecycle import RunLifecycleCoordinator
 from core.brain.agent_factory import AgentFactory
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType
 from core.brain.orchestrator import AgentTask, Orchestrator
+from core.brain.role_dispatch_service import (
+    RoleDispatchService,
+    RoleTaskTerminationUnconfirmedError,
+    RoleWorkerInvalidResultError,
+    RoleWorkerUnavailableError,
+)
 from core.brain.role_worker import (
     RoleWorkerSupervisor,
     WorkerTaskTerminalError,
@@ -204,12 +211,7 @@ async def lifespan(_app: FastAPI):
         logger.info("J.A.R.V.I.S. FastAPI server started on http://127.0.0.1:8080")
         yield
     finally:
-        try:
-            app_state.role_tasks.shutdown()
-            app_state.orchestrator.shutdown()
-            app_state.agent_factory.shutdown()
-        finally:
-            app_state.terminal.close()
+        app_state.shutdown()
         logger.info("J.A.R.V.I.S. FastAPI server shutdown complete")
 
 
@@ -321,6 +323,7 @@ class AppState:
         terminal=None,
         run_lifecycle: RunLifecycleCoordinator | None = None,
         role_tasks: RoleWorkerSupervisor | None = None,
+        role_dispatch: RoleDispatchService | None = None,
     ):
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
@@ -332,6 +335,8 @@ class AppState:
             orchestrator=self.orchestrator,
             ollama_manager=self.ollama,
         )
+        if role_tasks is None and role_dispatch is not None:
+            role_tasks = role_dispatch._supervisor
         if role_tasks is None:
             role_tasks = RoleWorkerSupervisor(
                 execute_role_task,
@@ -345,6 +350,11 @@ class AppState:
                 ),
             )
         self.role_tasks = role_tasks
+        self.role_dispatch = (
+            role_dispatch
+            if role_dispatch is not None
+            else RoleDispatchService(self.role_registry, self.role_tasks)
+        )
         if run_lifecycle is None:
             repository = FileRunStateRepository(
                 Path(memory_dir),
@@ -358,11 +368,33 @@ class AppState:
         self.recovery_outcome = None
         self.start_time = time.time()
         self.request_count = 0
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
 
     @staticmethod
     def _run_state_key() -> bytes | None:
         value = os.environ.get("JARVIS_RUN_STATE_KEY")
         return value.encode("utf-8") if value else None
+
+    def shutdown(self) -> None:
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+            first_error = None
+            for cleanup in (
+                self.role_tasks.shutdown,
+                self.orchestrator.shutdown,
+                self.agent_factory.shutdown,
+                self.terminal.close,
+            ):
+                try:
+                    cleanup()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
 
 
 _active_state: ContextVar[Optional[AppState]] = ContextVar(
@@ -403,7 +435,7 @@ class _StateBindingMiddleware:
 
 _default_state = AppState()
 state = _StateProxy(_default_state)
-atexit.register(_default_state.terminal.close)
+atexit.register(_default_state.shutdown)
 app.state.jarvis_state = _default_state
 app.add_middleware(_StateBindingMiddleware)
 
@@ -974,6 +1006,13 @@ def _validate_role_timeout(timeout: object) -> int:
     return timeout
 
 
+def _role_dispatch_http_error(code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={"code": code, "message": message},
+    )
+
+
 @app.post("/api/roles/tasks", status_code=202)
 async def create_role_task(request: Request):
     data = await _read_role_body(request)
@@ -1131,7 +1170,29 @@ async def dispatch_by_role(request: Request):
             },
         )
     timeout = _validate_role_timeout(data.get("timeout", 300))
-    if state.role_registry.get(role_name) is None:
+    try:
+        result = await asyncio.to_thread(
+            state.role_dispatch.dispatch_by_role,
+            role_name,
+            prompt,
+            timeout,
+        )
+    except RoleWorkerUnavailableError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_UNAVAILABLE",
+            "Role worker is unavailable",
+        ) from None
+    except RoleTaskTerminationUnconfirmedError:
+        raise _role_dispatch_http_error(
+            "ROLE_TASK_TERMINATION_UNCONFIRMED",
+            "Worker process termination is not confirmed",
+        ) from None
+    except RoleWorkerInvalidResultError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_INVALID_RESULT",
+            "Role worker returned an invalid result",
+        ) from None
+    if result.status == "no_role":
         raise HTTPException(
             status_code=404,
             detail={
@@ -1139,9 +1200,6 @@ async def dispatch_by_role(request: Request):
                 "message": f"Role '{role_name}' not found",
             },
         )
-    result = state.agent_factory.dispatch_by_role(
-        role_name, prompt, timeout=timeout
-    )
     return result.to_dict()
 
 @app.post("/api/roles/dispatch_by_cap")
@@ -1167,9 +1225,28 @@ async def dispatch_by_capability(request: Request):
             },
         )
     timeout = _validate_role_timeout(data.get("timeout", 300))
-    result = state.agent_factory.dispatch_by_capability(
-        capability, prompt, timeout=timeout
-    )
+    try:
+        result = await asyncio.to_thread(
+            state.role_dispatch.dispatch_by_capability,
+            capability,
+            prompt,
+            timeout,
+        )
+    except RoleWorkerUnavailableError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_UNAVAILABLE",
+            "Role worker is unavailable",
+        ) from None
+    except RoleTaskTerminationUnconfirmedError:
+        raise _role_dispatch_http_error(
+            "ROLE_TASK_TERMINATION_UNCONFIRMED",
+            "Worker process termination is not confirmed",
+        ) from None
+    except RoleWorkerInvalidResultError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_INVALID_RESULT",
+            "Role worker returned an invalid result",
+        ) from None
     if result.status == "no_capability":
         raise HTTPException(
             status_code=404,
@@ -1193,7 +1270,26 @@ async def batch_dispatch(request: Request):
                 "message": "tasks must be an array",
             },
         )
-    results = state.agent_factory.batch_dispatch(tasks)
+    try:
+        results = await asyncio.to_thread(
+            state.role_dispatch.batch_dispatch,
+            tasks,
+        )
+    except RoleWorkerUnavailableError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_UNAVAILABLE",
+            "Role worker is unavailable",
+        ) from None
+    except RoleTaskTerminationUnconfirmedError:
+        raise _role_dispatch_http_error(
+            "ROLE_TASK_TERMINATION_UNCONFIRMED",
+            "Worker process termination is not confirmed",
+        ) from None
+    except RoleWorkerInvalidResultError:
+        raise _role_dispatch_http_error(
+            "ROLE_WORKER_INVALID_RESULT",
+            "Role worker returned an invalid result",
+        ) from None
     return {"results": [r.to_dict() for r in results], "count": len(results)}
 
 
