@@ -5,10 +5,14 @@ do_GET routing, do_POST routing, and individual handle_* methods
 using unittest.mock - no live HTTP server required.
 """
 import io
+import http.client
 import json
 import os
 import sys
+import threading
 import unittest
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +48,81 @@ def _make_handler(command="GET", path="/api/health", headers=None):
     handler.protocol_version = "HTTP/1.1"
     handler.log_message = MagicMock()
     return handler
+
+
+class _FakeRoleTasks:
+    def __init__(self, order=None, failures=0):
+        self.order = order
+        self.failures = failures
+        self.shutdown_calls = 0
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        if self.order is not None:
+            self.order.append("role_tasks")
+        if self.shutdown_calls <= self.failures:
+            raise RuntimeError("worker shutdown failed")
+
+
+class _FakeRoleDispatch:
+    def __init__(self, supervisor, results=None, errors=None):
+        self.supervisor = supervisor
+        self.results = results or {}
+        self.errors = errors or {}
+        self.calls = []
+
+    def dispatch_by_role(self, role_name, prompt, timeout):
+        self.calls.append(("role", role_name, prompt, timeout))
+        if "role" in self.errors:
+            raise self.errors["role"]
+        return self.results["role"]
+
+    def dispatch_by_capability(self, capability, prompt, timeout):
+        self.calls.append(("capability", capability, prompt, timeout))
+        if "capability" in self.errors:
+            raise self.errors["capability"]
+        return self.results["capability"]
+
+    def batch_dispatch(self, tasks):
+        self.calls.append(("batch", tasks))
+        return self.results["batch"]
+
+
+class _FakeHTTPState:
+    def __init__(self, role_dispatch=None):
+        self.role_dispatch = role_dispatch
+        self.agent_factory = MagicMock()
+        self.role_registry = MagicMock()
+        self.start_time = 1.0
+        self.request_count = 0
+
+    def increment_requests(self):
+        self.request_count += 1
+
+
+@contextmanager
+def _running_http_server(app_state):
+    server = _main.create_http_server("127.0.0.1", 0, app_state=app_state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def _http_json(address, method, path, payload=None):
+    connection = http.client.HTTPConnection(*address, timeout=2)
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {} if body is None else {"Content-Type": "application/json"}
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
 
 
 class TestMainHTTPHelpers(unittest.TestCase):
@@ -1296,6 +1375,398 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         self.assertIn("totals", parsed)
         self.assertIn("samples", parsed)
         self.assertIn("session_started_at", parsed)
+
+
+class TestMainHTTPRoleDispatchWorkerAdapter(unittest.TestCase):
+    @staticmethod
+    def result(
+        role_name="engineer",
+        task_id="task-worker",
+        status="success",
+        message="done",
+    ):
+        from core.brain.agent_factory import DispatchResult
+
+        return DispatchResult(role_name, task_id, status, message)
+
+    def test_injected_role_and_capability_routes_forward_exact_arguments(self):
+        role_tasks = _FakeRoleTasks()
+        service = _FakeRoleDispatch(
+            role_tasks,
+            results={
+                "role": self.result(),
+                "capability": self.result("reviewer", "task-cap"),
+            },
+        )
+        app_state = _FakeHTTPState(service)
+
+        with _running_http_server(app_state) as address:
+            role_status, role_body = _http_json(
+                address,
+                "POST",
+                "/api/roles/dispatch",
+                {
+                    "role_name": "engineer",
+                    "prompt": "write a test",
+                    "timeout": 30,
+                },
+            )
+            cap_status, cap_body = _http_json(
+                address,
+                "POST",
+                "/api/roles/dispatch_by_cap",
+                {
+                    "capability": "coding",
+                    "prompt": "review it",
+                    "timeout": 19,
+                },
+            )
+
+        self.assertEqual(role_status, 200)
+        self.assertEqual(role_body, {
+            "role_name": "engineer",
+            "task_id": "task-worker",
+            "status": "success",
+            "message": "done",
+        })
+        self.assertEqual(cap_status, 200)
+        self.assertEqual(cap_body, {
+            "role_name": "reviewer",
+            "task_id": "task-cap",
+            "status": "success",
+            "message": "done",
+        })
+        self.assertEqual(service.calls, [
+            ("role", "engineer", "write a test", 30),
+            ("capability", "coding", "review it", 19),
+        ])
+        app_state.agent_factory.dispatch_by_role.assert_not_called()
+        app_state.agent_factory.dispatch_by_capability.assert_not_called()
+
+    def test_unknown_role_and_capability_are_mapped_after_service_call(self):
+        role_tasks = _FakeRoleTasks()
+        service = _FakeRoleDispatch(
+            role_tasks,
+            results={
+                "role": self.result(
+                    "missing-role",
+                    "",
+                    "no_role",
+                    "service owns selection",
+                ),
+                "capability": self.result(
+                    "",
+                    "",
+                    "no_capability",
+                    "service owns selection",
+                ),
+            },
+        )
+        app_state = _FakeHTTPState(service)
+        app_state.role_registry.get.side_effect = AssertionError(
+            "adapter registry precheck"
+        )
+
+        with _running_http_server(app_state) as address:
+            role_status, role_body = _http_json(
+                address,
+                "POST",
+                "/api/roles/dispatch",
+                {"role_name": "missing-role", "prompt": "work"},
+            )
+            cap_status, cap_body = _http_json(
+                address,
+                "POST",
+                "/api/roles/dispatch_by_cap",
+                {"capability": "missing-cap", "prompt": "work"},
+            )
+
+        self.assertEqual(role_status, 404)
+        self.assertEqual(role_body["error"]["code"], "ROLE_NOT_FOUND")
+        self.assertEqual(cap_status, 404)
+        self.assertEqual(
+            cap_body["error"]["code"],
+            "CAPABILITY_NOT_FOUND",
+        )
+        self.assertEqual(service.calls, [
+            ("role", "missing-role", "work", 300),
+            ("capability", "missing-cap", "work", 300),
+        ])
+        app_state.role_registry.get.assert_not_called()
+
+    def test_single_routes_map_three_worker_failures_to_exact_503(self):
+        from core.brain.role_dispatch_service import (
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+            RoleWorkerUnavailableError,
+        )
+
+        failures = (
+            (
+                RoleWorkerUnavailableError,
+                "ROLE_WORKER_UNAVAILABLE",
+                "Role worker is unavailable",
+            ),
+            (
+                RoleTaskTerminationUnconfirmedError,
+                "ROLE_TASK_TERMINATION_UNCONFIRMED",
+                "Worker process termination is not confirmed",
+            ),
+            (
+                RoleWorkerInvalidResultError,
+                "ROLE_WORKER_INVALID_RESULT",
+                "Role worker returned an invalid result",
+            ),
+        )
+        routes = (
+            (
+                "role",
+                "/api/roles/dispatch",
+                {"role_name": "engineer", "prompt": "work"},
+            ),
+            (
+                "capability",
+                "/api/roles/dispatch_by_cap",
+                {"capability": "coding", "prompt": "work"},
+            ),
+        )
+
+        for method, route, payload in routes:
+            for error_type, code, message in failures:
+                with self.subTest(route=route, error=error_type.__name__):
+                    role_tasks = _FakeRoleTasks()
+                    service = _FakeRoleDispatch(
+                        role_tasks,
+                        errors={
+                            method: error_type(
+                                "engineer",
+                                "task-failed",
+                                message,
+                            )
+                        },
+                    )
+                    app_state = _FakeHTTPState(service)
+                    with _running_http_server(app_state) as address:
+                        status, body = _http_json(
+                            address,
+                            "POST",
+                            route,
+                            payload,
+                        )
+
+                    self.assertEqual(status, 503)
+                    self.assertEqual(body, {
+                        "error": {"code": code, "message": message}
+                    })
+                    self.assertEqual(len(service.calls), 1)
+
+    def test_batch_forwards_once_and_preserves_positional_errors_as_200(self):
+        tasks = [
+            {"role": "engineer", "prompt": "first"},
+            {"capability": "review", "prompt": "second"},
+        ]
+        role_tasks = _FakeRoleTasks()
+        service = _FakeRoleDispatch(
+            role_tasks,
+            results={
+                "batch": [
+                    self.result(task_id="task-one"),
+                    self.result(
+                        "reviewer",
+                        "task-two",
+                        "error",
+                        "Role worker is unavailable",
+                    ),
+                ]
+            },
+        )
+        app_state = _FakeHTTPState(service)
+
+        with _running_http_server(app_state) as address:
+            status, body = _http_json(
+                address,
+                "POST",
+                "/api/roles/batch_dispatch",
+                {"tasks": tasks},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(service.calls, [("batch", tasks)])
+        self.assertEqual(body, {
+            "results": [
+                {
+                    "role_name": "engineer",
+                    "task_id": "task-one",
+                    "status": "success",
+                    "message": "done",
+                },
+                {
+                    "role_name": "reviewer",
+                    "task_id": "task-two",
+                    "status": "error",
+                    "message": "Role worker is unavailable",
+                },
+            ],
+            "count": 2,
+        })
+        app_state.agent_factory.batch_dispatch.assert_not_called()
+
+
+class TestMainHTTPStateLifecycle(unittest.TestCase):
+    def test_create_http_server_does_not_leak_constructor_socket(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            server = _main.create_http_server("127.0.0.1", 0)
+            server.server_close()
+
+        resource_warnings = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, ResourceWarning)
+        ]
+        self.assertEqual(resource_warnings, [])
+
+    def test_bound_server_uses_injected_state_without_mutating_default(self):
+        default_state = _main.state
+        injected_state = _FakeHTTPState()
+
+        with _running_http_server(injected_state) as address:
+            status, body = _http_json(address, "GET", "/api/health")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["requests"], 1)
+        self.assertEqual(injected_state.request_count, 1)
+        self.assertIs(_main.state, default_state)
+        self.assertIs(_main.JARVISHandler.app_state, default_state)
+
+    def test_injected_dispatch_reuses_supervisor_and_mismatch_is_rejected(self):
+        role_tasks = _FakeRoleTasks()
+        role_dispatch = _FakeRoleDispatch(role_tasks)
+        terminal = MagicMock()
+
+        with patch.object(
+            _main,
+            "RoleWorkerSupervisor",
+            side_effect=AssertionError("constructed a second supervisor"),
+        ):
+            app_state = _main.AppState(
+                terminal=terminal,
+                role_dispatch=role_dispatch,
+            )
+        try:
+            self.assertIs(app_state.role_tasks, role_tasks)
+            self.assertIs(app_state.role_dispatch, role_dispatch)
+        finally:
+            app_state.shutdown()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "role_tasks and role_dispatch must share the same supervisor",
+        ):
+            _main.AppState(
+                terminal=MagicMock(),
+                role_tasks=_FakeRoleTasks(),
+                role_dispatch=role_dispatch,
+            )
+
+    def test_shutdown_is_worker_first_and_idempotent(self):
+        order = []
+        role_tasks = _FakeRoleTasks(order)
+        role_dispatch = _FakeRoleDispatch(role_tasks)
+        terminal = MagicMock()
+        terminal.close.side_effect = lambda: order.append("terminal")
+        app_state = _main.AppState(
+            terminal=terminal,
+            role_tasks=role_tasks,
+            role_dispatch=role_dispatch,
+        )
+        original_orchestrator_shutdown = app_state.orchestrator.shutdown
+
+        def shutdown_orchestrator():
+            order.append("orchestrator")
+            original_orchestrator_shutdown()
+
+        app_state.orchestrator.shutdown = shutdown_orchestrator
+        app_state.agent_factory.shutdown = lambda: order.append("agent_factory")
+
+        app_state.shutdown()
+        app_state.shutdown()
+
+        self.assertEqual(order, [
+            "role_tasks",
+            "orchestrator",
+            "agent_factory",
+            "terminal",
+        ])
+        self.assertEqual(role_tasks.shutdown_calls, 1)
+
+    def test_shutdown_retries_only_failed_resources(self):
+        order = []
+        role_tasks = _FakeRoleTasks(order, failures=1)
+        role_dispatch = _FakeRoleDispatch(role_tasks)
+        terminal = MagicMock()
+        terminal.close.side_effect = lambda: order.append("terminal")
+        app_state = _main.AppState(
+            terminal=terminal,
+            role_tasks=role_tasks,
+            role_dispatch=role_dispatch,
+        )
+        original_orchestrator_shutdown = app_state.orchestrator.shutdown
+
+        def shutdown_orchestrator():
+            order.append("orchestrator")
+            original_orchestrator_shutdown()
+
+        app_state.orchestrator.shutdown = shutdown_orchestrator
+        app_state.agent_factory.shutdown = lambda: order.append("agent_factory")
+
+        with self.assertRaisesRegex(RuntimeError, "worker shutdown failed"):
+            app_state.shutdown()
+        app_state.shutdown()
+        app_state.shutdown()
+
+        self.assertEqual(order, [
+            "role_tasks",
+            "orchestrator",
+            "agent_factory",
+            "terminal",
+            "role_tasks",
+        ])
+        self.assertEqual(role_tasks.shutdown_calls, 2)
+
+    def test_run_server_closes_server_and_active_state_from_finally(self):
+        active_state = MagicMock()
+        fake_server = MagicMock()
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        default_state = _main.state
+
+        with patch.object(
+            _main,
+            "create_http_server",
+            return_value=fake_server,
+        ) as create_server:
+            _main.run_server("127.0.0.1", 0, app_state=active_state)
+
+        create_server.assert_called_once_with(
+            "127.0.0.1",
+            0,
+            app_state=active_state,
+        )
+        fake_server.shutdown.assert_called_once_with()
+        fake_server.server_close.assert_called_once_with()
+        active_state.shutdown.assert_called_once_with()
+        self.assertIs(_main.state, default_state)
+
+    def test_atexit_registers_state_shutdown(self):
+        with patch("atexit.register") as register:
+            module = _load_main()
+        try:
+            callback = register.call_args.args[0]
+            self.assertIs(callback.__self__, module.state)
+            self.assertIs(callback.__func__, type(module.state).shutdown)
+        finally:
+            cleanup = getattr(module.state, "shutdown", module.state.terminal.close)
+            cleanup()
 
 class TestMainHTTPEdgeCases(unittest.TestCase):
 

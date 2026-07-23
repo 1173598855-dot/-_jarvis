@@ -52,6 +52,7 @@ class _IPv4HTTPServer(HTTPServer):
     """强制 IPv4 绑定的 HTTP 服务器"""
 
     def server_bind(self):
+        self.socket.close()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
@@ -63,7 +64,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType  # noqa: E402
 from core.brain.agent_factory import AgentFactory  # noqa: E402
 from core.brain.orchestrator import AgentTask, Orchestrator  # noqa: E402
+from core.brain.role_dispatch_service import (  # noqa: E402
+    RoleDispatchService,
+    RoleTaskTerminationUnconfirmedError,
+    RoleWorkerInvalidResultError,
+    RoleWorkerUnavailableError,
+)
 from core.brain.role_registry import create_default_registry  # noqa: E402
+from core.brain.role_worker import (  # noqa: E402
+    RoleWorkerSupervisor,
+    apply_worker_token_usage,
+    execute_role_task,
+)
 from core.kernel.ollama_manager import OllamaManager  # noqa: E402
 from core.kernel.plugin_sdk import global_plugin_manager  # noqa: E402
 from core.kernel.runtime_security import (  # noqa: E402
@@ -132,7 +144,20 @@ def _configured_allowed_origins() -> list[str]:
 
 class AppState:
     """应用全局状态"""
-    def __init__(self, terminal=None):
+    def __init__(
+        self,
+        terminal=None,
+        role_tasks: RoleWorkerSupervisor | None = None,
+        role_dispatch: RoleDispatchService | None = None,
+    ):
+        if role_dispatch is not None:
+            dispatch_supervisor = role_dispatch.supervisor
+            if role_tasks is None:
+                role_tasks = dispatch_supervisor
+            elif role_tasks is not dispatch_supervisor:
+                raise ValueError(
+                    "role_tasks and role_dispatch must share the same supervisor"
+                )
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
         self.memory_store = MemoryStore(memory_dir=".auto-memory")
@@ -143,17 +168,58 @@ class AppState:
             orchestrator=self.orchestrator,
             ollama_manager=self.ollama,
         )
+        if role_tasks is None:
+            role_tasks = RoleWorkerSupervisor(
+                execute_role_task,
+                runner_config={
+                    "ollama_base_url": self.ollama.base_url,
+                    "role_model": self.agent_factory._role_model,
+                },
+                on_terminal=lambda record: apply_worker_token_usage(
+                    record,
+                    self.ollama,
+                ),
+            )
+        self.role_tasks = role_tasks
+        self.role_dispatch = (
+            role_dispatch
+            if role_dispatch is not None
+            else RoleDispatchService(self.role_registry, self.role_tasks)
+        )
         self.start_time = time.time()
         self.request_count = 0
         self._lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_completed: set[str] = set()
 
     def increment_requests(self):
         with self._lock:
             self.request_count += 1
 
+    def shutdown(self) -> None:
+        with self._shutdown_lock:
+            first_error = None
+            for resource, cleanup in (
+                ("role_tasks", self.role_tasks.shutdown),
+                ("orchestrator", self.orchestrator.shutdown),
+                ("agent_factory", self.agent_factory.shutdown),
+                ("terminal", self.terminal.close),
+            ):
+                if resource in self._shutdown_completed:
+                    continue
+                try:
+                    cleanup()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                else:
+                    self._shutdown_completed.add(resource)
+            if first_error is not None:
+                raise first_error
+
 
 state = AppState()
-atexit.register(state.terminal.close)
+atexit.register(state.shutdown)
 
 
 # ============================================================
@@ -161,6 +227,8 @@ atexit.register(state.terminal.close)
 # ============================================================
 
 class JARVISHandler(BaseHTTPRequestHandler):
+    app_state = state
+
     """J.A.R.V.I.S. API 请求处理器"""
 
     # 禁用日志（避免控制台噪音）
@@ -321,7 +389,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
         if self._cors():
             return
 
-        state.increment_requests()
+        self.app_state.increment_requests()
         request_path = self.path.split("?", 1)[0]
         routes = {
             "/api/health": self.handle_health,
@@ -357,7 +425,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
         if self._cors():
             return
 
-        state.increment_requests()
+        self.app_state.increment_requests()
         routes = {
             "/api/ollama/chat": self.handle_ollama_chat,
             "/api/ollama/chat/stream": self.handle_ollama_chat_stream_post,
@@ -391,7 +459,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
         if self._cors():
             return
 
-        state.increment_requests()
+        self.app_state.increment_requests()
         prefix = "/api/memory/probes/"
         if self.path.startswith(prefix):
             parts = self.path.removeprefix(prefix).split("/", 1)
@@ -422,11 +490,11 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_health(self):
         """健康检查"""
-        uptime = time.time() - state.start_time
+        uptime = time.time() - self.app_state.start_time
         self._send_json({
             "status": "healthy",
             "uptime": round(uptime, 2),
-            "requests": state.request_count,
+            "requests": self.app_state.request_count,
             "version": "1.0.0",
         })
 
@@ -464,7 +532,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
         completed = False
         try:
-            for chunk_text, is_done in state.ollama.stream_chat_generator(model, messages):
+            for chunk_text, is_done in self.app_state.ollama.stream_chat_generator(model, messages):
                 event_data = json.dumps({
                     "model": model,
                     "content": chunk_text,
@@ -537,12 +605,12 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_ollama_status(self):
         """Ollama 状态"""
-        status = state.ollama.get_status()
-        self._send_json(state.ollama.to_dict(status))
+        status = self.app_state.ollama.get_status()
+        self._send_json(self.app_state.ollama.to_dict(status))
 
     def handle_ollama_models(self):
         """Ollama 已安装模型"""
-        models = state.ollama.list_models()
+        models = self.app_state.ollama.list_models()
         self._send_json({"models": [asdict(model) for model in models]})
 
     def handle_ollama_chat(self):
@@ -558,7 +626,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             )
             return
 
-        result = state.ollama.chat(model, messages, False)
+        result = self.app_state.ollama.chat(model, messages, False)
         if "error" in result:
             self._send_error(
                 "Ollama chat request failed",
@@ -570,7 +638,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_ollama_token_usage(self):
         """Ollama token usage snapshot"""
-        self._send_json(state.ollama.get_token_usage_snapshot())
+        self._send_json(self.app_state.ollama.get_token_usage_snapshot())
 
     def handle_terminal_execute(self):
         """终端命令执行"""
@@ -605,9 +673,9 @@ class JARVISHandler(BaseHTTPRequestHandler):
             command=command,
             args=args,
             timeout=timeout,
-            risk_level=state.terminal._assess_risk(command),
+            risk_level=self.app_state.terminal._assess_risk(command),
         )
-        result = state.terminal.execute(cmd)
+        result = self.app_state.terminal.execute(cmd)
         self._send_json(result.to_dict())
 
     def handle_plugins_list(self):
@@ -687,7 +755,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             except ValueError:
                 pass
 
-        entries = state.memory_store.load(mtype)
+        entries = self.app_state.memory_store.load(mtype)
         self._send_json({
             "entries": [
                 {
@@ -727,7 +795,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             metadata=metadata,
             tags=tags,
         )
-        path = state.memory_store.store(entry)
+        path = self.app_state.memory_store.store(entry)
         self._send_json({
             "success": True,
             "path": path,
@@ -738,7 +806,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
     def handle_memory_delete(self, memory_type: MemoryType, entry_id: str):
         """Delete one integration probe after cleanup-token verification."""
         cleanup_token = self._read_body().get("cleanup_token", "")
-        deleted = state.memory_store.delete_probe(
+        deleted = self.app_state.memory_store.delete_probe(
             memory_type,
             entry_id,
             cleanup_token,
@@ -759,7 +827,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
     def handle_orchestrator_agents(self):
         """List registered agents"""
         try:
-            agents = state.orchestrator.list_agents()
+            agents = self.app_state.orchestrator.list_agents()
             self._send_json({
                 "agents": [a.to_dict() for a in agents],
                 "count": len(agents),
@@ -789,7 +857,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
         limit = max(1, min(limit, 100))
         try:
-            history = state.orchestrator.collect(limit=limit)
+            history = self.app_state.orchestrator.collect(limit=limit)
             self._send_json({
                 "results": [r.to_dict() for r in history],
                 "count": len(history),
@@ -845,7 +913,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
         logger.info(f"Mock dispatch to '{agent_name}': {prompt[:100]}")
         print(f"[ORCH] agent={agent_name} prompt={prompt}")
 
-        result = state.orchestrator.dispatch(
+        result = self.app_state.orchestrator.dispatch(
             AgentTask(
                 agent_name=agent_name,
                 prompt=prompt,
@@ -868,7 +936,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
         if capability is not None and not capability.strip():
             capability = None
         try:
-            roles = state.role_registry.list_roles(capability=capability)
+            roles = self.app_state.role_registry.list_roles(capability=capability)
             self._send_json({
                 "roles": [r.to_dict() for r in roles],
                 "count": len(roles),
@@ -879,7 +947,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
     def handle_role_get(self, role_name):
         """Return a single role profile by name."""
         try:
-            profile = state.role_registry.get(role_name)
+            profile = self.app_state.role_registry.get(role_name)
         except Exception as e:
             self._send_error(f"Failed to get role: {e}", 500)
             return
@@ -915,6 +983,30 @@ class JARVISHandler(BaseHTTPRequestHandler):
             return None, None
         return prompt, timeout
 
+    def _send_role_dispatch_error(self, error):
+        errors = (
+            (
+                RoleWorkerUnavailableError,
+                "ROLE_WORKER_UNAVAILABLE",
+                "Role worker is unavailable",
+            ),
+            (
+                RoleTaskTerminationUnconfirmedError,
+                "ROLE_TASK_TERMINATION_UNCONFIRMED",
+                "Worker process termination is not confirmed",
+            ),
+            (
+                RoleWorkerInvalidResultError,
+                "ROLE_WORKER_INVALID_RESULT",
+                "Role worker returned an invalid result",
+            ),
+        )
+        for error_type, code, message in errors:
+            if isinstance(error, error_type):
+                self._send_error(message, 503, code)
+                return
+        raise error
+
     def handle_role_dispatch(self):
         """Dispatch a task to a specific role."""
         data = self._read_body()
@@ -929,16 +1021,26 @@ class JARVISHandler(BaseHTTPRequestHandler):
         prompt, timeout = self._read_role_dispatch_prompt(data)
         if prompt is None:
             return
-        if state.role_registry.get(role_name) is None:
+        try:
+            result = self.app_state.role_dispatch.dispatch_by_role(
+                role_name,
+                prompt,
+                timeout,
+            )
+        except (
+            RoleWorkerUnavailableError,
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+        ) as error:
+            self._send_role_dispatch_error(error)
+            return
+        if result.status == "no_role":
             self._send_error(
                 f"Role '{role_name}' not found",
                 404,
                 "ROLE_NOT_FOUND",
             )
             return
-        result = state.agent_factory.dispatch_by_role(
-            role_name, prompt, timeout=timeout
-        )
         self._send_json(result.to_dict())
 
     def handle_role_dispatch_by_cap(self):
@@ -955,9 +1057,19 @@ class JARVISHandler(BaseHTTPRequestHandler):
         prompt, timeout = self._read_role_dispatch_prompt(data)
         if prompt is None:
             return
-        result = state.agent_factory.dispatch_by_capability(
-            capability, prompt, timeout=timeout
-        )
+        try:
+            result = self.app_state.role_dispatch.dispatch_by_capability(
+                capability,
+                prompt,
+                timeout,
+            )
+        except (
+            RoleWorkerUnavailableError,
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+        ) as error:
+            self._send_role_dispatch_error(error)
+            return
         if result.status == "no_capability":
             self._send_error(
                 f"No role with capability: {capability}",
@@ -978,7 +1090,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
                 "INVALID_REQUEST",
             )
             return
-        results = state.agent_factory.batch_dispatch(tasks)
+        results = self.app_state.role_dispatch.batch_dispatch(tasks)
         self._send_json({
             "results": [r.to_dict() for r in results],
             "count": len(results),
@@ -989,19 +1101,43 @@ class JARVISHandler(BaseHTTPRequestHandler):
 # Server start
 # ============================================================
 
-def run_server(host: str | None = None, port: int = 8080):
+def create_http_server(
+    host: str,
+    port: int,
+    app_state: AppState | None = None,
+):
+    handler_type = JARVISHandler
+    if app_state is not None:
+        handler_type = type(
+            "BoundJARVISHandler",
+            (JARVISHandler,),
+            {"app_state": app_state},
+        )
+    return _IPv4HTTPServer((host, port), handler_type)
+
+
+def run_server(
+    host: str | None = None,
+    port: int = 8080,
+    app_state: AppState | None = None,
+):
     """Start J.A.R.V.I.S. API server"""
     host = host or os.environ.get("JARVIS_HOST") or "127.0.0.1"
-    server = _IPv4HTTPServer((host, port), JARVISHandler)
+    active_state = app_state or state
+    server = create_http_server(host, port, app_state=active_state)
     logger.info(f"J.A.R.V.I.S. API server started: http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("server shutting down...")
     finally:
-        server.shutdown()
-        server.server_close()
-        state.terminal.close()
+        try:
+            server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                active_state.shutdown()
 
 
 if __name__ == "__main__":
