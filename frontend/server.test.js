@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import http from 'http';
@@ -341,7 +341,7 @@ describe('Server binding', () => {
     expect(harnessSource).not.toMatch(
       /\b(?:const|let)\s+(?:API|OLLAMA|CORE)_PORT\s*=\s*\d+\s*;/,
     );
-    expect(harnessSource.match(/\.listen\(0, '127\.0\.0\.1'/g)).toHaveLength(2);
+    expect(harnessSource.match(/\.listen\(0, '127\.0\.0\.1'/g)).toHaveLength(3);
     expect(harnessSource).toMatch(/^\s+PORT: '0',\s*$/m);
   });
 
@@ -664,19 +664,38 @@ describe('Core API bridge', () => {
     await expect(batch.json()).resolves.toEqual({ results: [], count: 0 });
   });
 
-  test('keeps synchronous role requests alive beyond the default Core timeout', async () => {
-    coreRoleFixture = {
-      delayMs: 3100,
-      body: {
-        role_name: 'engineer',
-        task_id: 'fixture-delayed-role-task',
-        status: 'success',
-        message: 'delayed ok',
-      },
-    };
+  test('keeps synchronous role requests alive beyond the default Core timeout with fake timers', async () => {
+    let resolveCoreCall;
+    let resolveCoreResponse;
+    const coreRequest = vi.fn((_path, _init, options) => {
+      resolveCoreCall(options);
+      return new Promise((resolve) => {
+        resolveCoreResponse = resolve;
+      });
+    });
+    const coreCall = new Promise((resolve) => {
+      resolveCoreCall = resolve;
+    });
+    const previousNoListen = process.env.JARVIS_TEST_NO_LISTEN;
+    let proxyServer;
     try {
-      const response = await fetch(
-        `http://127.0.0.1:${apiPort}/api/roles/dispatch`,
+      process.env.JARVIS_TEST_NO_LISTEN = '1';
+      vi.doMock('./server/core-api.js', () => ({
+        createCoreApiClient: () => ({
+          request: coreRequest,
+          status: async () => ({
+            configured: true,
+            available: true,
+            base_url: 'http://core.test',
+          }),
+        }),
+      }));
+      const { app: proxyApp } = await import('./server.js');
+      proxyServer = http.createServer(proxyApp);
+      await new Promise((resolve) => proxyServer.listen(0, '127.0.0.1', resolve));
+      const proxyPort = getServerPort(proxyServer);
+      const responsePromise = fetch(
+        `http://127.0.0.1:${proxyPort}/api/roles/dispatch`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -687,13 +706,47 @@ describe('Core API bridge', () => {
           }),
         },
       );
+      await coreCall;
+      expect(coreRequest).toHaveBeenCalledWith(
+        '/api/roles/dispatch',
+        expect.any(Object),
+        { timeoutMs: 6000 },
+      );
+
+      vi.useFakeTimers();
+      setTimeout(() => resolveCoreResponse({
+        status: 200,
+        body: {
+          role_name: 'engineer',
+          task_id: 'fixture-delayed-role-task',
+          status: 'success',
+          message: 'delayed ok',
+        },
+      }), 3100);
+      await vi.advanceTimersByTimeAsync(3100);
+      const response = await responsePromise;
 
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual(coreRoleFixture.body);
+      await expect(response.json()).resolves.toEqual({
+        role_name: 'engineer',
+        task_id: 'fixture-delayed-role-task',
+        status: 'success',
+        message: 'delayed ok',
+      });
     } finally {
-      coreRoleFixture = undefined;
+      vi.useRealTimers();
+      vi.doUnmock('./server/core-api.js');
+      vi.resetModules();
+      if (previousNoListen === undefined) {
+        delete process.env.JARVIS_TEST_NO_LISTEN;
+      } else {
+        process.env.JARVIS_TEST_NO_LISTEN = previousNoListen;
+      }
+      if (proxyServer) {
+        await new Promise((resolve) => proxyServer.close(resolve));
+      }
     }
-  }, 6000);
+  });
 
   test.each([
     ['ROLE_WORKER_UNAVAILABLE', 'Role worker is unavailable'],

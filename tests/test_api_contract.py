@@ -1185,6 +1185,18 @@ class TestSharedApiContract(unittest.TestCase):
                     "prompt": "write a unit test",
                     "timeout": 30,
                 }
+
+                def assert_exact_role_dispatch_result(name, body):
+                    self.assertEqual(
+                        set(body),
+                        {"role_name", "task_id", "status", "message"},
+                        name,
+                    )
+                    for field in ("role_name", "task_id", "status", "message"):
+                        self.assertIsInstance(body[field], str, f"{name} {field}")
+                    self.assertEqual(body["role_name"], "engineer", name)
+                    self.assertTrue(body["task_id"], f"{name} outer task_id")
+
                 role_dispatch_clients = {
                     "python-http": lambda: _post_json(
                         f"{core_url}/api/roles/dispatch",
@@ -1205,9 +1217,7 @@ class TestSharedApiContract(unittest.TestCase):
                         body,
                         f"{name} role dispatch",
                     )
-                    self.assertEqual(body["role_name"], "engineer", name)
-                    self.assertEqual(body["status"], "success", name)
-                    self.assertEqual(body["message"], "OK", name)
+                    assert_exact_role_dispatch_result(name, body)
                 response = fastapi_client.post(
                     "/api/roles/dispatch",
                     json=role_dispatch_payload,
@@ -1220,8 +1230,7 @@ class TestSharedApiContract(unittest.TestCase):
                     response.json(),
                     "fastapi role dispatch",
                 )
-                self.assertEqual(response.json()["status"], "success")
-                self.assertEqual(response.json()["message"], "OK")
+                assert_exact_role_dispatch_result("fastapi", response.json())
 
                 missing_role_dispatch = {"prompt": "no role name"}
                 role_dispatch_400_schema = self.contract["paths"][

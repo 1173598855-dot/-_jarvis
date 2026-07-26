@@ -892,7 +892,8 @@ app.get('*path', (req, res) => {
 // 启动
 // ============================================================
 
-const server = app.listen(PORT, HOST, () => {
+if (process.env.JARVIS_TEST_NO_LISTEN !== '1') {
+  const server = app.listen(PORT, HOST, () => {
   const address = server.address();
   const boundHost = typeof address === 'object' && address ? address.address : HOST;
   const boundPort = typeof address === 'object' && address ? address.port : PORT;
@@ -915,8 +916,11 @@ server.on('error', (err) => {
   console.error(`[Server] 启动失败: ${err.message}`);
   process.exit(1);
 });
+}
 
 process.on('uncaughtException', (err) => {
   console.error(`[Uncaught] ${err.message}`);
   console.error(err.stack);
 });
+
+export { app };
