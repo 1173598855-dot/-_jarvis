@@ -20,6 +20,7 @@ let coreRoleUrl;
 let coreRoleBody;
 let coreRoleTaskUrl;
 let coreRoleTaskBody;
+let coreRoleFixture;
 
 function getServerPort(server) {
   const address = server.address();
@@ -270,6 +271,14 @@ beforeAll(async () => {
       req.on('end', () => {
         coreRoleUrl = req.url;
         coreRoleBody = JSON.parse(body || '{}');
+        if (coreRoleFixture) {
+          const { body: fixtureBody, delayMs = 0, status = 200 } = coreRoleFixture;
+          setTimeout(() => {
+            res.writeHead(status);
+            res.end(JSON.stringify(fixtureBody));
+          }, delayMs);
+          return;
+        }
         if (req.url === '/api/roles/batch_dispatch') {
           res.end(JSON.stringify({ results: [], count: 0 }));
           return;
@@ -653,6 +662,101 @@ describe('Core API bridge', () => {
       tasks: [{ role: 'engineer', prompt: 'task' }],
     });
     await expect(batch.json()).resolves.toEqual({ results: [], count: 0 });
+  });
+
+  test('keeps synchronous role requests alive beyond the default Core timeout', async () => {
+    coreRoleFixture = {
+      delayMs: 3100,
+      body: {
+        role_name: 'engineer',
+        task_id: 'fixture-delayed-role-task',
+        status: 'success',
+        message: 'delayed ok',
+      },
+    };
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${apiPort}/api/roles/dispatch`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            role_name: 'engineer',
+            prompt: 'wait for worker',
+            timeout: 1,
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual(coreRoleFixture.body);
+    } finally {
+      coreRoleFixture = undefined;
+    }
+  }, 6000);
+
+  test.each([
+    ['ROLE_WORKER_UNAVAILABLE', 'Role worker is unavailable'],
+    [
+      'ROLE_WORKER_INVALID_RESULT',
+      'Role worker returned an invalid result',
+    ],
+    [
+      'ROLE_TASK_TERMINATION_UNCONFIRMED',
+      'Worker process termination is not confirmed',
+    ],
+  ])('forwards the Core %s response unchanged', async (code, message) => {
+    const body = { error: { code, message } };
+    coreRoleFixture = { status: 503, body };
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${apiPort}/api/roles/dispatch`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            role_name: 'engineer',
+            prompt: 'exercise worker error',
+            timeout: 1,
+          }),
+        },
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.text()).toBe(JSON.stringify(body));
+    } finally {
+      coreRoleFixture = undefined;
+    }
+  });
+
+  test('keeps batch Worker failures as positional 200 results', async () => {
+    const body = {
+      results: [{
+        role_name: 'engineer',
+        task_id: 'fixture-batch-task',
+        status: 'error',
+        message: 'Role worker is unavailable',
+      }],
+      count: 1,
+    };
+    coreRoleFixture = { status: 200, body };
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${apiPort}/api/roles/batch_dispatch`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tasks: [{ role: 'engineer', prompt: 'batch worker error' }],
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual(body);
+    } finally {
+      coreRoleFixture = undefined;
+    }
   });
 
   test('proxies every asynchronous role task lifecycle route', async () => {

@@ -9,13 +9,14 @@ export function createCoreApiClient({
 } = {}) {
   const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, '');
 
-  async function request(path, init = {}) {
+  async function request(path, init = {}, { timeoutMs: requestTimeoutMs } = {}) {
     if (!normalizedBaseUrl) {
       throw coreError('CORE_API_NOT_CONFIGURED', 'Core API 未配置');
     }
 
+    const effectiveTimeoutMs = requestTimeoutMs ?? timeoutMs;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     let response;
 
     try {

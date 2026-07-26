@@ -56,4 +56,43 @@ describe('createCoreApiClient', () => {
       code: 'CORE_API_INVALID_RESPONSE',
     });
   });
+
+  test('uses a per-request timeout without forwarding it to fetch', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn((_url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+        setTimeout(() => {
+          resolve(new Response('{"status":"ok"}', {
+            headers: { 'Content-Type': 'application/json' },
+          }));
+        }, 4000);
+      }));
+      const client = createCoreApiClient({
+        baseUrl: 'http://core.local',
+        fetchImpl,
+        timeoutMs: 3000,
+      });
+
+      const request = client.request(
+        '/api/roles/dispatch',
+        { method: 'POST' },
+        { timeoutMs: 5000 },
+      );
+      await vi.advanceTimersByTimeAsync(4000);
+
+      await expect(request).resolves.toEqual({
+        status: 200,
+        body: { status: 'ok' },
+      });
+      expect(fetchImpl).toHaveBeenCalledWith(
+        'http://core.local/api/roles/dispatch',
+        expect.not.objectContaining({ timeoutMs: expect.anything() }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

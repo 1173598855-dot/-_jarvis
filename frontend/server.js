@@ -340,7 +340,7 @@ function hasUnpairedSurrogate(value) {
   return false;
 }
 
-async function proxyCoreRequest(req, res, capability) {
+async function proxyCoreRequest(req, res, capability, options) {
   try {
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
     const headers = hasBody ? { 'Content-Type': 'application/json' } : {};
@@ -352,7 +352,7 @@ async function proxyCoreRequest(req, res, capability) {
       method: req.method,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: hasBody ? JSON.stringify(req.body || {}) : undefined,
-    });
+    }, options);
     res.status(result.status).json(result.body);
   } catch (error) {
     sendCoreError(res, error, capability);
@@ -664,6 +664,33 @@ function validateRolePrompt(req, res) {
   return true;
 }
 
+const MAX_TIMER_MS = 2_147_483_647;
+const ROLE_WORKER_GRACE_MS = 5000;
+
+function roleProxyTimeoutMs(timeout) {
+  return Math.min(timeout * 1000 + ROLE_WORKER_GRACE_MS, MAX_TIMER_MS);
+}
+
+function batchRoleProxyTimeoutMs(tasks) {
+  let timeoutMs = 0;
+  for (const task of tasks) {
+    if (!task || typeof task !== 'object' || Array.isArray(task)) {
+      continue;
+    }
+    const timeout = (
+      typeof task.timeout === 'number'
+      && Number.isSafeInteger(task.timeout)
+      && task.timeout >= 1
+      && task.timeout <= 300
+    ) ? task.timeout : 300;
+    timeoutMs = Math.min(
+      timeoutMs + roleProxyTimeoutMs(timeout),
+      MAX_TIMER_MS,
+    );
+  }
+  return Math.max(timeoutMs, ROLE_WORKER_GRACE_MS);
+}
+
 app.post('/api/roles/dispatch', async (req, res) => {
   if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
     return sendApiError(res, 400, 'INVALID_REQUEST', 'Request body must be a JSON object');
@@ -679,7 +706,9 @@ app.post('/api/roles/dispatch', async (req, res) => {
   if (!validateRolePrompt(req, res)) {
     return;
   }
-  await proxyCoreRequest(req, res, 'roles');
+  await proxyCoreRequest(req, res, 'roles', {
+    timeoutMs: roleProxyTimeoutMs(req.body.timeout),
+  });
 });
 
 app.post('/api/roles/dispatch_by_cap', async (req, res) => {
@@ -697,7 +726,9 @@ app.post('/api/roles/dispatch_by_cap', async (req, res) => {
   if (!validateRolePrompt(req, res)) {
     return;
   }
-  await proxyCoreRequest(req, res, 'roles');
+  await proxyCoreRequest(req, res, 'roles', {
+    timeoutMs: roleProxyTimeoutMs(req.body.timeout),
+  });
 });
 
 app.post('/api/roles/batch_dispatch', async (req, res) => {
@@ -707,7 +738,9 @@ app.post('/api/roles/batch_dispatch', async (req, res) => {
   if (req.body.tasks !== undefined && !Array.isArray(req.body.tasks)) {
     return sendApiError(res, 400, 'INVALID_REQUEST', 'tasks must be an array');
   }
-  await proxyCoreRequest(req, res, 'roles');
+  await proxyCoreRequest(req, res, 'roles', {
+    timeoutMs: batchRoleProxyTimeoutMs(req.body.tasks || []),
+  });
 });
 
 for (const action of ['load', 'enable', 'disable']) {

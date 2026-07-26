@@ -409,7 +409,42 @@ class TestSharedApiContract(unittest.TestCase):
 
     def test_contract_is_openapi_31_document(self):
         _assert_contract_document(self, self.contract)
-        self.assertEqual(self.spec["info"]["version"], "1.12.0")
+        self.assertEqual(self.spec["info"]["version"], "1.13.0")
+
+    def test_synchronous_role_routes_declare_terminable_worker_contract(self):
+        paths = self.spec["paths"]
+        single_paths = (
+            "/api/roles/dispatch",
+            "/api/roles/dispatch_by_cap",
+        )
+        for path in (*single_paths, "/api/roles/batch_dispatch"):
+            description = paths[path]["post"].get("description", "")
+            self.assertIn("terminable Worker", description, path)
+
+        expected_worker_failures = (
+            "ROLE_WORKER_UNAVAILABLE",
+            "ROLE_WORKER_INVALID_RESULT",
+            "ROLE_TASK_TERMINATION_UNCONFIRMED",
+        )
+        for path in single_paths:
+            description = paths[path]["post"]["responses"]["503"]["description"]
+            for code in expected_worker_failures:
+                self.assertIn(code, description, path)
+
+        batch_503 = paths["/api/roles/batch_dispatch"]["post"]["responses"][
+            "503"
+        ]["description"]
+        self.assertIn("Core API", batch_503)
+        self.assertIn("proxy", batch_503.lower())
+        self.assertIn("positional results", batch_503)
+        self.assertIn("200", batch_503)
+        for code in expected_worker_failures:
+            self.assertNotIn(code, batch_503)
+
+        generic_description = paths["/api/orchestrator/dispatch"]["post"].get(
+            "description", ""
+        )
+        self.assertNotIn("terminable Worker", generic_description)
 
     def test_agent_worker_outcomes_are_declared(self):
         outcomes = self.spec["components"]["schemas"]["AgentResult"]["properties"]["status"]["enum"]
@@ -985,25 +1020,39 @@ class TestSharedApiContract(unittest.TestCase):
 
     def test_all_implementations_match_stable_response_schemas(self):
         import main_fastapi
+        from core.kernel.ollama_manager import OllamaManager
         from fastapi.testclient import TestClient
 
         httpserver_module = _load_httpserver_module()
-        http_server = HTTPServer(
-            ("127.0.0.1", 0),
-            httpserver_module.JARVISHandler,
-        )
-        http_thread = Thread(target=http_server.serve_forever, daemon=True)
-        http_thread.start()
-
         ollama_server = HTTPServer(("127.0.0.1", 0), _OllamaFixtureHandler)
         ollama_thread = Thread(target=ollama_server.serve_forever, daemon=True)
         ollama_thread.start()
         ollama_url = f"http://127.0.0.1:{ollama_server.server_port}"
-        original_http_ollama_url = httpserver_module.state.ollama.base_url
-        fastapi_state = main_fastapi.AppState()
+
+        http_ollama = OllamaManager(base_url=ollama_url)
+        with patch.object(
+            httpserver_module,
+            "OllamaManager",
+            return_value=http_ollama,
+        ):
+            http_state = httpserver_module.AppState()
+        http_server = httpserver_module.create_http_server(
+            "127.0.0.1",
+            0,
+            app_state=http_state,
+        )
+        http_port = http_server.server_address[1]
+        http_thread = Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+
+        fastapi_ollama = OllamaManager(base_url=ollama_url)
+        with patch.object(
+            main_fastapi,
+            "OllamaManager",
+            return_value=fastapi_ollama,
+        ):
+            fastapi_state = main_fastapi.AppState()
         fastapi_app = main_fastapi.create_app(fastapi_state)
-        httpserver_module.state.ollama.base_url = ollama_url
-        fastapi_state.ollama.base_url = ollama_url
 
         observed_dispatch_options = []
 
@@ -1011,7 +1060,7 @@ class TestSharedApiContract(unittest.TestCase):
             observed_dispatch_options.append((_task.timeout, _task.priority))
             return "fixture result"
 
-        httpserver_module.state.orchestrator.register(
+        http_state.orchestrator.register(
             "analyzer",
             fixture_handler,
             capabilities=["analysis"],
@@ -1030,7 +1079,7 @@ class TestSharedApiContract(unittest.TestCase):
             "OLLAMA_HOST": "127.0.0.1",
             "OLLAMA_PORT": str(ollama_server.server_port),
         }
-        core_url = f"http://127.0.0.1:{http_server.server_port}"
+        core_url = f"http://127.0.0.1:{http_port}"
         express_env["JARVIS_CORE_API_URL"] = core_url
         express_env["JARVIS_TERMINAL_ENABLED"] = "true"
         express_env["JARVIS_TERMINAL_TOKEN"] = "contract-terminal-token"
@@ -1660,7 +1709,7 @@ class TestSharedApiContract(unittest.TestCase):
                 }
                 chat_clients = {
                     "python-http": lambda: _post_json(
-                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        f"http://127.0.0.1:{http_port}/api/ollama/chat",
                         chat_payload,
                     ),
                     "express": lambda: _post_json(
@@ -1708,7 +1757,7 @@ class TestSharedApiContract(unittest.TestCase):
                 ]["schema"]
                 chat_error_clients = {
                     "python-http": lambda: _post_json(
-                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        f"http://127.0.0.1:{http_port}/api/ollama/chat",
                         chat_error_payload,
                     ),
                     "express": lambda: _post_json(
@@ -1829,7 +1878,7 @@ class TestSharedApiContract(unittest.TestCase):
                 ]["schema"]
                 stream_rejected_clients = {
                     "python-http": lambda: _post_error_body(
-                        f"http://127.0.0.1:{http_server.server_port}/api/ollama/chat",
+                        f"http://127.0.0.1:{http_port}/api/ollama/chat",
                         json.dumps(stream_rejected_payload).encode("utf-8"),
                     ),
                     "express": lambda: _post_error_body(
@@ -2220,7 +2269,7 @@ class TestSharedApiContract(unittest.TestCase):
                 ]["responses"]["400"]["content"]["application/json"]["schema"]
                 post_clients = {
                     "python-http": lambda: _post_json(
-                        f"http://127.0.0.1:{http_server.server_port}/api/terminal/execute",
+                        f"http://127.0.0.1:{http_port}/api/terminal/execute",
                         {"command": ""},
                     ),
                     "express": lambda: _post_json(
@@ -2419,7 +2468,8 @@ class TestSharedApiContract(unittest.TestCase):
             http_server.shutdown()
             http_server.server_close()
             http_thread.join(timeout=5)
-            httpserver_module.state.ollama.base_url = original_http_ollama_url
+            http_state.shutdown()
+            fastapi_state.shutdown()
             ollama_server.shutdown()
             ollama_server.server_close()
             ollama_thread.join(timeout=5)

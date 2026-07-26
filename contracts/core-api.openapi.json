@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "J.A.R.V.I.S. Shared Core API",
-    "version": "1.12.0",
+    "version": "1.13.0",
     "description": "Stable response contract shared by Express, Python HTTPServer, and FastAPI."
   },
   "x-jarvis-implementations": [
@@ -1079,6 +1079,7 @@
     "/api/roles/dispatch": {
       "post": {
         "operationId": "dispatchByRole",
+        "description": "Synchronously dispatches one role through a terminable Worker while preserving the compatibility response shape.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1163,7 +1164,7 @@
             }
           },
           "503": {
-            "description": "The Core API is not configured.",
+            "description": "The Core API is not configured, or execution failed with ROLE_WORKER_UNAVAILABLE, ROLE_WORKER_INVALID_RESULT, or ROLE_TASK_TERMINATION_UNCONFIRMED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1178,6 +1179,7 @@
     "/api/roles/dispatch_by_cap": {
       "post": {
         "operationId": "dispatchByCapability",
+        "description": "Synchronously dispatches the selected capability role through a terminable Worker while preserving the compatibility response shape.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1262,7 +1264,7 @@
             }
           },
           "503": {
-            "description": "The Core API is not configured.",
+            "description": "The Core API is not configured, or execution failed with ROLE_WORKER_UNAVAILABLE, ROLE_WORKER_INVALID_RESULT, or ROLE_TASK_TERMINATION_UNCONFIRMED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1277,6 +1279,7 @@
     "/api/roles/batch_dispatch": {
       "post": {
         "operationId": "batchDispatchRoles",
+        "description": "Synchronously dispatches batch items in order through a terminable Worker and preserves one result per input position.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1337,7 +1340,7 @@
             }
           },
           "503": {
-            "description": "The Core API is not configured.",
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request. Worker item failures remain positional results under 200.",
             "content": {
               "application/json": {
                 "schema": {
