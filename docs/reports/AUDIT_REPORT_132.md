@@ -18,6 +18,9 @@ record the final delivery evidence.
 - The service preserves role/capability selection, response mapping, batch
   ordering, and the established terminal-state error contract while avoiding
   supervisor/lease lock inversion.
+- Terminal records remain protected from pruning through observer delivery,
+  accepted nonterminal Worker events do not wake terminal waiters, and HTTP
+  bind failures still shut down the owned application state.
 - Python HTTPServer and FastAPI use the shared Worker service; Express proxies
   the routes with a transport budget that covers Worker timeout and termination
   grace. `JARVIS_E2E_PORT` permits isolated browser verification.
@@ -27,6 +30,8 @@ record the final delivery evidence.
 
 ## Delivery Commits
 
+- `028515a` `feat: make role worker completion waitable`
+- `d35c59e` `fix: make role worker the sole dispatch deadline`
 - `908a7cd` `feat: bridge synchronous role dispatch to workers`
 - `5fb8759` `feat: migrate fastapi role dispatch to workers`
 - `ad00d03` `fix: align fastapi role dispatch lifecycle`
@@ -34,15 +39,16 @@ record the final delivery evidence.
 - `533d4e7` `feat: declare terminable synchronous role dispatch`
 - `a286285` `test: make role dispatch proxy timeout deterministic`
 - `3be3727` `fix: allow isolated e2e server ports`
+- `8d10fb3` `fix: close role dispatch lifecycle review gaps`
 
 ## Verification
 
 | Command | Result |
 |---|---|
 | `python -m unittest tests.test_run_all_coverage -v` | Passed after registration; 11 tests |
-| `python tests/run_all.py` | Total: 349; passed: 347; skipped: 2 |
+| `python tests/run_all.py` | Total: 352; passed: 350; skipped: 2 |
 | `python -m unittest tests.test_agent_factory tests.test_role_worker tests.test_role_dispatch_service tests.test_main tests.test_main_fastapi tests.test_api_contract -v` | 426 passed |
-| `python -m unittest discover -s tests -p "test_*.py"` | Total: 1222; passed: 1220; skipped: 2 |
+| `python -m unittest discover -s tests -p "test_*.py"` | Total: 1225; passed: 1223; skipped: 2 |
 | `python -m compileall -q src tests scripts` | Passed |
 | `python scripts/ci_local_integration.py --require-services --timeout 15` | Passed; FastAPI, Express, and Ollama fixture started on ephemeral loopback ports |
 | `cd frontend; npm test -- --run` | 129 passed |
@@ -57,11 +63,15 @@ record the final delivery evidence.
   service and adapter classes were absent from `AGGREGATE_TEST_CASES`.
 - GREEN: after importing and registering the exact service, HTTP, and FastAPI
   test classes, the coverage guard passed and the canonical aggregate contained
-  349 tests.
+  352 tests.
 - The enlarged aggregate made the coverage test's previous 60-second success
-  budget expire under full discovery (60.984 seconds). The test now uses a
-  90-second success budget; its separate 1-second timeout failure assertion is
-  unchanged. Focused coverage and full discovery both passed afterward.
+  budget expire under full discovery (60.984 seconds). The successful-path
+  guard now injects a two-test passing/skipped suite while preserving timeout,
+  JSON report, count, and title assertions; its independent one-second timeout
+  failure assertion and the standalone canonical delivery gate are unchanged.
+- Final review RED tests reproduced observer-time pruning, nonterminal
+  `notify_all()` amplification, and skipped state shutdown on bind failure.
+  Each passed after the focused lifecycle fixes in `8d10fb3`.
 
 ## Residual Work
 

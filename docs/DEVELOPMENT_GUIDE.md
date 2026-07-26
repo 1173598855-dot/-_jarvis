@@ -59,7 +59,7 @@
 - 文件式 MemoryStore、语义压缩和 LLM 压缩入口。
 - Python、Vitest、Playwright、类型检查和构建门禁。
 
-Iteration 132 的验证快照为：Python 聚合 349 项（347 通过、2 跳过）、完整 discovery 1222 项（1220 通过、2 跳过）、Vitest 129、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
+Iteration 132 的验证快照为：Python 聚合 352 项（350 通过、2 跳过）、完整 discovery 1225 项（1223 通过、2 跳过）、Vitest 129、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
 
 当前主要缺口：
 

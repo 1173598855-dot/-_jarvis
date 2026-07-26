@@ -9,11 +9,12 @@
 - Aligned Python HTTPServer, FastAPI, Express proxy budgets, OpenAPI descriptions, and stable Worker failure mappings for the three role routes.
 - Kept `/api/orchestrator/dispatch` unchanged; role-task persistence/recovery and bounded model tool loops remain the next Phase 11 work.
 - Added canonical aggregate coverage for the service and Python/FastAPI adapters, and made the browser E2E port isolatable with `JARVIS_E2E_PORT`.
+- Closed final lifecycle review gaps for terminal observer delivery, nonterminal waiter notifications, HTTP bind-failure cleanup, and the environment-independent aggregate runner guard.
 
 ### Verification
 
-- `python tests/run_all.py`: 349 total (347 passed, 2 skipped)
-- `python -m unittest discover -s tests -p "test_*.py"`: 1222 total (1220 passed, 2 skipped)
+- `python tests/run_all.py`: 352 total (350 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1225 total (1223 passed, 2 skipped)
 - `python -m compileall -q src tests scripts`: passed
 - `python scripts/ci_local_integration.py --require-services --timeout 15`: passed
 - `cd frontend; npm test -- --run`: 129/129 passed
@@ -24,6 +25,10 @@
 
 ### Files Changed
 
+- `src/core/brain/role_worker.py`
+- `src/main.py`
+- `tests/test_main.py`
+- `tests/test_role_worker.py`
 - `tests/run_all.py`
 - `tests/test_run_all_coverage.py`
 - `README.md`

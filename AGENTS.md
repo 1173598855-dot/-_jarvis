@@ -67,7 +67,7 @@
 
 - `src/`：28 个 Python 文件；服务端源代码统一使用 Python。
 - `frontend/src/`：38 个 TypeScript/TSX 文件。
-- `tests/`：规范聚合套件 349 个用例；完整 discovery 1222 个用例。
+- `tests/`：规范聚合套件 352 个用例；完整 discovery 1225 个用例。
 - 前端验证：Vitest 129 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
@@ -135,4 +135,4 @@ npm run build
 - 临时测试输出使用 `.test-*` 命名并保持 Git 忽略。
 - 不把历史审计报告中的测试数量或阶段状态直接当作当前状态。
 
-Current verified test baseline for Iteration 132: aggregate 349 total (347 passed, 2 skipped); full discovery 1222 total (1220 passed, 2 skipped); Vitest 129 passed; Playwright 5 passed and 1 conditional skip.
+Current verified test baseline for Iteration 132: aggregate 352 total (350 passed, 2 skipped); full discovery 1225 total (1223 passed, 2 skipped); Vitest 129 passed; Playwright 5 passed and 1 conditional skip.

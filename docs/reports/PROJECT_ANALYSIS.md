@@ -20,8 +20,8 @@
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
 | `tests/` Python | 49 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 349 个用例（347 通过、2 跳过） |
-| 完整 Python discovery | 1222 个用例（1220 通过、2 跳过） |
+| 规范 Python 聚合套件 | 352 个用例（350 通过、2 跳过） |
+| 完整 Python discovery | 1225 个用例（1223 通过、2 跳过） |
 | 前端 Vitest | 129 个用例通过 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
