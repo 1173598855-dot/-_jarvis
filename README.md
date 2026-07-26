@@ -111,7 +111,7 @@ $env:JARVIS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
 When set, only exact matching request origins receive `Access-Control-Allow-Origin`. `JARVIS_HOST` defaults to `127.0.0.1`; use an explicit value only when a deployment boundary has been reviewed.
 
-Role dispatch uses the same `OLLAMA_BASE_URL` and in-process `OllamaManager` as chat and token telemetry. `JARVIS_ROLE_MODEL` selects the installed Ollama model used by `/api/roles/dispatch`, capability dispatch, and batch dispatch; it defaults to `llama3.2`.
+Role dispatch uses the same `OLLAMA_BASE_URL` and in-process `OllamaManager` as chat and token telemetry. The synchronous role routes (`/api/roles/dispatch`, capability dispatch, and batch dispatch) now execute through a terminable Worker while preserving their compatibility response shapes. `JARVIS_ROLE_MODEL` selects the installed model they use; it defaults to `llama3.2`. The generic `/api/orchestrator/dispatch` route is unchanged.
 
 ```powershell
 $env:JARVIS_ROLE_MODEL = "llama3.2"
@@ -243,9 +243,9 @@ The stable cross-implementation response contract is maintained in
 | `POST /api/roles/tasks` | FastAPI / Express | Create an asynchronous role task |
 | `GET /api/roles/tasks/{task_id}` | FastAPI / Express | Read an asynchronous role task |
 | `POST /api/roles/tasks/{task_id}/cancel` | FastAPI / Express | Request confirmed task cancellation |
-| `/api/roles/dispatch` | Python / FastAPI / Express | Dispatch by role |
-| `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Dispatch by capability |
-| `/api/roles/batch_dispatch` | Python / FastAPI / Express | Batch role dispatch |
+| `/api/roles/dispatch` | Python / FastAPI / Express | Synchronous role dispatch through a terminable Worker |
+| `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Capability-selected synchronous dispatch through a terminable Worker |
+| `/api/roles/batch_dispatch` | Python / FastAPI / Express | Ordered batch dispatch through terminable Workers |
 
 ## Notes
 

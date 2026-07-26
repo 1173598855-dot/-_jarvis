@@ -1,3 +1,42 @@
+## Iteration #132 - 2026-07-26
+
+**Protocol**: Terminable synchronous role dispatch migration
+**Status**: Complete
+
+### Achievements
+
+- Migrated synchronous role, capability, and ordered batch dispatch through `RoleDispatchService` and the terminable `RoleWorkerSupervisor`, while preserving their compatibility response shapes and batch positions.
+- Aligned Python HTTPServer, FastAPI, Express proxy budgets, OpenAPI descriptions, and stable Worker failure mappings for the three role routes.
+- Kept `/api/orchestrator/dispatch` unchanged; role-task persistence/recovery and bounded model tool loops remain the next Phase 11 work.
+- Added canonical aggregate coverage for the service and Python/FastAPI adapters, and made the browser E2E port isolatable with `JARVIS_E2E_PORT`.
+
+### Verification
+
+- `python tests/run_all.py`: 349 total (347 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1222 total (1220 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `python scripts/ci_local_integration.py --require-services --timeout 15`: passed
+- `cd frontend; npm test -- --run`: 129/129 passed
+- `cd frontend; JARVIS_E2E_PORT=5174; npm run test:e2e`: 5 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python -m ruff check src tests scripts`: not run because Ruff is not installed in the project environment
+
+### Files Changed
+
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `README.md`
+- `AGENTS.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_132.md`
+- `docs/reports/AUDIT_REPORT_122.md`
+
+---
+
 ## Iteration #131 - 2026-07-21
 
 **Protocol**: Atomic recovery publication and role-task lifecycle hardening

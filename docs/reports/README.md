@@ -6,7 +6,8 @@
 
 | 文档 | 说明 |
 |---|---|
-| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-21 当前项目分析 |
+| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-26 当前项目分析 |
+| [AUDIT_REPORT_132.md](AUDIT_REPORT_132.md) | 同步角色 dispatch Worker 迁移与最终门禁证据 |
 | [AUDIT_REPORT_131.md](AUDIT_REPORT_131.md) | 原子恢复发布与角色任务生命周期加固 |
 | [AUDIT_REPORT_130.md](AUDIT_REPORT_130.md) | 可终止异步角色任务生命周期与 OpenAPI 1.12 |
 | [AUDIT_REPORT_129.md](AUDIT_REPORT_129.md) | Phase A 认证上下文连续性与启动恢复 |
@@ -16,14 +17,13 @@
 | [AUDIT_REPORT_125.md](AUDIT_REPORT_125.md) | 三套服务适配器的角色路由对齐 |
 | [AUDIT_REPORT_124.md](AUDIT_REPORT_124.md) | 编排器契约完整性与三适配器调度证据 |
 | [AUDIT_REPORT_123.md](AUDIT_REPORT_123.md) | 三套服务适配器的共享编排器路由契约 |
-| [AUDIT_REPORT_122.md](AUDIT_REPORT_122.md) | 确定性的 required-services 集成门禁 |
 | [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 安装与环境报告 |
 | [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 学习与项目实践报告 |
 | [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 本地 19 个 Skill 的市场快照 |
 
 ## 滚动策略
 
-- 当前迭代为 131；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 122-131。
+- 当前迭代为 132；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 123-132。
 - 完整迭代台账与每轮文件清单见 [CHANGELOG.md](../../CHANGELOG.md)。
 
 ## 维护规则

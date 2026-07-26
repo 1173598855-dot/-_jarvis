@@ -2,8 +2,8 @@
 
 > **文档版本**：1.0.0
 > **状态**：生效
-> **基线**：Iteration 131
-> **更新日期**：2026-07-21
+> **基线**：Iteration 132
+> **更新日期**：2026-07-26
 > **适用对象**：项目维护者、主协调 Agent、子代理、Skill/Plugin 作者与前端贡献者
 
 ## 1. 文档目标
@@ -42,13 +42,13 @@
 4. 历史报告只证明过去发生过什么，不能覆盖当前事实。
 5. 发现冲突后更新单一来源，不在多个文档中长期保留不同说法。
 
-## 3. Iteration 131 基线
+## 3. Iteration 132 基线
 
 当前项目已经具备：
 
 - Solid.js 六视图指挥中心、共享轮询资源和响应式应用壳。
 - Express BFF、Python HTTPServer 与 FastAPI 三套服务入口。
-- OpenAPI 1.12.0、统一错误 envelope 和三服务真实契约验证。
+- OpenAPI 1.13.0、统一错误 envelope 和三服务真实契约验证。
 - Ollama 非流式对话、规范 SSE 与 Token 遥测。
 - 角色注册、任务编排、生产 Ollama 执行和普通错误恢复。
 - 版本化 `RunState`、不可变 revision 原子发布、平台化同根读写锁、认证归档标记、上下文水位与启动恢复协调。
@@ -59,13 +59,12 @@
 - 文件式 MemoryStore、语义压缩和 LLM 压缩入口。
 - Python、Vitest、Playwright、类型检查和构建门禁。
 
-Iteration 131 的验证快照为：Python 聚合 295 项（293 通过、2 跳过）、完整 discovery 1170 项（1168 通过、2 跳过）、Vitest 113、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
+Iteration 132 的验证快照为：Python 聚合 349 项（347 通过、2 跳过）、完整 discovery 1222 项（1220 通过、2 跳过）、Vitest 129、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
 
 当前主要缺口：
 
 | 优先级 | 缺口 | 约束 |
 |---|---|---|
-| P1 | 旧同步角色调度仍使用不可终止 daemon handler | 迁移完成前不得把旧 timeout 宣称为可取消 |
 | P1 | 异步角色任务尚未持久化并接入启动恢复 | 重启后必须先核对 Worker 再恢复确定终态 |
 | P1 | 模型工具循环尚未接入 | 必须经过默认拒绝 Broker |
 | P1 | Plugin 沙箱仍以策略声明为主 | 未验证 native Plugin 不得默认进入核心进程 |
@@ -1084,7 +1083,7 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 
 ### 阶段 B：可终止 Agent Worker
 
-状态：进行中。异步 FastAPI/Express 角色任务通道及终止竞态加固已完成；旧同步 dispatch 迁移与持久任务恢复尚未完成。
+状态：进行中。异步 FastAPI/Express 角色任务通道及三条同步角色 dispatch 已迁移为可终止 Worker；任务持久恢复与模型工具循环尚未完成，通用 orchestrator dispatch 保持既有行为。
 
 - 定义 Worker 请求、事件、取消和终态协议。
 - 将可超时角色工作迁移到进程 Worker。

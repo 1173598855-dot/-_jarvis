@@ -74,7 +74,9 @@ class TestRunAllCoverage(unittest.TestCase):
         if report.exists():
             report.unlink()
 
-        timeout = 60
+        # The canonical suite has 349 tests; leave headroom when this guard is
+        # itself running under full discovery on Windows.
+        timeout = 90
         self.assertEqual(run_all.run_all_tests(timeout=timeout, json_report=str(report)), 0)
 
         payload = __import__("json").loads(report.read_text(encoding="utf-8"))
@@ -142,6 +144,20 @@ class TestRunAllCoverage(unittest.TestCase):
 
         self.assertLessEqual(expected, case_names)
 
+    def test_aggregate_runner_includes_synchronous_role_dispatch_guards(self):
+        case_names = {case.__name__ for case in run_all.AGGREGATE_TEST_CASES}
+        expected = {
+            "TestRoleDispatchServiceSelectionAndMapping",
+            "TestRoleDispatchServiceLeases",
+            "TestRoleDispatchServiceLockOrder",
+            "TestRoleDispatchServiceBatch",
+            "TestRoleDispatchEndpoints",
+            "TestMainHTTPRoleDispatchWorkerAdapter",
+            "TestMainHTTPStateLifecycle",
+        }
+
+        self.assertLessEqual(expected, case_names)
+
     def test_build_aggregate_suite_loads_every_declared_case(self):
         expected = sum(
             unittest.defaultTestLoader.loadTestsFromTestCase(case).countTestCases()
@@ -155,6 +171,7 @@ class TestRunAllCoverage(unittest.TestCase):
     def test_aggregate_suite_title_uses_declared_case_count(self):
         title = run_all.aggregate_suite_title()
 
+        self.assertIn("Iteration 132", title)
         self.assertIn(f"({len(run_all.AGGREGATE_TEST_CASES)} classes)", title)
 
 

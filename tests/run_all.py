@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 131
+J.A.R.V.I.S. test suite - Iteration 132
 Run: python tests/run_all.py
 """
 import sys
@@ -22,9 +22,11 @@ from test_docs_setup import TestSetupDocs
 from test_file_run_state_repository import TestFileRunStateRepository
 from test_iteration_ledger import TestIterationLedger
 from test_main import TestMainHTTPHelpers, TestMainHTTPGETRouting, TestMainHTTPPOSTRouting, TestMainHTTPHandleMethodsRouting, TestMainHTTPEdgeCases
+from test_main import TestMainHTTPRoleDispatchWorkerAdapter, TestMainHTTPStateLifecycle
 from test_main_fastapi import (
     TestMainFastapiIntegration,
     TestRequestBodyLimitMiddleware,
+    TestRoleDispatchEndpoints,
     TestRoleTaskLifecycleEndpoints,
     TestRunRecoveryLifespan,
 )
@@ -35,6 +37,12 @@ from test_project_config import TestPythonDependencies
 from test_readme import TestReadme
 from test_resume_document import TestResumeDocument
 from test_role_worker import TestRoleWorkerSupervisor
+from test_role_dispatch_service import (
+    TestRoleDispatchServiceBatch,
+    TestRoleDispatchServiceLeases,
+    TestRoleDispatchServiceLockOrder,
+    TestRoleDispatchServiceSelectionAndMapping,
+)
 from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordinator
 from test_run_state import TestRunState
 from test_plugin_installation import TestPluginInstallation
@@ -259,10 +267,13 @@ AGGREGATE_TEST_CASES = [
     TestMainHTTPGETRouting,
     TestMainHTTPPOSTRouting,
     TestMainHTTPHandleMethodsRouting,
+    TestMainHTTPRoleDispatchWorkerAdapter,
+    TestMainHTTPStateLifecycle,
     TestMainHTTPEdgeCases,
     TestMainFastapiIntegration,
     TestRequestBodyLimitMiddleware,
     TestRoleTaskLifecycleEndpoints,
+    TestRoleDispatchEndpoints,
     TestRunRecoveryLifespan,
     TestLocalIntegrationProfile,
     TestLocalIntegrationRunner,
@@ -276,6 +287,10 @@ AGGREGATE_TEST_CASES = [
     TestPhaseARecoveryGate,
     TestWorkerProtocol,
     TestRoleWorkerSupervisor,
+    TestRoleDispatchServiceSelectionAndMapping,
+    TestRoleDispatchServiceLeases,
+    TestRoleDispatchServiceLockOrder,
+    TestRoleDispatchServiceBatch,
 ]
 
 
@@ -288,7 +303,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 131 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 132 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [
