@@ -1613,6 +1613,18 @@ class TestMainHTTPRoleDispatchWorkerAdapter(unittest.TestCase):
 
 
 class TestMainHTTPStateLifecycle(unittest.TestCase):
+    def test_run_server_shuts_down_injected_state_when_creation_fails(self):
+        app_state = MagicMock()
+        with patch.object(
+            _main,
+            "create_http_server",
+            side_effect=OSError("bind failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "bind failed"):
+                _main.run_server(app_state=app_state)
+
+        app_state.shutdown.assert_called_once_with()
+
     def test_create_http_server_does_not_leak_constructor_socket(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)

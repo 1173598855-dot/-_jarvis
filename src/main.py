@@ -1124,20 +1124,22 @@ def run_server(
     """Start J.A.R.V.I.S. API server"""
     host = host or os.environ.get("JARVIS_HOST") or "127.0.0.1"
     active_state = app_state or state
-    server = create_http_server(host, port, app_state=active_state)
-    logger.info(f"J.A.R.V.I.S. API server started: http://{host}:{port}")
+    server = None
     try:
+        server = create_http_server(host, port, app_state=active_state)
+        logger.info(f"J.A.R.V.I.S. API server started: http://{host}:{port}")
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("server shutting down...")
     finally:
         try:
-            server.shutdown()
+            if server is not None:
+                try:
+                    server.shutdown()
+                finally:
+                    server.server_close()
         finally:
-            try:
-                server.server_close()
-            finally:
-                active_state.shutdown()
+            active_state.shutdown()
 
 
 if __name__ == "__main__":

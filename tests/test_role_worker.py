@@ -16,10 +16,17 @@ from core.brain.role_worker import (
 from core.contracts.worker_protocol import (
     WorkerEvent,
     WorkerEventKind,
+    WorkerTaskRecord,
     WorkerTaskRequest,
     WorkerTaskStatus,
 )
 from tests import worker_fixtures
+
+
+def _block_only_cancelled_request(request, _config):
+    if request["prompt"] == "cancel while publishing":
+        time.sleep(30)
+    return {"prompt": request["prompt"]}
 
 
 class _OllamaWorkerFixture(BaseHTTPRequestHandler):
@@ -251,6 +258,84 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
         self.assertEqual(terminal.status, WorkerTaskStatus.SUCCEEDED)
         self.assertEqual(publication_order[0], ("observer", request.task_id))
         self.assertIn(("prune", None), publication_order)
+
+    def test_cancel_record_is_retained_until_observer_delivery_finishes(self):
+        observer_started = threading.Event()
+        release_observer = threading.Event()
+        overflow_observed = threading.Event()
+        request = WorkerTaskRequest.new(
+            "engineer",
+            "cancel while publishing",
+            10,
+        )
+        overflow_request = WorkerTaskRequest.new("reviewer", "overflow", 10)
+
+        def observe(record):
+            if record.task_id == request.task_id:
+                observer_started.set()
+                release_observer.wait(timeout=4)
+            elif record.task_id == overflow_request.task_id:
+                overflow_observed.set()
+
+        supervisor = self.make_supervisor(
+            _block_only_cancelled_request,
+            max_records=1,
+            on_terminal=observe,
+        )
+        original_finalize = supervisor._finalize
+
+        def keep_external_cancel_as_publisher(task_id, *args, **kwargs):
+            runtime = supervisor._runtimes.get(task_id)
+            if (
+                task_id == request.task_id
+                and runtime is not None
+                and threading.current_thread() is runtime.monitor
+            ):
+                observer_started.wait(timeout=4)
+            return original_finalize(task_id, *args, **kwargs)
+
+        supervisor._finalize = keep_external_cancel_as_publisher
+        cancel_result = {}
+        cancel_thread = threading.Thread(
+            target=lambda: cancel_result.setdefault(
+                "record",
+                supervisor.cancel(request.task_id),
+            ),
+            name="external-role-cancel",
+            daemon=True,
+        )
+
+        retained_while_observing = None
+        try:
+            supervisor.submit(request)
+            cancel_thread.start()
+            self.assertTrue(observer_started.wait(timeout=4))
+
+            cleanup_deadline = time.monotonic() + 2
+            while (
+                request.task_id in supervisor._runtimes
+                and time.monotonic() < cleanup_deadline
+            ):
+                time.sleep(0.01)
+            self.assertNotIn(request.task_id, supervisor._runtimes)
+
+            supervisor.submit(overflow_request)
+            self.assertTrue(overflow_observed.wait(timeout=4))
+            cleanup_deadline = time.monotonic() + 2
+            while (
+                overflow_request.task_id in supervisor._runtimes
+                and time.monotonic() < cleanup_deadline
+            ):
+                time.sleep(0.01)
+            self.assertNotIn(overflow_request.task_id, supervisor._runtimes)
+            retained_while_observing = supervisor.get(request.task_id)
+        finally:
+            release_observer.set()
+            cancel_thread.join(timeout=2)
+            supervisor._finalize = original_finalize
+
+        self.assertIsNotNone(retained_while_observing)
+        self.assertEqual(cancel_result["record"], retained_while_observing)
 
     def test_success_is_published_only_after_process_exit(self):
         supervisor = self.make_supervisor(
@@ -755,6 +840,61 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
 
         self.assertFalse(accepted)
         self.assertEqual(supervisor.get(request.task_id), terminal)
+
+    def test_accepted_nonterminal_event_does_not_notify_terminal_waiter(self):
+        supervisor = self.make_supervisor(worker_fixtures.succeed)
+        request = WorkerTaskRequest.new("engineer", "heartbeat", 10)
+        record = WorkerTaskRecord.from_request(request).evolve(
+            status=WorkerTaskStatus.RUNNING,
+        )
+        runtime = Mock(termination_intent=None, pending_event=None)
+        with supervisor._condition:
+            supervisor._records[request.task_id] = record
+            supervisor._runtimes[request.task_id] = runtime
+
+        waiter_started = threading.Event()
+        original_wait = supervisor._condition.wait
+
+        def track_wait(timeout=None):
+            waiter_started.set()
+            return original_wait(timeout)
+
+        waiter = threading.Thread(
+            target=lambda: supervisor.wait(request.task_id, 0.2),
+            daemon=True,
+        )
+        try:
+            with (
+                patch.object(
+                    supervisor._condition,
+                    "wait",
+                    side_effect=track_wait,
+                ),
+                patch.object(
+                    supervisor._condition,
+                    "notify_all",
+                    wraps=supervisor._condition.notify_all,
+                ) as notify_all,
+            ):
+                waiter.start()
+                self.assertTrue(waiter_started.wait(timeout=1))
+                heartbeat = WorkerEvent.new(
+                    request,
+                    sequence=1,
+                    kind=WorkerEventKind.HEARTBEAT,
+                    payload={},
+                )
+
+                accepted = supervisor._accept_event(request.task_id, heartbeat)
+
+                self.assertTrue(accepted)
+                notify_all.assert_not_called()
+                waiter.join(timeout=1)
+        finally:
+            waiter.join(timeout=1)
+            with supervisor._condition:
+                supervisor._runtimes.pop(request.task_id, None)
+                supervisor._records.pop(request.task_id, None)
 
     def test_termination_intent_drains_without_accepting_late_events(self):
         supervisor = self.make_supervisor(

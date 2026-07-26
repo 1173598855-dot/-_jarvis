@@ -239,6 +239,7 @@ class RoleWorkerSupervisor:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._waiters: dict[str, int] = {}
+        self._terminal_publications: set[str] = set()
         self._shutdown = False
 
     def terminal_wait_budget(self, timeout_seconds: int) -> float:
@@ -626,7 +627,6 @@ class RoleWorkerSupervisor:
             )
             if event.kind in {WorkerEventKind.RESULT, WorkerEventKind.FAILURE}:
                 runtime.pending_event = event
-            self._condition.notify_all()
             return True
 
     def _finalize(
@@ -651,13 +651,19 @@ class RoleWorkerSupervisor:
                 termination_confirmed=termination_confirmed,
             )
             self._records[task_id] = terminal
+            self._terminal_publications.add(task_id)
             self._condition.notify_all()
             observers = tuple(self._terminal_observers)
-        for observer in observers:
-            try:
-                observer(terminal)
-            except Exception:
-                pass
+        try:
+            for observer in observers:
+                try:
+                    observer(terminal)
+                except Exception:
+                    pass
+        finally:
+            with self._condition:
+                self._terminal_publications.discard(task_id)
+                self._prune_records()
         return terminal
 
     def _update_nonterminal_error(self, task_id: str, error: str) -> None:
@@ -735,6 +741,7 @@ class RoleWorkerSupervisor:
                         record.status.is_terminal
                         and task_id not in self._runtimes
                         and task_id not in self._waiters
+                        and task_id not in self._terminal_publications
                     )
                 ),
                 None,

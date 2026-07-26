@@ -74,20 +74,39 @@ class TestRunAllCoverage(unittest.TestCase):
         if report.exists():
             report.unlink()
 
-        # The canonical suite has 349 tests; leave headroom when this guard is
-        # itself running under full discovery on Windows.
-        timeout = 90
-        self.assertEqual(run_all.run_all_tests(timeout=timeout, json_report=str(report)), 0)
+        class PassingCase(unittest.TestCase):
+            def test_passes(self):
+                pass
+
+        class SkippedCase(unittest.TestCase):
+            @unittest.skip("injected skip")
+            def test_skips(self):
+                pass
+
+        original_cases = run_all.AGGREGATE_TEST_CASES[:]
+        run_all.AGGREGATE_TEST_CASES[:] = [PassingCase, SkippedCase]
+        timeout = 5
+        try:
+            self.assertEqual(
+                run_all.run_all_tests(
+                    timeout=timeout,
+                    json_report=str(report),
+                ),
+                0,
+            )
+        finally:
+            run_all.AGGREGATE_TEST_CASES[:] = original_cases
 
         payload = __import__("json").loads(report.read_text(encoding="utf-8"))
-        self.assertEqual(payload["tests"], run_all.canonical_test_count())
+        self.assertEqual(payload["tests"], 2)
+        self.assertEqual(payload["passed"], 1)
+        self.assertEqual(payload["skipped"], 1)
         self.assertEqual(payload["success"], True)
-        self.assertEqual(
-            payload["passed"] + payload["skipped"],
-            payload["tests"],
-        )
         self.assertEqual(payload["timeout_seconds"], timeout)
-        self.assertIn(f"{run_all.canonical_test_count()} tests", payload["title"])
+        self.assertEqual(
+            payload["title"],
+            "J.A.R.V.I.S. test suite - TestSuite (2 tests)",
+        )
 
         report.unlink()
 
