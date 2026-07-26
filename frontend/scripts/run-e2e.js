@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { createServer } from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { resolveE2EPort } from './e2e-port.js';
 
 const frontendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const viteBin = path.join(frontendDir, 'node_modules', 'vite', 'bin', 'vite.js');
@@ -64,10 +65,11 @@ async function stopServer(child) {
 }
 
 async function main() {
-  await assertPortAvailable('127.0.0.1', 5173);
+  const port = resolveE2EPort();
+  await assertPortAvailable('127.0.0.1', port);
   const vite = spawn(
     process.execPath,
-    [viteBin, '--host', '127.0.0.1', '--strictPort'],
+    [viteBin, '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
     {
       cwd: frontendDir,
       stdio: 'inherit',
@@ -76,7 +78,7 @@ async function main() {
   );
 
   try {
-    await waitForServer(vite, 'http://127.0.0.1:5173');
+    await waitForServer(vite, `http://127.0.0.1:${port}`);
     const playwright = spawn(
       process.execPath,
       [playwrightBin, 'test', ...process.argv.slice(2)],
