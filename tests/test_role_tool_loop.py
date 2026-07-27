@@ -182,14 +182,14 @@ class TestRoleToolLoop(unittest.TestCase):
     def test_argument_and_result_limits_return_bounded_denials(self):
         cases = (
             (
-                RoleToolBudget(max_argument_bytes=8),
+                RoleToolBudget(max_argument_bytes=8, max_result_bytes=64),
                 Mock(return_value={"ok": True}),
                 {"query": "too long"},
                 "argument_too_large",
             ),
             (
-                RoleToolBudget(max_result_bytes=8),
-                Mock(return_value={"value": "too long"}),
+                RoleToolBudget(max_result_bytes=64),
+                Mock(return_value={"value": "too long" * 16}),
                 {},
                 "result_too_large",
             ),
@@ -221,6 +221,29 @@ class TestRoleToolLoop(unittest.TestCase):
                     len(message["content"].encode("utf-8")),
                     64,
                 )
+
+    def test_oversized_denial_result_fails_before_model_receives_it(self):
+        budget = RoleToolBudget(max_result_bytes=8)
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy({"engineer": [self.definition.name]}),
+            handlers={self.definition.name: Mock(return_value={"value": "large"})},
+            definitions={self.definition.name: self.definition},
+            budget=budget,
+        )
+        self.manager.chat.side_effect = [
+            _tool_response(),
+            _final_response("must not be requested"),
+        ]
+
+        result = self._factory(broker).execute_role_once(
+            "engineer",
+            "inspect",
+            task_id="task-result-budget",
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(self.manager.chat.call_count, 1)
+        self.assertEqual(broker.invocation_log()[-1].reason, "result_too_large")
 
     def test_rejects_tool_batch_before_partial_execution_when_call_budget_exceeded(self):
         budget = RoleToolBudget(max_calls=1)

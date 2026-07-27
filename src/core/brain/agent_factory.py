@@ -112,7 +112,10 @@ class AgentFactory:
             timeout=timeout,
         )
         try:
-            output = self._default_handler(profile)(task)
+            output = self._default_handler(
+                profile,
+                allow_model_tools=True,
+            )(task)
         except Exception:
             logger.warning("Direct role execution failed for role %s", profile.name)
             return DispatchResult(role_name, task_id, "error", ROLE_EXECUTION_ERROR)
@@ -145,7 +148,12 @@ class AgentFactory:
             status=status, message=result.result or result.error or "",
         )
 
-    def _default_handler(self, profile: AgentProfile):
+    def _default_handler(
+        self,
+        profile: AgentProfile,
+        *,
+        allow_model_tools: bool = False,
+    ):
         if self._ollama_manager is None:
             def compatibility_handler(task: AgentTask) -> str:
                 return f"[{profile.display_name}] Task received: {task.prompt[:100]}"
@@ -157,7 +165,7 @@ class AgentFactory:
                 name
                 for name in task.metadata.get("authorized_tools", [])
                 if isinstance(name, str) and name
-            ]
+            ] if allow_model_tools else []
             messages = [
                 {
                     "role": "system",
@@ -172,14 +180,20 @@ class AgentFactory:
                 },
             ]
             try:
-                return RoleToolLoop(
-                    self._ollama_manager,
-                    self._role_tool_broker,
-                ).run(
-                    model=self._role_model,
-                    messages=messages,
-                    profile=profile,
-                    timeout_seconds=task.timeout,
+                if allow_model_tools:
+                    return RoleToolLoop(
+                        self._ollama_manager,
+                        self._role_tool_broker,
+                    ).run(
+                        model=self._role_model,
+                        messages=messages,
+                        profile=profile,
+                        timeout_seconds=task.timeout,
+                    )
+                response = self._ollama_manager.chat(
+                    self._role_model,
+                    messages,
+                    stream=False,
                 )
             except Exception:
                 logger.warning(
@@ -187,6 +201,14 @@ class AgentFactory:
                     profile.name,
                 )
                 raise RuntimeError(ROLE_EXECUTION_ERROR) from None
+
+            if not isinstance(response, dict) or response.get("error"):
+                raise RuntimeError(ROLE_EXECUTION_ERROR)
+            message = response.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError(ROLE_EXECUTION_ERROR)
+            return content.strip()
 
         return ollama_handler
 

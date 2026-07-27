@@ -386,6 +386,55 @@ class TestOllamaRoleExecution(unittest.TestCase):
             {"role": "user", "content": "inspect the workspace"},
         )
 
+    def test_generic_dispatch_does_not_run_model_tools_but_direct_execution_does(self):
+        tool_definition = _tool_definition("terminal_executor")
+        tool_handler = Mock(return_value={"status": "ready"})
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy({"engineer": ["terminal_executor"]}),
+            handlers={"terminal_executor": tool_handler},
+            definitions={"terminal_executor": tool_definition},
+        )
+        tool_response = {
+            "model": "fixture-role",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "terminal_executor",
+                        "arguments": {},
+                    },
+                }],
+            },
+            "done": True,
+        }
+        manager = Mock()
+        manager.chat.side_effect = [
+            tool_response,
+            tool_response,
+            self._response("direct output"),
+        ]
+        factory = AgentFactory(
+            ollama_manager=manager,
+            role_model="fixture-role",
+            role_tool_broker=broker,
+        )
+
+        generic = factory.dispatch_by_role("engineer", "inspect")
+        direct = factory.execute_role_once(
+            "engineer",
+            "inspect",
+            task_id="direct-tool-task",
+        )
+
+        self.assertEqual(generic.status, "error")
+        self.assertNotIn("tools", manager.chat.call_args_list[0].kwargs)
+        self.assertEqual(direct.status, "success")
+        self.assertEqual(manager.chat.call_args_list[1].kwargs["tools"], [
+            tool_definition.to_ollama()
+        ])
+        tool_handler.assert_called_once_with({})
+
     def test_execute_role_once_sanitizes_handler_failure(self):
         factory = AgentFactory()
         handler = Mock(side_effect=RuntimeError("socket path and secret"))
@@ -470,10 +519,8 @@ class TestOllamaRoleExecution(unittest.TestCase):
 
         self.assertEqual(result.status, "success")
         system_prompt = manager.chat.call_args.args[1][0]["content"]
-        self.assertIn(
-            "[AUTHORIZED TOOLS] terminal_executor",
-            system_prompt,
-        )
+        self.assertIn("[TOOL ACCESS] disabled", system_prompt)
+        self.assertNotIn("terminal_executor", system_prompt)
         self.assertNotIn("plugin_sdk", system_prompt)
         self.assertEqual(
             captured_tasks[0].metadata["declared_tools"],

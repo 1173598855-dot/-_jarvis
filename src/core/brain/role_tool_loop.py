@@ -120,6 +120,8 @@ class RoleToolLoop:
                 calls_used += 1
                 self._check_deadline(started_at, elapsed_limit)
                 result = self._invoke(profile, call)
+                if result.byte_size > self._budget.max_result_bytes:
+                    raise RoleToolLoopError("role tool result budget exceeded")
                 result_bytes_used += result.byte_size
                 if result_bytes_used > self._budget.max_total_result_bytes:
                     raise RoleToolLoopError("role tool output budget exceeded")
