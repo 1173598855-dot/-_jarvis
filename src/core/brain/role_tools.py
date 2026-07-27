@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
+
+from core.contracts.role_tool_protocol import (
+    RoleToolBudget,
+    RoleToolCall,
+    RoleToolDefinition,
+    RoleToolInvocation,
+    RoleToolProtocolError,
+    RoleToolResult,
+    stable_json_bytes,
+)
 
 from .role_registry import AgentProfile
 
@@ -67,6 +78,8 @@ class RoleToolBroker:
         policy: Optional[RoleToolPolicy] = None,
         handlers: Optional[Mapping[str, ToolHandler]] = None,
         audit_limit: int = 256,
+        definitions: Optional[Mapping[str, RoleToolDefinition]] = None,
+        budget: Optional[RoleToolBudget] = None,
     ) -> None:
         if type(audit_limit) is not int or audit_limit < 1:
             raise ValueError(
@@ -82,9 +95,25 @@ class RoleToolBroker:
             raise ValueError(
                 "Role tool handlers require non-empty names and callables"
             )
+        declared = dict(definitions or {})
+        if any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(definition, RoleToolDefinition)
+            or definition.name != name
+            for name, definition in declared.items()
+        ):
+            raise ValueError(
+                "Role tool definitions require matching names and definitions"
+            )
+        if budget is not None and not isinstance(budget, RoleToolBudget):
+            raise ValueError("Role tool budget must be a RoleToolBudget")
         self._policy = policy or RoleToolPolicy()
         self._handlers = registered
+        self._definitions = declared
+        self._budget = budget or RoleToolBudget()
         self._audit: deque[RoleToolDecision] = deque(maxlen=audit_limit)
+        self._invocations: deque[RoleToolInvocation] = deque(maxlen=audit_limit)
         self._lock = threading.Lock()
 
     def authorized_tools(self, profile: AgentProfile) -> list[str]:
@@ -96,14 +125,28 @@ class RoleToolBroker:
                 authorized.append(tool_name)
         return authorized
 
+    def authorized_definitions(
+        self,
+        profile: AgentProfile,
+    ) -> list[RoleToolDefinition]:
+        """Return definitions available for safe model invocation."""
+        definitions = []
+        for tool_name in self.authorized_tools(profile):
+            definition = self._definitions.get(tool_name)
+            if definition is not None:
+                definitions.append(definition)
+        return definitions
+
     def invoke(
         self,
         profile: AgentProfile,
-        tool_name: str,
+        tool_name: str | RoleToolCall,
         arguments: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         """Invoke one handler only after an allow decision."""
-        if not isinstance(tool_name, str) or not tool_name:
+        call = tool_name if isinstance(tool_name, RoleToolCall) else None
+        resolved_name = call.name if call is not None else tool_name
+        if not isinstance(resolved_name, str) or not resolved_name:
             raise RoleToolDeniedError(
                 "Role tool call denied: invalid tool name"
             )
@@ -111,17 +154,109 @@ class RoleToolBroker:
             raise RoleToolDeniedError(
                 "Role tool call denied: invalid arguments"
             )
-        decision = self._decide(profile, tool_name)
+        if call is not None and arguments is not None:
+            raise RoleToolDeniedError(
+                "Role tool call denied: arguments must be part of the protocol call"
+            )
+        decision = self._decide(profile, resolved_name)
         if not decision.allowed:
+            if call is not None:
+                self._record_invocation(
+                    profile,
+                    call,
+                    RoleToolResult.failure(decision.reason),
+                    False,
+                    decision.reason,
+                )
             raise RoleToolDeniedError(
                 f"Role tool call denied: {decision.reason}"
             )
-        return self._handlers[tool_name](dict(arguments or {}))
+        if call is None:
+            return self._handlers[resolved_name](dict(arguments or {}))
+
+        definition = self._definitions.get(resolved_name)
+        if definition is None:
+            return self._deny_call(profile, call, "tool_definition_not_registered")
+        try:
+            argument_size = len(stable_json_bytes(call.arguments))
+            if argument_size > self._budget.max_argument_bytes:
+                return self._deny_call(profile, call, "argument_too_large")
+            definition.validate_arguments(call.arguments)
+        except RoleToolProtocolError:
+            return self._deny_call(profile, call, "invalid_arguments")
+
+        started = time.monotonic()
+        try:
+            result = self._handlers[resolved_name](dict(call.arguments))
+            normalized = RoleToolResult.from_value(result)
+            if normalized.byte_size > self._budget.max_result_bytes:
+                return self._deny_call(profile, call, "result_too_large")
+        except RoleToolProtocolError:
+            return self._deny_call(profile, call, "invalid_result")
+        except Exception:
+            self._record_invocation(
+                profile,
+                call,
+                RoleToolResult.failure("handler_error"),
+                False,
+                "handler_error",
+                time.monotonic() - started,
+            )
+            raise
+        self._record_invocation(
+            profile,
+            call,
+            normalized,
+            True,
+            "allowed",
+            time.monotonic() - started,
+        )
+        return result
 
     def audit_log(self) -> list[RoleToolDecision]:
         """Return a copy of the bounded authorization history."""
         with self._lock:
             return list(self._audit)
+
+    def invocation_log(self) -> list[RoleToolInvocation]:
+        """Return bounded, JSON-replayable protocol invocation evidence."""
+        with self._lock:
+            return list(self._invocations)
+
+    def _deny_call(
+        self,
+        profile: AgentProfile,
+        call: RoleToolCall,
+        reason: str,
+    ) -> Any:
+        self._record_invocation(
+            profile,
+            call,
+            RoleToolResult.failure(reason),
+            False,
+            reason,
+        )
+        raise RoleToolDeniedError(f"Role tool call denied: {reason}")
+
+    def _record_invocation(
+        self,
+        profile: AgentProfile,
+        call: RoleToolCall,
+        result: RoleToolResult,
+        allowed: bool,
+        reason: str,
+        elapsed_seconds: float = 0.0,
+    ) -> None:
+        invocation = RoleToolInvocation(
+            role_name=profile.name,
+            call=call,
+            result=result,
+            allowed=allowed,
+            reason=reason,
+            elapsed_seconds=elapsed_seconds,
+        )
+        with self._lock:
+            self._invocations.append(invocation)
 
     def _decide(
         self,

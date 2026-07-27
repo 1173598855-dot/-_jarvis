@@ -12,6 +12,11 @@ from core.brain.role_tools import (
     RoleToolDeniedError,
     RoleToolPolicy,
 )
+from core.contracts.role_tool_protocol import (
+    RoleToolBudget,
+    RoleToolCall,
+    RoleToolDefinition,
+)
 
 
 class TestRoleToolBroker(unittest.TestCase):
@@ -123,6 +128,107 @@ class TestRoleToolBroker(unittest.TestCase):
             RoleToolBroker(audit_limit=0)
         with self.assertRaises(ValueError):
             RoleToolBroker(handlers={"terminal_executor": "not callable"})
+
+    def test_broker_exposes_only_authorized_definitions(self):
+        definition = RoleToolDefinition(
+            name="repository_metadata",
+            description="Read repository state",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+        profile = AgentProfile(
+            name="engineer",
+            display_name="Engineer",
+            description="Implements tested changes.",
+            tools=["repository_metadata", "missing_definition"],
+        )
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy(
+                {"engineer": ["repository_metadata", "missing_definition"]}
+            ),
+            handlers={"repository_metadata": lambda arguments: arguments},
+            definitions={"repository_metadata": definition},
+        )
+
+        self.assertEqual(broker.authorized_definitions(profile), [definition])
+
+    def test_broker_validates_protocol_call_and_records_replayable_result(self):
+        definition = RoleToolDefinition(
+            name="repository_metadata",
+            description="Read repository state",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string", "maxLength": 4}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+        calls = []
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy({"engineer": [definition.name]}),
+            handlers={definition.name: lambda arguments: calls.append(arguments) or {"ok": True}},
+            definitions={definition.name: definition},
+            budget=RoleToolBudget(max_argument_bytes=16, max_result_bytes=16),
+        )
+        call = RoleToolCall.from_ollama(
+            {"id": "call-1", "function": {"name": definition.name, "arguments": {"path": "src"}}},
+            1,
+            1,
+        )
+
+        profile = AgentProfile(
+            name="engineer",
+            display_name="Engineer",
+            description="Implements tested changes.",
+            tools=[definition.name],
+        )
+        self.assertEqual(broker.invoke(profile, call), {"ok": True})
+        invocation = broker.invocation_log()[-1]
+        self.assertTrue(invocation.allowed)
+        self.assertTrue(invocation.result.success)
+        self.assertEqual(invocation.call.to_dict(), call.to_dict())
+        self.assertEqual(invocation.to_dict()["result"]["content"], '{"ok":true}')
+        self.assertEqual(calls, [{"path": "src"}])
+
+    def test_broker_rejects_oversized_or_schema_invalid_arguments_before_handler(self):
+        definition = RoleToolDefinition(
+            name="repository_metadata",
+            description="Read repository state",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+        calls = []
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy({"engineer": [definition.name]}),
+            handlers={definition.name: lambda arguments: calls.append(arguments)},
+            definitions={definition.name: definition},
+            budget=RoleToolBudget(max_argument_bytes=12),
+        )
+
+        with self.assertRaises(RoleToolDeniedError):
+            broker.invoke(
+                AgentProfile(
+                    name="engineer",
+                    display_name="Engineer",
+                    description="Implements tested changes.",
+                    tools=[definition.name],
+                ),
+                RoleToolCall.from_ollama(
+                    {"function": {"name": definition.name, "arguments": {"path": "too-long"}}},
+                    1,
+                    1,
+                ),
+            )
+        self.assertEqual(calls, [])
+        self.assertFalse(broker.invocation_log()[-1].allowed)
+        self.assertEqual(broker.invocation_log()[-1].reason, "argument_too_large")
 
 
 if __name__ == "__main__":
