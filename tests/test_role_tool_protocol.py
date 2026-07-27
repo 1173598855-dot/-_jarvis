@@ -12,6 +12,7 @@ from core.contracts.role_tool_protocol import (
     RoleToolDefinition,
     RoleToolProtocolError,
     RoleToolResult,
+    stable_json_bytes,
 )
 
 
@@ -124,6 +125,12 @@ class TestRoleToolProtocol(unittest.TestCase):
             RoleToolBudget(max_argument_bytes=0)
         with self.assertRaises(RoleToolProtocolError):
             RoleToolBudget(max_elapsed_seconds=0)
+
+    def test_stable_json_bytes_canonicalizes_object_key_order(self):
+        self.assertEqual(
+            stable_json_bytes({"second": 2, "first": 1}),
+            b'{"first":1,"second":2}',
+        )
 
 
 if __name__ == "__main__":

@@ -63,6 +63,7 @@ def stable_json_bytes(value: Any) -> bytes:
         _thaw(value),
         ensure_ascii=False,
         separators=(",", ":"),
+        sort_keys=True,
         allow_nan=False,
     ).encode("utf-8")
 
