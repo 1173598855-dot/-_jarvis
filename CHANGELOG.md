@@ -1,3 +1,30 @@
+## Iteration #133 - 2026-07-27
+
+**Protocol**: Role task record persistence and orphan Worker reconciliation
+**Status**: Complete
+
+### Achievements
+
+- Created `RoleTaskRecordRepository` for atomic JSON-file persistence of `WorkerTaskRecord` snapshots inside the auto-memory directory.
+- Added `RoleWorkerSupervisor.recover_orphans()` that marks non-terminal persisted records as `CRASHED`, terminal-unconfirmed as `FAILED`, and preserves confirmed terminal records.
+- Wired `_persist_role_tasks()` into `AppState.shutdown()` to capture active records before supervisor shutdown.
+- Added orphan recovery to the FastAPI lifespan: loads persisted records after run-state recovery, reconciles orphans, logs count, and clears the file.
+
+### Verification
+
+- `python tests/run_all.py`: 352/352 (350 passed, 2 skipped)
+- `python -m unittest tests.test_role_task_persistence -v`: 13/13 passed
+- `python -m unittest tests.test_role_worker tests.test_role_dispatch_service -v`: 45/45 passed
+- `python -m compileall -q src tests scripts`: passed
+
+### Files Changed
+
+- `src/adapters/role_task_record_repository.py` (new)
+- `src/core/brain/role_worker.py`
+- `src/main_fastapi.py`
+- `tests/test_role_task_persistence.py` (new, 13 tests)
+- `docs/reports/AUDIT_REPORT_133.md`
+---
 ## Iteration #132 - 2026-07-26
 
 **Protocol**: Terminable synchronous role dispatch migration
