@@ -116,6 +116,11 @@ class RoleToolBroker:
         self._invocations: deque[RoleToolInvocation] = deque(maxlen=audit_limit)
         self._lock = threading.Lock()
 
+    @property
+    def budget(self) -> RoleToolBudget:
+        """Return the immutable budget shared with the model tool loop."""
+        return self._budget
+
     def authorized_tools(self, profile: AgentProfile) -> list[str]:
         """Return declared tools that also have a grant and handler."""
         authorized = []
@@ -191,6 +196,8 @@ class RoleToolBroker:
             normalized = RoleToolResult.from_value(result)
             if normalized.byte_size > self._budget.max_result_bytes:
                 return self._deny_call(profile, call, "result_too_large")
+        except RoleToolDeniedError:
+            raise
         except RoleToolProtocolError:
             return self._deny_call(profile, call, "invalid_result")
         except Exception:

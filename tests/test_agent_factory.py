@@ -11,6 +11,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.brain.agent_factory import AgentFactory, DispatchResult
 from core.brain.role_tools import RoleToolBroker, RoleToolPolicy
+from core.contracts.role_tool_protocol import RoleToolDefinition
+
+
+def _tool_definition(name):
+    return RoleToolDefinition(
+        name=name,
+        description=f"Read {name} state",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
 
 
 class TestDispatchByRole(unittest.TestCase):
@@ -301,11 +314,13 @@ class TestOllamaRoleExecution(unittest.TestCase):
         register.assert_not_called()
 
     def test_execute_role_once_preserves_prompt_and_authorized_tool_metadata(self):
+        terminal_definition = _tool_definition("terminal_executor")
         broker = RoleToolBroker(
             policy=RoleToolPolicy(
                 {"engineer": ["terminal_executor", "plugin_sdk"]}
             ),
             handlers={"terminal_executor": lambda arguments: arguments},
+            definitions={"terminal_executor": terminal_definition},
         )
         legacy_manager = Mock()
         legacy_manager.chat.return_value = self._response("legacy output")
@@ -424,11 +439,13 @@ class TestOllamaRoleExecution(unittest.TestCase):
     def test_injected_broker_exposes_only_authorized_registered_tools(self):
         manager = Mock()
         manager.chat.return_value = self._response()
+        terminal_definition = _tool_definition("terminal_executor")
         broker = RoleToolBroker(
             policy=RoleToolPolicy(
                 {"engineer": ["terminal_executor", "plugin_sdk"]}
             ),
             handlers={"terminal_executor": lambda arguments: arguments},
+            definitions={"terminal_executor": terminal_definition},
         )
         factory = AgentFactory(
             ollama_manager=manager,

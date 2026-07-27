@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from core.brain.orchestrator import AgentTask, Orchestrator
 from core.brain.role_registry import AgentProfile, create_default_registry
+from core.brain.role_tool_loop import RoleToolLoop
 from core.brain.role_tools import RoleToolBroker
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,6 @@ class DispatchResult:
 
 
 NL = "\n"  # avoid f-string newline truncation
-
 
 class AgentFactory:
     """Role-driven agent factory connecting RoleRegistry + Orchestrator"""
@@ -62,7 +62,10 @@ class AgentFactory:
         task_id: str,
         timeout: int,
     ) -> AgentTask:
-        authorized_tools = self._role_tool_broker.authorized_tools(profile)
+        authorized_tools = [
+            definition.name
+            for definition in self._role_tool_broker.authorized_definitions(profile)
+        ]
         system_prompt = profile.resolve_prompt(task_prompt)
         full_prompt = self._build_full_prompt(
             profile,
@@ -92,6 +95,7 @@ class AgentFactory:
         task_prompt: str,
         *,
         task_id: str,
+        timeout: int = 300,
     ) -> DispatchResult:
         profile = self.registry.get(role_name)
         if profile is None:
@@ -105,7 +109,7 @@ class AgentFactory:
             profile,
             task_prompt,
             task_id=task_id,
-            timeout=300,
+            timeout=timeout,
         )
         try:
             output = self._default_handler(profile)(task)
@@ -149,14 +153,17 @@ class AgentFactory:
             return compatibility_handler
 
         def ollama_handler(task: AgentTask) -> str:
+            authorized_tools = [
+                name
+                for name in task.metadata.get("authorized_tools", [])
+                if isinstance(name, str) and name
+            ]
             messages = [
                 {
                     "role": "system",
                     "content": self._build_system_prompt(
                         profile,
-                        authorized_tools=list(
-                            task.metadata.get("authorized_tools", [])
-                        ),
+                        authorized_tools=authorized_tools,
                     ),
                 },
                 {
@@ -165,10 +172,14 @@ class AgentFactory:
                 },
             ]
             try:
-                response = self._ollama_manager.chat(
-                    self._role_model,
-                    messages,
-                    stream=False,
+                return RoleToolLoop(
+                    self._ollama_manager,
+                    self._role_tool_broker,
+                ).run(
+                    model=self._role_model,
+                    messages=messages,
+                    profile=profile,
+                    timeout_seconds=task.timeout,
                 )
             except Exception:
                 logger.warning(
@@ -176,14 +187,6 @@ class AgentFactory:
                     profile.name,
                 )
                 raise RuntimeError(ROLE_EXECUTION_ERROR) from None
-
-            if not isinstance(response, dict) or response.get("error"):
-                raise RuntimeError(ROLE_EXECUTION_ERROR)
-            message = response.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, str) or not content.strip():
-                raise RuntimeError(ROLE_EXECUTION_ERROR)
-            return content.strip()
 
         return ollama_handler
 

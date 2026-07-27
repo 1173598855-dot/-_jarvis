@@ -250,8 +250,9 @@ class OllamaManager:
     def chat(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         stream: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """??????"""
         data = {
@@ -259,6 +260,8 @@ class OllamaManager:
             "messages": messages,
             "stream": stream,
         }
+        if tools is not None:
+            data["tools"] = tools
         if stream:
             return self._stream_chat(data)
         result = self._post("/api/chat", data)
@@ -281,7 +284,14 @@ class OllamaManager:
             return False
         if not isinstance(message.get("role"), str) or not message["role"]:
             return False
-        if not isinstance(message.get("content"), str):
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        if content is None:
+            if not tool_calls:
+                return False
+        elif not isinstance(content, str):
+            return False
+        if tool_calls is not None and not isinstance(tool_calls, list):
             return False
         if type(response.get("done")) is not bool:
             return False
