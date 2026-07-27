@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from dataclasses import replace as _dataclass_replace
 from dataclasses import dataclass, field
 import json
 import math
@@ -433,6 +434,40 @@ class RoleWorkerSupervisor:
                     else:
                         self._waiters.pop(task_id, None)
                     self._prune_records()
+
+    def recover_orphans(self, persisted):
+        """Reconcile previously persisted records after a process restart."""
+        recovered = []
+        with self._condition:
+            for record in persisted:
+                if record.task_id in self._records:
+                    continue
+                if record.status.is_terminal:
+                    if not record.termination_confirmed:
+                        failed = _dataclass_replace(
+                            record,
+                            status=WorkerTaskStatus.FAILED,
+                            error='Worker process died before confirmation',
+                            termination_confirmed=True,
+                        )
+                        self._records[record.task_id] = failed
+                        self._terminal_publications.add(record.task_id)
+                        recovered.append(failed)
+                    else:
+                        self._records[record.task_id] = record
+                        recovered.append(record)
+                else:
+                    crashed = record.evolve(
+                        status=WorkerTaskStatus.CRASHED,
+                        error='Worker process terminated by restart',
+                        termination_confirmed=True,
+                    )
+                    self._records[record.task_id] = crashed
+                    self._terminal_publications.add(record.task_id)
+                    recovered.append(crashed)
+                if len(self._records) > self._max_records:
+                    self._prune_records()
+        return recovered
 
     def shutdown(self) -> None:
         with self._lock:

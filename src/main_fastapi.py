@@ -54,6 +54,7 @@ from adapters.file_run_state_repository import (
     FileRunStateRepository,
     RunStateIntegrityError,
 )
+from adapters.role_task_record_repository import RoleTaskRecordRepository
 from adapters.git_workspace import GitWorkspaceInspector
 from app.run_lifecycle import RunLifecycleCoordinator
 from core.brain.agent_factory import AgentFactory
@@ -205,6 +206,16 @@ async def lifespan(_app: FastAPI):
     try:
         try:
             app_state.recovery_outcome = app_state.run_lifecycle.recover_active()
+            orphaned = app_state.role_task_repo.load()
+            if orphaned:
+                recovered = app_state.role_tasks.recover_orphans(orphaned)
+                if recovered:
+                    logger.info(
+                        "Recovered %d orphan role task(s) from previous session",
+                        len(recovered),
+                    )
+                app_state.role_task_repo.clear()
+
         except RunStateIntegrityError:
             logger.error("RUN_STATE_INTEGRITY_ERROR: startup recovery rejected")
             raise
@@ -372,6 +383,8 @@ class AppState:
             )
         self.run_lifecycle = run_lifecycle
         self.recovery_outcome = None
+        self.role_task_repo = RoleTaskRecordRepository(Path(memory_dir))
+
         self.start_time = time.time()
         self.request_count = 0
         self._shutdown_lock = threading.Lock()
@@ -382,10 +395,16 @@ class AppState:
         value = os.environ.get("JARVIS_RUN_STATE_KEY")
         return value.encode("utf-8") if value else None
 
+    def _persist_role_tasks(self) -> None:
+        """Save active role task records before shutdown."""
+        records = self.role_tasks.list(limit=100)
+        self.role_task_repo.save(list(records))
+
     def shutdown(self) -> None:
         with self._shutdown_lock:
             first_error = None
             for resource, cleanup in (
+                ("role_tasks_persist", self._persist_role_tasks),
                 ("role_tasks", self.role_tasks.shutdown),
                 ("orchestrator", self.orchestrator.shutdown),
                 ("agent_factory", self.agent_factory.shutdown),
