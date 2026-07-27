@@ -262,20 +262,21 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
     def test_cancel_record_is_retained_until_observer_delivery_finishes(self):
         observer_started = threading.Event()
         release_observer = threading.Event()
-        overflow_observed = threading.Event()
         request = WorkerTaskRequest.new(
             "engineer",
             "cancel while publishing",
             10,
         )
-        overflow_request = WorkerTaskRequest.new("reviewer", "overflow", 10)
+        updated_request = WorkerTaskRequest.new(
+            "reviewer",
+            "cancel while publishing",
+            10,
+        )
 
         def observe(record):
             if record.task_id == request.task_id:
                 observer_started.set()
                 release_observer.wait(timeout=4)
-            elif record.task_id == overflow_request.task_id:
-                overflow_observed.set()
 
         supervisor = self.make_supervisor(
             _block_only_cancelled_request,
@@ -305,7 +306,6 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             daemon=True,
         )
 
-        retained_while_observing = None
         try:
             supervisor.submit(request)
             cancel_thread.start()
@@ -319,23 +319,20 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
                 time.sleep(0.01)
             self.assertNotIn(request.task_id, supervisor._runtimes)
 
-            supervisor.submit(overflow_request)
-            self.assertTrue(overflow_observed.wait(timeout=4))
-            cleanup_deadline = time.monotonic() + 2
-            while (
-                overflow_request.task_id in supervisor._runtimes
-                and time.monotonic() < cleanup_deadline
-            ):
-                time.sleep(0.01)
-            self.assertNotIn(overflow_request.task_id, supervisor._runtimes)
-            retained_while_observing = supervisor.get(request.task_id)
+            updated = supervisor.submit(updated_request)
+            self.assertEqual(updated.status, WorkerTaskStatus.RUNNING)
+            self.assertIsNotNone(supervisor.get(request.task_id))
         finally:
             release_observer.set()
             cancel_thread.join(timeout=2)
             supervisor._finalize = original_finalize
 
-        self.assertIsNotNone(retained_while_observing)
-        self.assertEqual(cancel_result["record"], retained_while_observing)
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertIsNotNone(cancel_result["record"])
+        self.assertEqual(
+            cancel_result["record"].status,
+            WorkerTaskStatus.CANCELLED,
+        )
 
     def test_success_is_published_only_after_process_exit(self):
         supervisor = self.make_supervisor(

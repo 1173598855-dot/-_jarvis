@@ -380,45 +380,59 @@ class RoleWorkerSupervisor:
             return list(reversed(tuple(self._records.values())[-bounded_limit:]))
 
     def cancel(self, task_id: str) -> WorkerTaskRecord | None:
-        with self._condition:
-            record = self._records.get(task_id)
-            if record is None:
-                return None
-            if record.status.is_terminal:
-                raise WorkerTaskTerminalError(record)
-            runtime = self._runtimes.get(task_id)
-            if runtime is None:
-                return record
-            intent = runtime.termination_intent or WorkerTaskStatus.CANCELLED
-            runtime.termination_intent = intent
-            self._condition.notify_all()
-        confirmed = self._terminate(runtime)
-        if confirmed:
-            error = (
-                "Worker task cancelled"
-                if intent is WorkerTaskStatus.CANCELLED
-                else (
-                    "Worker task timed out after "
-                    f"{runtime.request.timeout_seconds}s"
+        pin_acquired = False
+        try:
+            with self._condition:
+                record = self._records.get(task_id)
+                if record is None:
+                    return None
+                if record.status.is_terminal:
+                    raise WorkerTaskTerminalError(record)
+                self._waiters[task_id] = self._waiters.get(task_id, 0) + 1
+                pin_acquired = True
+                runtime = self._runtimes.get(task_id)
+                if runtime is None:
+                    return self._records.get(task_id)
+                intent = runtime.termination_intent or WorkerTaskStatus.CANCELLED
+                runtime.termination_intent = intent
+                self._condition.notify_all()
+            confirmed = self._terminate(runtime)
+            if confirmed:
+                error = (
+                    "Worker task cancelled"
+                    if intent is WorkerTaskStatus.CANCELLED
+                    else (
+                        "Worker task timed out after "
+                        f"{runtime.request.timeout_seconds}s"
+                    )
                 )
-            )
-            self._finalize(
-                task_id,
-                intent,
-                error=error,
-                termination_confirmed=True,
-            )
-        else:
-            error = (
-                "Worker cancellation could not confirm process termination"
-                if intent is WorkerTaskStatus.CANCELLED
-                else "Worker timeout could not confirm process termination"
-            )
-            self._update_nonterminal_error(
-                task_id,
-                error,
-            )
-        return self.get(task_id)
+                self._finalize(
+                    task_id,
+                    intent,
+                    error=error,
+                    termination_confirmed=True,
+                )
+            else:
+                error = (
+                    "Worker cancellation could not confirm process termination"
+                    if intent is WorkerTaskStatus.CANCELLED
+                    else "Worker timeout could not confirm process termination"
+                )
+                self._update_nonterminal_error(
+                    task_id,
+                    error,
+                )
+            with self._condition:
+                return self._records.get(task_id)
+        finally:
+            if pin_acquired:
+                with self._condition:
+                    remaining_waiters = self._waiters[task_id] - 1
+                    if remaining_waiters:
+                        self._waiters[task_id] = remaining_waiters
+                    else:
+                        self._waiters.pop(task_id, None)
+                    self._prune_records()
 
     def shutdown(self) -> None:
         with self._lock:
