@@ -1613,6 +1613,27 @@ class TestMainHTTPRoleDispatchWorkerAdapter(unittest.TestCase):
 
 
 class TestMainHTTPStateLifecycle(unittest.TestCase):
+    def test_default_worker_receives_resolved_trusted_roots(self):
+        supervisor = MagicMock()
+        with patch.object(
+            _main,
+            "RoleWorkerSupervisor",
+            return_value=supervisor,
+        ) as supervisor_type:
+            app_state = _main.AppState(terminal=MagicMock())
+        try:
+            runner_config = supervisor_type.call_args.kwargs["runner_config"]
+            self.assertEqual(
+                runner_config["memory_dir"],
+                str((Path.cwd() / ".auto-memory").resolve()),
+            )
+            self.assertEqual(
+                runner_config["repository_root"],
+                str(Path.cwd().resolve()),
+            )
+        finally:
+            app_state.shutdown()
+
     def test_run_server_shuts_down_injected_state_when_creation_fails(self):
         app_state = MagicMock()
         with patch.object(

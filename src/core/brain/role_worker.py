@@ -19,7 +19,7 @@ from core.contracts.worker_protocol import (
     WorkerTaskRequest,
     WorkerTaskStatus,
 )
-from core.kernel.secret_redaction import redact_text
+from core.kernel.secret_redaction import redact_text, redact_value
 
 
 DEFAULT_MAX_RECORDS = 100
@@ -42,35 +42,57 @@ def execute_role_task(
     trusted_config: Mapping[str, Any],
 ) -> dict[str, Any]:
     from core.brain.agent_factory import AgentFactory
+    from core.brain.read_only_role_tools import create_read_only_role_tool_broker
+    from core.brain.role_registry import create_default_registry
     from core.kernel.ollama_manager import OllamaManager
 
     request = WorkerTaskRequest.from_dict(request_value)
     base_url = trusted_config.get("ollama_base_url")
     role_model = trusted_config.get("role_model")
+    memory_dir = trusted_config.get("memory_dir")
+    repository_root = trusted_config.get("repository_root")
     if not isinstance(base_url, str) or not base_url.strip():
         raise RuntimeError("trusted Ollama base URL is not configured")
     if not isinstance(role_model, str) or not role_model.strip():
         raise RuntimeError("trusted role model is not configured")
+    if not isinstance(memory_dir, str) or not memory_dir.strip():
+        raise RuntimeError("trusted memory root is not configured")
+    if not isinstance(repository_root, str) or not repository_root.strip():
+        raise RuntimeError("trusted repository root is not configured")
 
     manager = OllamaManager(
         base_url=base_url,
         timeout=None,
     )
+    registry = create_default_registry()
+    broker = create_read_only_role_tool_broker(
+        manager,
+        memory_dir=memory_dir,
+        repository_root=repository_root,
+        role_names=[profile.name for profile in registry.list_roles()],
+    )
     factory = AgentFactory(
+        registry=registry,
         ollama_manager=manager,
         role_model=role_model,
+        role_tool_broker=broker,
     )
     try:
         dispatch = factory.execute_role_once(
             request.role_name,
             request.prompt,
             task_id=request.task_id,
+            timeout=request.timeout_seconds,
         )
         if dispatch.status not in {"success", "completed", "dispatched"}:
             raise RuntimeError(dispatch.message or "Role worker execution failed")
         return {
             "dispatch": dispatch.to_dict(),
             "usage": manager.get_token_usage().to_dict(),
+            "tool_audit": [
+                redact_value(invocation.to_dict())
+                for invocation in broker.invocation_log()
+            ],
         }
     finally:
         factory.shutdown()

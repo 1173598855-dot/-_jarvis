@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -935,6 +935,29 @@ class TestRoleDispatchEndpoints(unittest.TestCase):
             order,
             ["role_tasks", "orchestrator", "agent_factory", "terminal"],
         )
+
+    def test_default_worker_receives_resolved_trusted_roots(self):
+        import main_fastapi
+
+        supervisor = MagicMock()
+        with tempfile.TemporaryDirectory() as memory_dir, patch.object(
+            main_fastapi,
+            "RoleWorkerSupervisor",
+            return_value=supervisor,
+        ) as supervisor_type:
+            app_state = main_fastapi.AppState(memory_dir=memory_dir)
+            try:
+                runner_config = supervisor_type.call_args.kwargs["runner_config"]
+                self.assertEqual(
+                    runner_config["memory_dir"],
+                    str(Path(memory_dir).resolve()),
+                )
+                self.assertEqual(
+                    runner_config["repository_root"],
+                    str(Path.cwd().resolve()),
+                )
+            finally:
+                app_state.shutdown()
 
     def test_injected_role_dispatch_reuses_its_supervisor(self):
         import main_fastapi

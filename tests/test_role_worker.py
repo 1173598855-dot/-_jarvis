@@ -1,5 +1,6 @@
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 import threading
 import time
 from threading import Thread
@@ -39,16 +40,37 @@ class _OllamaWorkerFixture(BaseHTTPRequestHandler):
             self.end_headers()
             return
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
-        body = json.dumps(
-            {
+        request = json.loads(self.rfile.read(length))
+        has_tool_result = any(
+            message.get("role") == "tool"
+            for message in request.get("messages", [])
+            if isinstance(message, dict)
+        )
+        if request.get("tools") and not has_tool_result:
+            response = {
+                "model": "fixture-model:latest",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "worker-tool-1",
+                        "function": {
+                            "name": "repository_metadata",
+                            "arguments": {},
+                        },
+                    }],
+                },
+                "done": True,
+            }
+        else:
+            response = {
                 "model": "fixture-model:latest",
                 "message": {"role": "assistant", "content": "WORKER OK"},
                 "done": True,
                 "prompt_eval_count": 11,
                 "eval_count": 7,
             }
-        ).encode("utf-8")
+        body = json.dumps(response).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -992,6 +1014,8 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
                 runner_config={
                     "ollama_base_url": base_url,
                     "role_model": "fixture-model:latest",
+                    "memory_dir": str(Path.cwd() / ".auto-memory"),
+                    "repository_root": str(Path.cwd()),
                 },
                 on_terminal=lambda record: apply_worker_token_usage(
                     record,
@@ -1007,6 +1031,12 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             self.assertEqual(terminal.result["dispatch"]["message"], "WORKER OK")
             self.assertEqual(terminal.result["usage"]["prompt_tokens"], 11)
             self.assertEqual(terminal.result["usage"]["completion_tokens"], 7)
+            self.assertEqual(len(terminal.result["tool_audit"]), 1)
+            self.assertTrue(terminal.result["tool_audit"][0]["allowed"])
+            self.assertEqual(
+                terminal.result["tool_audit"][0]["call"]["name"],
+                "repository_metadata",
+            )
             usage = parent_manager.get_token_usage()
             self.assertEqual(usage.prompt_tokens, 11)
             self.assertEqual(usage.completion_tokens, 7)
@@ -1016,6 +1046,8 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_fixed_role_runner_uses_direct_execution_without_transport_timeout(self):
+        from core.brain.role_registry import create_default_registry
+
         request = WorkerTaskRequest.new("engineer", "inspect", 17)
         manager = Mock()
         manager.get_token_usage.return_value.to_dict.return_value = {
@@ -1032,6 +1064,21 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
         }
         factory = Mock()
         factory.execute_role_once.return_value = dispatch
+        invocation = Mock()
+        standalone_secret = "".join(
+            ("sk-proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789")
+        )
+        invocation.to_dict.return_value = {
+            "reason": "allowed",
+            "call": {
+                "arguments": {
+                    "query": f"inspect {standalone_secret} ticket-123",
+                }
+            },
+        }
+        broker = Mock()
+        broker.invocation_log.return_value = [invocation]
+        registry = create_default_registry()
 
         with (
             patch(
@@ -1042,12 +1089,22 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
                 "core.brain.agent_factory.AgentFactory",
                 return_value=factory,
             ) as factory_type,
+            patch(
+                "core.brain.read_only_role_tools.create_read_only_role_tool_broker",
+                return_value=broker,
+            ) as broker_factory,
+            patch(
+                "core.brain.role_registry.create_default_registry",
+                return_value=registry,
+            ),
         ):
             result = execute_role_task(
                 request.to_dict(),
                 {
                     "ollama_base_url": "http://fixture.local",
                     "role_model": "fixture-model",
+                    "memory_dir": "C:/trusted-memory",
+                    "repository_root": "C:/trusted-repository",
                 },
             )
 
@@ -1056,17 +1113,30 @@ class TestRoleWorkerSupervisor(unittest.TestCase):
             timeout=None,
         )
         factory_type.assert_called_once_with(
+            registry=registry,
             ollama_manager=manager,
             role_model="fixture-model",
+            role_tool_broker=broker,
+        )
+        broker_factory.assert_called_once_with(
+            manager,
+            memory_dir="C:/trusted-memory",
+            repository_root="C:/trusted-repository",
+            role_names=[profile.name for profile in registry.list_roles()],
         )
         factory.execute_role_once.assert_called_once_with(
             "engineer",
             "inspect",
             task_id=request.task_id,
+            timeout=request.timeout_seconds,
         )
         factory.dispatch_by_role.assert_not_called()
         factory.shutdown.assert_called_once_with()
         self.assertEqual(result["dispatch"]["task_id"], request.task_id)
+        self.assertEqual(result["tool_audit"][0]["reason"], "allowed")
+        self.assertNotIn(standalone_secret, str(result["tool_audit"]))
+        self.assertIn("[REDACTED]", str(result["tool_audit"]))
+        self.assertIn("ticket-123", str(result["tool_audit"]))
 
 
 if __name__ == "__main__":

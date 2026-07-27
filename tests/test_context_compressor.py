@@ -2,6 +2,7 @@
 Context Compressor tests - Phase 11 memory system
 Run: python3 tests/test_context_compressor.py
 """
+import inspect
 import sys
 import tempfile
 import threading
@@ -121,6 +122,82 @@ class TestMemoryStore(unittest.TestCase):
             # After store: MEMORY.md + 1 entry file = 2 md files
             md_files = list(Path(tmp).glob("*.md"))
             self.assertEqual(len(md_files), 2)
+
+    def test_read_only_store_does_not_create_missing_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "missing"
+            self.assertIn("read_only", inspect.signature(MemoryStore).parameters)
+
+            store = MemoryStore(memory_dir=str(memory_dir), read_only=True)
+
+            self.assertEqual(store.load(), [])
+            self.assertFalse(memory_dir.exists())
+
+    def test_read_only_load_bounds_scans_files_and_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp)
+            (memory_dir / "MEMORY.md").write_text("# Memory Index\n", encoding="utf-8")
+            payload = (
+                "---\nname: Match\ntype: user\nimportance: 0.5\n---\n\nneedle"
+            )
+            for index in range(4):
+                (memory_dir / f"user_{index}.md").write_bytes(payload.encode("utf-8"))
+            oversized = memory_dir / "user_oversized.md"
+            oversized.write_bytes(b"x" * 256)
+            self.assertIn("read_only", inspect.signature(MemoryStore).parameters)
+            store = MemoryStore(memory_dir=str(memory_dir), read_only=True)
+
+            file_limited = store.load(
+                max_directory_entries=10,
+                max_files=2,
+                max_file_bytes=1024,
+                max_total_bytes=4096,
+            )
+            directory_limited = store.load(
+                max_directory_entries=1,
+                max_files=10,
+                max_file_bytes=1024,
+                max_total_bytes=4096,
+            )
+            byte_limited = store.load(
+                max_directory_entries=10,
+                max_files=10,
+                max_file_bytes=128,
+                max_total_bytes=len(payload.encode("utf-8")),
+            )
+
+            self.assertEqual(len(file_limited), 2)
+            self.assertLessEqual(len(directory_limited), 1)
+            self.assertEqual(len(byte_limited), 1)
+            self.assertTrue(all(entry.title == "Match" for entry in byte_limited))
+
+    def test_read_only_load_skips_invalid_metadata_and_keeps_valid_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp)
+            invalid = "---\nname: Broken\ntype: invalid\n---\n\nneedle"
+            valid = "---\nname: Valid\ntype: user\n---\n\nneedle"
+            (memory_dir / "user_bad.md").write_bytes(invalid.encode("utf-8"))
+            (memory_dir / "user_good.md").write_bytes(valid.encode("utf-8"))
+            store = MemoryStore(memory_dir=str(memory_dir), read_only=True)
+
+            try:
+                entries = store.load(
+                    max_directory_entries=10,
+                    max_files=10,
+                    max_file_bytes=1024,
+                    max_total_bytes=4096,
+                )
+            except ValueError as error:
+                self.fail(f"invalid read-only candidate was not skipped: {error}")
+
+            self.assertEqual([entry.title for entry in entries], ["Valid"])
+
+    def test_writable_load_rejects_read_only_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(memory_dir=tmp)
+
+            with self.assertRaisesRegex(ValueError, "read-only"):
+                store.load(max_files=1)
 
     def test_load_returns_correct_count(self):
         """Store 1 entry, load returns exactly 1 (MEMORY.md is excluded)"""

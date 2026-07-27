@@ -18,10 +18,13 @@
 import hashlib
 import hmac
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -260,19 +263,36 @@ class SemanticCompressor:
 class MemoryStore:
     """记忆持久化存储 - 管理 .auto-memory/ 目录"""
 
-    def __init__(self, memory_dir: str = ".auto-memory", token_budget: int = 4000):
+    def __init__(
+        self,
+        memory_dir: str = ".auto-memory",
+        token_budget: int = 4000,
+        *,
+        read_only: bool = False,
+    ):
+        self.read_only = bool(read_only)
         self.memory_dir = Path(memory_dir)
-        self.memory_dir.mkdir(exist_ok=True)
+        if self.read_only:
+            self.memory_dir = self.memory_dir.resolve()
+        else:
+            self.memory_dir.mkdir(exist_ok=True)
         self.index_file = self.memory_dir / "MEMORY.md"
         self.token_budget = token_budget
         self.compressor = SemanticCompressor(token_budget=token_budget)
-        self._ensure_index()
+        if not self.read_only:
+            self._ensure_index()
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("MemoryStore is read-only")
 
     def _ensure_index(self):
+        self._require_writable()
         if not self.index_file.exists():
             self.index_file.write_text("# Memory Index\n\n", encoding="utf-8")
 
     def store(self, entry: MemoryEntry) -> str:
+        self._require_writable()
         filename = f"{entry.type.value}_{entry.id}.md"
         filepath = self.memory_dir / filename
         body = f"""---
@@ -323,6 +343,7 @@ probe_cleanup_token: {entry.metadata.get('probe_cleanup_token', '')}
         cleanup_token: str,
     ) -> bool:
         """Delete an integration probe after exact type, title, and token checks."""
+        self._require_writable()
         if not isinstance(memory_type, MemoryType):
             return False
         if not entry_id or any(
@@ -364,38 +385,204 @@ probe_cleanup_token: {entry.metadata.get('probe_cleanup_token', '')}
         self.index_file.write_text("\n".join(retained) + "\n", encoding="utf-8")
         return True
 
-    def load(self, memory_type: Optional[MemoryType] = None) -> List[MemoryEntry]:
+    @staticmethod
+    def _bounded_positive(value: Optional[int], name: str) -> Optional[int]:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError(f"{name} must be a positive integer or None")
+        return value
+
+    @staticmethod
+    def _is_reparse_point(file_stat: os.stat_result) -> bool:
+        attributes = getattr(file_stat, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return bool(attributes & reparse_flag)
+
+    @staticmethod
+    def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def _read_regular_file(
+        self,
+        filepath: Path,
+        expected_stat: os.stat_result,
+        byte_limit: int,
+    ) -> Tuple[Optional[str], int]:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(filepath, flags)
+        except OSError:
+            return None, 0
+        consumed = 0
+        try:
+            opened_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or self._is_reparse_point(opened_stat)
+                or not self._same_file(expected_stat, opened_stat)
+                or opened_stat.st_size > byte_limit
+            ):
+                return None, 0
+            chunks = []
+            remaining = opened_stat.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                consumed += len(chunk)
+                remaining -= len(chunk)
+            final_stat = os.fstat(descriptor)
+            if (
+                remaining
+                or final_stat.st_size != opened_stat.st_size
+                or not self._same_file(opened_stat, final_stat)
+            ):
+                return None, consumed
+            try:
+                return b"".join(chunks).decode("utf-8"), consumed
+            except UnicodeDecodeError:
+                return None, consumed
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _parse_entry(filepath: Path, content: str) -> Optional[MemoryEntry]:
+        if not content.startswith("---"):
+            return None
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return None
+        fm = parts[1].strip()
+        body = parts[2].strip()
+        metadata = {}
+        for line in fm.split("\n"):
+            if ":" in line:
+                key, value = line.split(":", 1)
+                metadata[key.strip()] = value.strip()
+        return MemoryEntry(
+            id=filepath.stem.split("_")[-1],
+            type=MemoryType(metadata.get("type", "user")),
+            title=metadata.get("name", filepath.stem),
+            content=body,
+            metadata=metadata,
+            created_at=metadata.get("created", ""),
+            last_accessed=metadata.get("last_accessed", ""),
+            access_count=int(metadata.get("access_count", 0)),
+            tags=[],
+            importance=float(metadata.get("importance", 0.5)),
+            token_count=int(metadata.get("token_count", 0)),
+            compressed=metadata.get("compressed", "false").lower() == "true",
+            parent_id=metadata.get("parent_id"),
+        )
+
+    def load(
+        self,
+        memory_type: Optional[MemoryType] = None,
+        *,
+        max_directory_entries: Optional[int] = None,
+        max_files: Optional[int] = None,
+        max_file_bytes: Optional[int] = None,
+        max_total_bytes: Optional[int] = None,
+    ) -> List[MemoryEntry]:
+        limits = {
+            "max_directory_entries": self._bounded_positive(
+                max_directory_entries, "max_directory_entries"
+            ),
+            "max_files": self._bounded_positive(max_files, "max_files"),
+            "max_file_bytes": self._bounded_positive(
+                max_file_bytes, "max_file_bytes"
+            ),
+            "max_total_bytes": self._bounded_positive(
+                max_total_bytes, "max_total_bytes"
+            ),
+        }
+        if not self.read_only:
+            if any(value is not None for value in limits.values()):
+                raise ValueError("load limits are available only in read-only mode")
+            return self._load_legacy(memory_type)
+        return self._load_read_only(memory_type, **limits)
+
+    def _load_legacy(self, memory_type: Optional[MemoryType]) -> List[MemoryEntry]:
         entries = []
         for filepath in self.memory_dir.glob("*.md"):
             if filepath.name == "MEMORY.md":
                 continue
             content = filepath.read_text(encoding="utf-8")
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    fm = parts[1].strip()
-                    body = parts[2].strip()
-                    metadata = {}
-                    for line in fm.split("\n"):
-                        if ":" in line:
-                            key, value = line.split(":", 1)
-                            metadata[key.strip()] = value.strip()
-                    entry = MemoryEntry(
-                        id=filepath.stem.split("_")[-1],
-                        type=MemoryType(metadata.get("type", "user")),
-                        title=metadata.get("name", filepath.stem),
-                        content=body, metadata=metadata,
-                        created_at=metadata.get("created", ""),
-                        last_accessed=metadata.get("last_accessed", ""),
-                        access_count=int(metadata.get("access_count", 0)),
-                        tags=[],
-                        importance=float(metadata.get("importance", 0.5)),
-                        token_count=int(metadata.get("token_count", 0)),
-                        compressed=metadata.get("compressed", "false").lower() == "true",
-                        parent_id=metadata.get("parent_id"),
-                    )
-                    if memory_type is None or entry.type == memory_type:
-                        entries.append(entry)
+            entry = self._parse_entry(filepath, content)
+            if entry is not None and (memory_type is None or entry.type == memory_type):
+                entries.append(entry)
+        return entries
+
+    def _load_read_only(
+        self,
+        memory_type: Optional[MemoryType],
+        *,
+        max_directory_entries: Optional[int],
+        max_files: Optional[int],
+        max_file_bytes: Optional[int],
+        max_total_bytes: Optional[int],
+    ) -> List[MemoryEntry]:
+        try:
+            root_stat = os.lstat(self.memory_dir)
+            if (
+                not stat.S_ISDIR(root_stat.st_mode)
+                or self._is_reparse_point(root_stat)
+            ):
+                return []
+            with os.scandir(self.memory_dir) as scanner:
+                candidates = list(islice(scanner, max_directory_entries))
+        except OSError:
+            return []
+
+        entries = []
+        files_seen = 0
+        total_bytes = 0
+        for candidate in sorted(candidates, key=lambda item: item.name):
+            if candidate.name == "MEMORY.md" or not candidate.name.endswith(".md"):
+                continue
+            if max_files is not None and files_seen >= max_files:
+                break
+            files_seen += 1
+            try:
+                if (
+                    candidate.is_symlink()
+                    or not candidate.is_file(follow_symlinks=False)
+                ):
+                    continue
+                candidate_stat = os.lstat(candidate.path)
+            except OSError:
+                continue
+            if self._is_reparse_point(candidate_stat):
+                continue
+            remaining_total = (
+                max_total_bytes - total_bytes
+                if max_total_bytes is not None
+                else candidate_stat.st_size
+            )
+            allowed_bytes = min(
+                candidate_stat.st_size if max_file_bytes is None else max_file_bytes,
+                remaining_total,
+            )
+            if candidate_stat.st_size > allowed_bytes:
+                continue
+            content, consumed = self._read_regular_file(
+                Path(candidate.path),
+                candidate_stat,
+                allowed_bytes,
+            )
+            total_bytes += consumed
+            if content is None:
+                continue
+            try:
+                entry = self._parse_entry(Path(candidate.path), content)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if entry is not None and (memory_type is None or entry.type == memory_type):
+                entries.append(entry)
         return entries
 
     def consolidate(self) -> Dict[str, int]:

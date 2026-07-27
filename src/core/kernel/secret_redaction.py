@@ -27,6 +27,16 @@ _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
     re.IGNORECASE | re.DOTALL,
 )
+_STANDALONE_CREDENTIAL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{20,}"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|AIza[0-9A-Za-z_-]{35}"
+    r"|eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r")(?![A-Za-z0-9_-])"
+)
 
 
 def _normalize_key(key: object) -> str:
@@ -45,10 +55,11 @@ def redact_text(text: str) -> str:
         raise TypeError("text must be a string")
     redacted = _PRIVATE_KEY_BLOCK.sub(REDACTED, text)
     redacted = _BEARER_PATTERN.sub(lambda match: match.group(1) + REDACTED, redacted)
-    return _ASSIGNMENT_PATTERN.sub(
+    redacted = _ASSIGNMENT_PATTERN.sub(
         lambda match: match.group(1) + REDACTED,
         redacted,
     )
+    return _STANDALONE_CREDENTIAL_PATTERN.sub(REDACTED, redacted)
 
 
 def redact_value(value: object, key: str | None = None) -> object:

@@ -360,6 +360,8 @@ class AppState:
                 runner_config={
                     "ollama_base_url": self.ollama.base_url,
                     "role_model": self.agent_factory._role_model,
+                    "memory_dir": str(Path(memory_dir).resolve()),
+                    "repository_root": str(Path.cwd().resolve()),
                 },
                 on_terminal=lambda record: apply_worker_token_usage(
                     record,
