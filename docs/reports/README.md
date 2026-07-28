@@ -7,6 +7,7 @@
 | 文档 | 说明 |
 |---|---|
 | [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-28 当前项目分析 |
+| [AUDIT_REPORT_135.md](AUDIT_REPORT_135.md) | 版本化本地能力记录与只读发现 |
 | [AUDIT_REPORT_134.md](AUDIT_REPORT_134.md) | Worker 内受控只读模型工具循环与最终门禁证据 |
 | [AUDIT_REPORT_133.md](AUDIT_REPORT_133.md) | 角色任务记录持久化与启动孤儿核对 |
 | [AUDIT_REPORT_132.md](AUDIT_REPORT_132.md) | 同步角色 dispatch Worker 迁移与最终门禁证据 |
@@ -16,14 +17,13 @@
 | [AUDIT_REPORT_128.md](AUDIT_REPORT_128.md) | 默认拒绝的角色工具策略、Broker 与提示过滤 |
 | [AUDIT_REPORT_127.md](AUDIT_REPORT_127.md) | 可恢复角色错误与 timeout 安全状态语义 |
 | [AUDIT_REPORT_126.md](AUDIT_REPORT_126.md) | 生产 Ollama 角色执行与共享 Token 证据 |
-| [AUDIT_REPORT_125.md](AUDIT_REPORT_125.md) | 三套服务适配器的角色路由对齐 |
 | [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 安装与环境报告 |
 | [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 学习与项目实践报告 |
 | [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 本地 19 个 Skill 的市场快照 |
 
 ## 滚动策略
 
-- 当前迭代为 134；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 125-134。
+- 当前迭代为 135；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 126-135。
 - 完整迭代台账与每轮文件清单见 [CHANGELOG.md](../../CHANGELOG.md)。
 
 ## 维护规则

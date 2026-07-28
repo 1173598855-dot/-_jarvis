@@ -1,3 +1,44 @@
+## Iteration #135 - 2026-07-28
+
+**Protocol**: Versioned local capability records and read-only discovery
+**Status**: Complete
+
+### Achievements
+
+- Started Stage D with immutable schema-version-1 records for Skill, Plugin, and UI component capabilities, including lifecycle, permissions, compatibility, provenance, health, risk, and public relative paths.
+- Added deterministic repository-local discovery that scans only trusted direct roots, never imports plugin code, rejects symlinked capabilities, ignores generated artifacts, and computes bounded content digests.
+- Preserved unknown version, source, and license metadata as explicit null/incomplete values instead of inventing provenance; malformed plugin manifests remain visible as invalid high-risk records.
+- Discovered the current repository as 22 capability records: 19 Skills, 2 Plugins, and 1 directly exported UI component, with no snapshot-level scan errors.
+- Registered the new 14-test suite exactly once in the canonical aggregate runner and recorded the Stage D design and five-iteration implementation plan.
+
+### Verification
+
+- `python -m unittest tests.test_capability_registry tests.test_run_all_coverage -v`: 27/27 passed
+- `python tests/run_all.py`: 442 total (440 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1297 total (1295 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/core/kernel/capability_manifest.py`
+- `src/core/kernel/capability_registry.py`
+- `tests/test_capability_registry.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `docs/superpowers/specs/2026-07-28-capability-registry-safe-deployment-design.md`
+- `docs/superpowers/plans/2026-07-28-capability-registry-safe-deployment.md`
+- `AGENTS.md`
+- `README.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_135.md`
+- `docs/reports/AUDIT_REPORT_125.md`
+
+---
+
 ## Iteration #134 - 2026-07-28
 
 **Protocol**: Bounded read-only model tools inside role Workers

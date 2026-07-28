@@ -4,29 +4,29 @@
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 134 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 135 本轮测试结果
 
 ## 结论
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
-当前工程重点从“建立可用界面”转为三项长期工作：统一三套服务的机器可读契约、把真实 Ollama/Core API 集成流程纳入持续端到端验证，以及维持本地优先的能力边界。FastAPI 生命周期已迁移到当前推荐的 lifespan API。
+当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135 已完成版本化记录和只读发现，不执行发现到的代码，也不接受网络或归档输入。
 
 ## 当前规模
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 33 个文件，10,203 行非空代码/文档行 |
+| `src/` Python | 35 个文件，10,705 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
-| `tests/` Python | 55 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 428 个用例（426 通过、2 跳过） |
-| 完整 Python discovery | 1282 个用例（1280 通过、2 跳过） |
+| `tests/` Python | 56 个 `test_*.py` 文件 |
+| 规范 Python 聚合套件 | 442 个用例（440 通过、2 跳过） |
+| 完整 Python discovery | 1297 个用例（1295 通过、2 跳过） |
 | 前端 Vitest | 129 个用例通过 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 125-134） |
+| 滚动审计报告 | 10 份（Iteration 126-135） |
 
 ## 运行架构
 
@@ -261,14 +261,22 @@ Role-specific routes remain intentionally outside the shared contract because th
 - 固定只读目录仅包含系统状态、模型列表、编排器状态、Memory 查询和仓库元数据，结果统一脱敏并写入有界审计。
 - 终端执行、Plugin 生命周期、HTTP capability token 与通用 `/api/orchestrator/dispatch` 均未进入该目录或迁移范围。
 
+## Iteration 135 已解决
+
+- 新增 schema version 1 的 Skill、Plugin 和 UI 组件能力记录，统一声明生命周期、权限、兼容约束、来源、摘要、健康与风险。
+- 新增固定可信根的只读发现器；只扫描直接子项，不跟随符号链接、不导入 Plugin，并对文件数和读取字节设置上限。
+- 未知版本、来源和许可证保持显式未知；畸形 Plugin 清单形成 `invalid` 高风险记录，不会被静默遗漏或中断其他发现。
+- 当前真实快照包含 22 条记录：19 个 Skill、2 个 Plugin、1 个直接导出的 UI 组件，无扫描级错误。
+- Phase 3 桥接结论为本地能力已覆盖 D1 实现需求，本轮不新增依赖或外部部署。
+
 ## 四维评分
 
 | 维度 | 得分 | 依据 |
 |---|---:|---|
 | 可维护性 | 95 | POST/GET SSE 路径均由 OpenAPI 和真实三服务 harness 回归，Python 适配器复用单一写入路径 |
-| 扩展性 | 92 | 角色工具 broker 为后续受控执行提供独立策略、handler 和审计边界 |
+| 扩展性 | 94 | 角色工具 broker 与版本化能力记录分别提供执行授权和发现契约边界 |
 | 性能 | 84 | 前端按视图拆包，重型视图仍需低端设备实测 |
-| 安全性 | 93 | HTTP 终端和角色工具均默认拒绝；新异步角色通道使用固定 runner 和可确认终止的进程 Worker |
+| 安全性 | 94 | HTTP 终端和角色工具默认拒绝；能力发现不跟随符号链接、不导入代码并限制读取预算 |
 
 ## 技术债清单
 
@@ -276,6 +284,7 @@ Role-specific routes remain intentionally outside the shared contract because th
 |---|---|---|---|
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
 | Express-only Git API | P1 | OpenAPI `1.12.0` 已覆盖共享 orchestrator、角色路由和异步角色任务；`/api/git/*` 仍是仅由 Express 提供的稳定实现面 | 用独立契约或明确的 OpenAPI 扩展记录 Git 响应与错误 schema |
+| 能力注册与安全部署 | 进行中 | D1 只读目录已完成；兼容解析、包验证、可逆生命周期和 API/UI 尚未交付 | 按 Iteration 136-139 的已提交计划依次完成，并保持默认禁用和无网络输入 |
 | 角色工具执行策略 | 已完成 | Worker 内固定五工具目录、严格 Schema、预算、默认拒绝 Broker 与脱敏审计均已落地 | 保持终端、Plugin 生命周期和 HTTP capability token 在目录之外 |
 | 异步任务持久恢复 | 已完成 | 任务记录在 shutdown 时持久化，启动时核对孤儿 Worker 并恢复明确终态 | 后续存储演进必须保留原子写入和 fail-closed 恢复语义 |
 | 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |

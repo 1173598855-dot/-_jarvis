@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 134
+J.A.R.V.I.S. test suite - Iteration 135
 Run: python tests/run_all.py
 """
 import sys
@@ -20,6 +20,7 @@ from test_agent_factory import TestOllamaRoleExecution
 from test_api_contract import TestSharedApiContract
 from test_context_compressor import TestMemoryStore as TestContextMemoryStore
 from test_context_budget import TestContextBudgetMonitor
+from test_capability_registry import TestCapabilityRecord, TestCapabilityRegistry
 from test_docs_setup import TestSetupDocs
 from test_file_run_state_repository import TestFileRunStateRepository
 from test_iteration_ledger import TestIterationLedger
@@ -309,6 +310,8 @@ AGGREGATE_TEST_CASES = [
     TestRoleToolLoop,
     TestReadOnlyRoleTools,
     TestSecretRedaction,
+    TestCapabilityRecord,
+    TestCapabilityRegistry,
 ]
 
 
@@ -321,7 +324,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 134 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 135 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [

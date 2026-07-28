@@ -197,6 +197,19 @@ class TestRunAllCoverage(unittest.TestCase):
         self.assertLessEqual(expected, set(case_ids))
         self.assertEqual(len(case_ids), len(set(case_ids)))
 
+    def test_aggregate_runner_includes_capability_registry_guards_once(self):
+        case_ids = [
+            (case.__module__, case.__name__)
+            for case in run_all.AGGREGATE_TEST_CASES
+        ]
+        expected = {
+            ("test_capability_registry", "TestCapabilityRecord"),
+            ("test_capability_registry", "TestCapabilityRegistry"),
+        }
+
+        self.assertLessEqual(expected, set(case_ids))
+        self.assertEqual(len(case_ids), len(set(case_ids)))
+
     def test_build_aggregate_suite_loads_every_declared_case(self):
         expected = sum(
             unittest.defaultTestLoader.loadTestsFromTestCase(case).countTestCases()
@@ -210,7 +223,7 @@ class TestRunAllCoverage(unittest.TestCase):
     def test_aggregate_suite_title_uses_declared_case_count(self):
         title = run_all.aggregate_suite_title()
 
-        self.assertIn("Iteration 134", title)
+        self.assertIn("Iteration 135", title)
         self.assertIn(f"({len(run_all.AGGREGATE_TEST_CASES)} classes)", title)
 
 
