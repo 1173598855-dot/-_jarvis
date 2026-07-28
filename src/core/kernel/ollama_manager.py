@@ -22,6 +22,8 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 
+from core.contracts.role_tool_protocol import RoleToolCall, RoleToolProtocolError
+
 
 class Command(Enum):
     STATUS = "status"
@@ -293,6 +295,16 @@ class OllamaManager:
             return False
         if tool_calls is not None and not isinstance(tool_calls, list):
             return False
+        if tool_calls is not None:
+            for call_index, tool_call in enumerate(tool_calls):
+                try:
+                    RoleToolCall.from_ollama(
+                        tool_call,
+                        round_index=0,
+                        call_index=call_index,
+                    )
+                except RoleToolProtocolError:
+                    return False
         if type(response.get("done")) is not bool:
             return False
         for field in ("prompt_eval_count", "eval_count"):

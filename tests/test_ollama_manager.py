@@ -242,6 +242,77 @@ class TestChat(unittest.TestCase):
         self.assertEqual(m.get_token_usage().total_tokens, 11)
         self.assertEqual(len(m.get_token_usage_snapshot()["samples"]), 1)
 
+    def test_chat_serializes_supplied_tools(self):
+        m = make_manager()
+        definition = {
+            "type": "function",
+            "function": {
+                "name": "repository_metadata",
+                "description": "Read repository metadata",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+        }
+        response = {
+            "model": "fixture",
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response) as post:
+            result = m.chat(
+                "fixture",
+                [{"role": "user", "content": "inspect"}],
+                tools=[definition],
+            )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(post.call_args.args[1]["tools"], [definition])
+
+    def test_chat_omits_tools_when_not_supplied(self):
+        m = make_manager()
+        response = {
+            "model": "fixture",
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response) as post:
+            result = m.chat(
+                "fixture",
+                [{"role": "user", "content": "inspect"}],
+            )
+
+        self.assertNotIn("error", result)
+        self.assertNotIn("tools", post.call_args.args[1])
+
+    def test_chat_accepts_valid_tool_only_response(self):
+        m = make_manager()
+        response = {
+            "model": "fixture",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "fixture-call-1",
+                        "function": {
+                            "name": "repository_metadata",
+                            "arguments": {},
+                        },
+                    }
+                ],
+            },
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response):
+            result = m.chat("fixture", [{"role": "user", "content": "inspect"}])
+
+        self.assertEqual(result, response)
+
 class TestPullModel(unittest.TestCase):
     """pull_model() streaming pull with progress output"""
 

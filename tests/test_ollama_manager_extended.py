@@ -179,6 +179,35 @@ class TestOllamaManagerChat(unittest.TestCase):
             result = mgr.chat("llama2", msgs)
         self.assertIn("error", result)
 
+    def test_chat_rejects_malformed_tool_calls(self):
+        malformed_calls = [
+            [{}],
+            [{"function": {}}],
+            [{"function": {"name": "", "arguments": {}}}],
+            [{"function": {"name": "repository_metadata", "arguments": []}}],
+            [{"function": {"name": "repository_metadata", "arguments": "{"}}],
+            [{"id": "", "function": {"name": "repository_metadata", "arguments": {}}}],
+        ]
+
+        for tool_calls in malformed_calls:
+            with self.subTest(tool_calls=tool_calls):
+                mgr = OllamaManager()
+                response = {
+                    "model": "fixture",
+                    "message": {"role": "assistant", "tool_calls": tool_calls},
+                    "done": True,
+                }
+                with patch.object(mgr, "_post", return_value=response):
+                    result = mgr.chat(
+                        "fixture",
+                        [{"role": "user", "content": "inspect"}],
+                    )
+
+                self.assertEqual(
+                    result,
+                    {"error": "Ollama chat response is invalid"},
+                )
+
 
 class TestOllamaManagerStreamChat(unittest.TestCase):
     def test_stream_chat_generator_yields_tuples(self):

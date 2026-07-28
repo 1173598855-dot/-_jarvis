@@ -10,6 +10,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODEL = "fixture"
 
 
+def _requested_tool_name(tools: object) -> str | None:
+    if not isinstance(tools, list):
+        return None
+    names = []
+    for definition in tools:
+        if not isinstance(definition, dict):
+            continue
+        function = definition.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    if "repository_metadata" in names:
+        return "repository_metadata"
+    return names[0] if names else None
+
+
+def _has_tool_result(messages: object) -> bool:
+    return isinstance(messages, list) and any(
+        isinstance(message, dict) and message.get("role") == "tool"
+        for message in messages
+    )
+
+
 class OllamaFixtureHandler(BaseHTTPRequestHandler):
     server_version = "JARVISOllamaFixture/1.0"
 
@@ -58,6 +83,29 @@ class OllamaFixtureHandler(BaseHTTPRequestHandler):
 
         model = payload.get("model") or MODEL
         if payload.get("stream") is False:
+            tool_name = _requested_tool_name(payload.get("tools"))
+            if tool_name and not _has_tool_result(payload.get("messages")):
+                self._send_json(
+                    {
+                        "model": model,
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "fixture-call-1",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": {},
+                                    },
+                                }
+                            ],
+                        },
+                        "done": True,
+                        "prompt_eval_count": 1,
+                        "eval_count": 1,
+                    }
+                )
+                return
             self._send_json(
                 {
                     "model": model,
