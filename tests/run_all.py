@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 132
+J.A.R.V.I.S. test suite - Iteration 134
 Run: python tests/run_all.py
 """
 import sys
@@ -16,7 +16,9 @@ from core.brain.role_registry import AgentProfile, RoleRegistry, create_default_
 from core.kernel.ollama_manager import OllamaModel
 from core.kernel.terminal_executor import CommandRisk, TerminalCommand, TerminalExecutor
 from test_terminal_worker import TestTerminalWorker
+from test_agent_factory import TestOllamaRoleExecution
 from test_api_contract import TestSharedApiContract
+from test_context_compressor import TestMemoryStore as TestContextMemoryStore
 from test_context_budget import TestContextBudgetMonitor
 from test_docs_setup import TestSetupDocs
 from test_file_run_state_repository import TestFileRunStateRepository
@@ -32,10 +34,16 @@ from test_main_fastapi import (
 )
 from test_local_integration_profile import TestLocalIntegrationProfile
 from test_local_integration_runner import TestLocalIntegrationRunner
+from test_ollama_manager import TestChat as TestOllamaChat
+from test_ollama_manager_extended import TestOllamaManagerChat
 from test_phase_a_recovery import TestPhaseARecoveryGate
 from test_project_config import TestPythonDependencies
 from test_readme import TestReadme
+from test_read_only_role_tools import TestReadOnlyRoleTools
 from test_resume_document import TestResumeDocument
+from test_role_tool_loop import TestRoleToolLoop
+from test_role_tool_protocol import TestRoleToolProtocol
+from test_role_tools import TestRoleToolBroker
 from test_role_worker import TestRoleWorkerSupervisor
 from test_role_dispatch_service import (
     TestRoleDispatchServiceBatch,
@@ -45,6 +53,7 @@ from test_role_dispatch_service import (
 )
 from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordinator
 from test_run_state import TestRunState
+from test_secret_redaction import TestSecretRedaction
 from test_plugin_installation import TestPluginInstallation
 from test_worker_protocol import TestWorkerProtocol
 
@@ -277,6 +286,8 @@ AGGREGATE_TEST_CASES = [
     TestRunRecoveryLifespan,
     TestLocalIntegrationProfile,
     TestLocalIntegrationRunner,
+    TestOllamaChat,
+    TestOllamaManagerChat,
     TestPluginInstallation,
     TestRunState,
     TestContextBudgetMonitor,
@@ -291,6 +302,13 @@ AGGREGATE_TEST_CASES = [
     TestRoleDispatchServiceLeases,
     TestRoleDispatchServiceLockOrder,
     TestRoleDispatchServiceBatch,
+    TestOllamaRoleExecution,
+    TestContextMemoryStore,
+    TestRoleToolProtocol,
+    TestRoleToolBroker,
+    TestRoleToolLoop,
+    TestReadOnlyRoleTools,
+    TestSecretRedaction,
 ]
 
 
@@ -303,7 +321,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 132 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 134 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [

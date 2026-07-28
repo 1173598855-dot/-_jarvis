@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.brain.agent_factory import AgentFactory, DispatchResult
+from core.brain.role_registry import READ_ONLY_ROLE_TOOLS
 from core.brain.role_tools import RoleToolBroker, RoleToolPolicy
 from core.contracts.role_tool_protocol import RoleToolDefinition
 
@@ -524,7 +525,12 @@ class TestOllamaRoleExecution(unittest.TestCase):
         self.assertNotIn("plugin_sdk", system_prompt)
         self.assertEqual(
             captured_tasks[0].metadata["declared_tools"],
-            ["orchestrator", "terminal_executor", "plugin_sdk"],
+            [
+                "orchestrator",
+                "terminal_executor",
+                "plugin_sdk",
+                *READ_ONLY_ROLE_TOOLS["engineer"],
+            ],
         )
         self.assertEqual(
             captured_tasks[0].metadata["authorized_tools"],

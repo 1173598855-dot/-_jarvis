@@ -1,3 +1,46 @@
+## Iteration #134 - 2026-07-28
+
+**Protocol**: Bounded read-only model tools inside role Workers
+**Status**: Complete
+
+### Achievements
+
+- Added strict role-tool protocol values, schema validation and explicit call, argument, result, total-output and elapsed-time budgets.
+- Enabled model-driven tool calls only inside the production `RoleWorker`, with every invocation forced through the default-deny `RoleToolBroker` and recorded in a bounded redacted audit.
+- Registered the fixed five-tool read-only catalog for system status, model inventory, orchestrator status, Memory search and repository metadata.
+- Extended Ollama request/response and local fixture coverage for deterministic tool calls, while keeping terminal execution, Plugin lifecycle, HTTP capability tokens and generic `/api/orchestrator/dispatch` outside the capability.
+- Registered the new suites exactly once, synchronized current project documentation, repaired the encoding of the Iteration 133 report and rolled the audit window to Iteration 125-134.
+
+### Verification
+
+- `python tests/run_all.py`: 428 total (426 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1282 total (1280 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `cd frontend; npm test -- --run`: 129/129 passed
+- `cd frontend; JARVIS_E2E_PORT=5174; npm run test:e2e`: 5 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `tests/test_agent_factory.py`
+- `README.md`
+- `AGENTS.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_134.md`
+- `docs/reports/AUDIT_REPORT_133.md`
+- `docs/reports/AUDIT_REPORT_124.md`
+- `docs/reports/AUDIT_REPORT_123.md`
+
+---
+
 ## Iteration #133 - 2026-07-27
 
 **Protocol**: Role task record persistence and orphan Worker reconciliation

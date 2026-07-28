@@ -177,6 +177,26 @@ class TestRunAllCoverage(unittest.TestCase):
 
         self.assertLessEqual(expected, case_names)
 
+    def test_aggregate_runner_includes_controlled_role_tool_guards_once(self):
+        case_ids = [
+            (case.__module__, case.__name__)
+            for case in run_all.AGGREGATE_TEST_CASES
+        ]
+        expected = {
+            ("test_agent_factory", "TestOllamaRoleExecution"),
+            ("test_context_compressor", "TestMemoryStore"),
+            ("test_ollama_manager", "TestChat"),
+            ("test_ollama_manager_extended", "TestOllamaManagerChat"),
+            ("test_read_only_role_tools", "TestReadOnlyRoleTools"),
+            ("test_role_tool_loop", "TestRoleToolLoop"),
+            ("test_role_tool_protocol", "TestRoleToolProtocol"),
+            ("test_role_tools", "TestRoleToolBroker"),
+            ("test_secret_redaction", "TestSecretRedaction"),
+        }
+
+        self.assertLessEqual(expected, set(case_ids))
+        self.assertEqual(len(case_ids), len(set(case_ids)))
+
     def test_build_aggregate_suite_loads_every_declared_case(self):
         expected = sum(
             unittest.defaultTestLoader.loadTestsFromTestCase(case).countTestCases()
@@ -190,7 +210,7 @@ class TestRunAllCoverage(unittest.TestCase):
     def test_aggregate_suite_title_uses_declared_case_count(self):
         title = run_all.aggregate_suite_title()
 
-        self.assertIn("Iteration 132", title)
+        self.assertIn("Iteration 134", title)
         self.assertIn(f"({len(run_all.AGGREGATE_TEST_CASES)} classes)", title)
 
 

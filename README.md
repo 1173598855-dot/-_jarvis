@@ -117,17 +117,22 @@ Role dispatch uses the same `OLLAMA_BASE_URL` and in-process `OllamaManager` as 
 $env:JARVIS_ROLE_MODEL = "llama3.2"
 ```
 
-Role profile `tools` are declarations, not authority. `AgentFactory` uses an empty
-`RoleToolBroker` by default; a tool appears in role prompts only when it is
-declared by the profile, explicitly granted to that role, and backed by a
-registered handler. Automatic model-driven tool invocation is not enabled, and
-no HTTP setting grants terminal or plugin access to roles.
+Role profile `tools` are declarations, not authority. `AgentFactory` still uses
+an empty `RoleToolBroker` by default. Model-driven tools are enabled only inside
+the production `RoleWorker`, where every request must be declared by the role,
+explicitly granted, validated against a strict schema and executed through the
+broker within call, byte and elapsed-time budgets. The fixed catalog contains
+only `system_status`, `model_list`, `orchestrator_status`, `memory_search` and
+`repository_metadata`; it does not expose terminal execution, plugin lifecycle,
+HTTP capability tokens or generic orchestrator dispatch.
 
 FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
 process-owned asynchronous execution. Clients create a task, poll its task ID,
 and may request cancellation; `timeout` and `cancelled` are terminal only after
 the child process is confirmed stopped. Request bodies cannot select a runner,
-command, environment, working directory, or capability token.
+command, environment, working directory, or capability token. Task records are
+persisted during shutdown and reconciled on FastAPI startup; orphaned active
+records become explicit terminal failures instead of being silently resumed.
 
 Terminal execution is disabled by default. To expose the five read-only diagnostic operations (`echo`, `pwd`, `whoami`, `hostname`, and `date`) to a local trusted client, explicitly configure both a high-entropy capability token and the enable flag:
 

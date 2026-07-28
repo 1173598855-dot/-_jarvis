@@ -1,10 +1,10 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-26
+**扫描时间**：2026-07-28
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 132 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 134 本轮测试结果
 
 ## 结论
 
@@ -16,17 +16,17 @@
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 28 个文件，约 8,369 行非空代码/文档行 |
+| `src/` Python | 33 个文件，10,203 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
-| `tests/` Python | 49 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 352 个用例（350 通过、2 跳过） |
-| 完整 Python discovery | 1225 个用例（1223 通过、2 跳过） |
+| `tests/` Python | 55 个 `test_*.py` 文件 |
+| 规范 Python 聚合套件 | 428 个用例（426 通过、2 跳过） |
+| 完整 Python discovery | 1282 个用例（1280 通过、2 跳过） |
 | 前端 Vitest | 129 个用例通过 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 123-132） |
+| 滚动审计报告 | 10 份（Iteration 125-134） |
 
 ## 运行架构
 
@@ -254,6 +254,13 @@ Role-specific routes remain intentionally outside the shared contract because th
 - Express E2E 端口可由 `JARVIS_E2E_PORT` 隔离，避免占用既有开发服务器。
 - `/api/orchestrator/dispatch` 未迁移，保持原有通用编排行为；异步角色任务持久恢复和默认拒绝 Broker 上的模型工具循环仍是明确的 Phase 11 后续项。
 
+## Iteration 133-134 已解决
+
+- 角色任务记录使用原子 JSON 文件持久化；FastAPI 启动时在 run-state 恢复后核对孤儿记录并形成明确终态，不尝试恢复已丢失的 Worker 进程。
+- 模型工具循环只在生产 `RoleWorker` 内启用；严格的工具协议、参数 Schema、调用次数、输入/输出字节与总时限预算共同约束每一轮调用。
+- 固定只读目录仅包含系统状态、模型列表、编排器状态、Memory 查询和仓库元数据，结果统一脱敏并写入有界审计。
+- 终端执行、Plugin 生命周期、HTTP capability token 与通用 `/api/orchestrator/dispatch` 均未进入该目录或迁移范围。
+
 ## 四维评分
 
 | 维度 | 得分 | 依据 |
@@ -269,8 +276,8 @@ Role-specific routes remain intentionally outside the shared contract because th
 |---|---|---|---|
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
 | Express-only Git API | P1 | OpenAPI `1.12.0` 已覆盖共享 orchestrator、角色路由和异步角色任务；`/api/git/*` 仍是仅由 Express 提供的稳定实现面 | 用独立契约或明确的 OpenAPI 扩展记录 Git 响应与错误 schema |
-| 角色工具执行策略 | P1 | 默认拒绝 broker、精确授权、handler 注册与有界审计已落地；自动模型工具循环尚未接入 | 只为固定只读能力注册 handler，并让每次模型工具请求强制经过 broker；不得复用 HTTP capability token 形成隐式授权 |
-| 异步任务持久恢复 | P1 | Worker 状态当前由父进程内存权威维护，服务重启后没有持久任务核对 | 将任务记录接入 RunState，启动时核对孤儿 Worker 后再确定终态 |
+| 角色工具执行策略 | 已完成 | Worker 内固定五工具目录、严格 Schema、预算、默认拒绝 Broker 与脱敏审计均已落地 | 保持终端、Plugin 生命周期和 HTTP capability token 在目录之外 |
+| 异步任务持久恢复 | 已完成 | 任务记录在 shutdown 时持久化，启动时核对孤儿 Worker 并恢复明确终态 | 后续存储演进必须保留原子写入和 fail-closed 恢复语义 |
 | 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |
 | 重型前端视图 | P2 | Chat/Runtime chunk 约 198/215 kB | 低端设备测量后再决定拆包 |
 
@@ -300,13 +307,13 @@ Markdown 和 Chart.js 已按视图懒加载，但对话与运行监控生产 chu
 
 下一步：在真实低端设备上测量交互延迟，再决定是否拆分 Markdown/Chart.js 或按需加载图表。
 
-### P1：角色工具自动调用尚未接入
+### 已完成：受控角色工具调用
 
-默认拒绝的策略与 broker 已落地，角色声明、显式授权和已注册 handler 必须同时匹配，拒绝决策不会到达 handler。`AgentFactory` 当前只把授权后的名称写入提示和任务元数据，尚未解析或执行模型工具请求。下一步只能从固定只读能力开始，并保证每次调用都经过 broker；不得直接暴露任意命令、插件生命周期或 HTTP capability token。
+默认拒绝的策略与 broker 已落地，角色声明、显式授权和已注册 handler 必须同时匹配，拒绝决策不会到达 handler。生产 `RoleWorker` 可解析 Ollama 工具请求，但只能调用固定五工具只读目录；严格 Schema、调用/字节/时间预算、秘密脱敏和有界审计共同生效。普通 `AgentFactory`、终端、Plugin 生命周期、HTTP capability token 和通用 orchestrator dispatch 不获得该能力。
 
 ### P1：timeout 后的执行隔离
 
-FastAPI 的异步角色任务通道与三条同步角色 dispatch 都由父进程拥有权威记录的 Worker 路径执行：timeout/cancelled 必须等待子进程确认退出，迟到事件不能覆盖终态。无法确认终止的 Worker 会保持 resident 并阻止同角色复用，这是有意的 fail-closed 行为。`asyncio.to_thread` 避免 FastAPI 同步 Worker 操作阻塞事件循环，但 HTTP 协程被取消后底层调用仍可能完成。通用 `/api/orchestrator/dispatch` 保持既有行为。下一步是将异步任务记录接入 RunState 与启动恢复；不能把新通道的保证倒推到通用编排路由。
+FastAPI 的异步角色任务通道与三条同步角色 dispatch 都由父进程拥有权威记录的 Worker 路径执行：timeout/cancelled 必须等待子进程确认退出，迟到事件不能覆盖终态。无法确认终止的 Worker 会保持 resident 并阻止同角色复用，这是有意的 fail-closed 行为。任务记录在 shutdown 时持久化，启动时把已丢失进程的孤儿记录核对为明确终态。`asyncio.to_thread` 避免 FastAPI 同步 Worker 操作阻塞事件循环，但 HTTP 协程被取消后底层调用仍可能完成。通用 `/api/orchestrator/dispatch` 保持既有行为，不能把 Worker 通道的保证倒推到该路由。
 
 ### P2：恢复仓库极端崩溃耐久性
 

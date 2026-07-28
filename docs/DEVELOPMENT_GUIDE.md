@@ -2,8 +2,8 @@
 
 > **文档版本**：1.0.0
 > **状态**：生效
-> **基线**：Iteration 132
-> **更新日期**：2026-07-26
+> **基线**：Iteration 134
+> **更新日期**：2026-07-28
 > **适用对象**：项目维护者、主协调 Agent、子代理、Skill/Plugin 作者与前端贡献者
 
 ## 1. 文档目标
@@ -42,7 +42,7 @@
 4. 历史报告只证明过去发生过什么，不能覆盖当前事实。
 5. 发现冲突后更新单一来源，不在多个文档中长期保留不同说法。
 
-## 3. Iteration 132 基线
+## 3. Iteration 134 基线
 
 当前项目已经具备：
 
@@ -53,20 +53,21 @@
 - 角色注册、任务编排、生产 Ollama 执行和普通错误恢复。
 - 版本化 `RunState`、不可变 revision 原子发布、平台化同根读写锁、认证归档标记、上下文水位与启动恢复协调。
 - FastAPI 异步角色任务通道、Express 代理、父进程权威状态与具备 process-handle 串行化的可终止进程 Worker。
-- 默认拒绝的 `RoleToolPolicy` 与 `RoleToolBroker`。
+- 角色任务记录的原子持久化、启动孤儿核对与显式终态恢复。
+- 默认拒绝的 `RoleToolPolicy`、`RoleToolBroker`，以及仅在生产 `RoleWorker` 内启用的固定五工具只读模型循环。
 - HTTP 终端能力的进程隔离 `TerminalWorker`。
 - Plugin SDK、两个 Plugin 目录、19 个本地 Skill。
 - 文件式 MemoryStore、语义压缩和 LLM 压缩入口。
 - Python、Vitest、Playwright、类型检查和构建门禁。
 
-Iteration 132 的验证快照为：Python 聚合 352 项（350 通过、2 跳过）、完整 discovery 1225 项（1223 通过、2 跳过）、Vitest 129、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
+Iteration 134 的验证快照为：Python 聚合 428 项（426 通过、2 跳过）、完整 discovery 1282 项（1280 通过、2 跳过）、Vitest 129、Playwright 5 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
 
 当前主要缺口：
 
 | 优先级 | 缺口 | 约束 |
 |---|---|---|
-| P1 | 异步角色任务尚未持久化并接入启动恢复 | 重启后必须先核对 Worker 再恢复确定终态 |
-| P1 | 模型工具循环尚未接入 | 必须经过默认拒绝 Broker |
+| P1 | 通用 orchestrator dispatch 仍未迁移到 Worker | 必须先定义独立的兼容性与生命周期契约 |
+| P1 | 只读角色工具尚无独立能力注册表 | 保持固定 Worker 内目录，扩展前先交付可信注册与装配边界 |
 | P1 | Plugin 沙箱仍以策略声明为主 | 未验证 native Plugin 不得默认进入核心进程 |
 | P1 | Python 依赖没有精确锁文件 | 自动下载前必须补齐可复现锁定 |
 | P1 | 记忆尚未成为可追溯、可迁移的检索系统 | 压缩不能替代持久化状态 |
@@ -1083,7 +1084,7 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 
 ### 阶段 B：可终止 Agent Worker
 
-状态：进行中。异步 FastAPI/Express 角色任务通道及三条同步角色 dispatch 已迁移为可终止 Worker；任务持久恢复与模型工具循环尚未完成，通用 orchestrator dispatch 保持既有行为。
+状态：已完成当前范围。异步 FastAPI/Express 角色任务通道及三条同步角色 dispatch 已迁移为可终止 Worker，任务记录可持久化并在启动时核对孤儿状态；通用 orchestrator dispatch 保持既有行为，不属于本阶段迁移范围。
 
 - 定义 Worker 请求、事件、取消和终态协议。
 - 将可超时角色工作迁移到进程 Worker。
@@ -1094,6 +1095,8 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 退出门禁：timeout 后 Worker 已确认退出，角色才恢复；迟到消息不能修改新任务。
 
 ### 阶段 C：受控模型工具循环
+
+状态：已完成。模型工具循环只在生产 `RoleWorker` 内启用，使用严格 Schema、调用/字节/时间预算和固定五工具只读目录；所有执行与拒绝均经过 `RoleToolBroker` 并写入脱敏审计。
 
 - 定义工具请求和结果 Schema。
 - 扩展 Ollama fixture 模拟工具调用。

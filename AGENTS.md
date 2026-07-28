@@ -4,9 +4,9 @@
 
 **项目路径**：`C:\GitHub\贾维斯\`
 
-**最后更新**：2026-07-26
+**最后更新**：2026-07-28
 
-**最新迭代**：Iteration 132
+**最新迭代**：Iteration 134
 
 ## 项目目标
 
@@ -65,13 +65,13 @@
 
 ## 当前规模
 
-- `src/`：28 个 Python 文件；服务端源代码统一使用 Python。
+- `src/`：33 个 Python 文件、10,203 行非空代码/文档行；服务端源代码统一使用 Python。
 - `frontend/src/`：38 个 TypeScript/TSX 文件。
-- `tests/`：规范聚合套件 352 个用例；完整 discovery 1225 个用例。
+- `tests/`：55 个 `test_*.py` 文件；规范聚合套件 428 个用例；完整 discovery 1282 个用例。
 - 前端验证：Vitest 129 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
-- `docs/reports/`：滚动保留最近 10 份审计报告，当前为 Iteration 123-132。
+- `docs/reports/`：滚动保留最近 10 份审计报告，当前为 Iteration 125-134。
 
 ## 阶段状态
 
@@ -83,7 +83,7 @@
 | Phase 8 | 进行中 | Plugin SDK、沙箱策略、2 个插件目录 |
 | Phase 9 | 已重构 | Solid.js 六视图指挥中心与响应式导航 |
 | Phase 10 | 已重构 | 真实系统/Token 遥测、状态栏和运行趋势图 |
-| Phase 11 | 进行中 | 异步任务通道与三条同步角色 dispatch 均已迁移至可终止 Worker；任务持久恢复和模型工具循环待完成，通用 orchestrator dispatch 保持不变 |
+| Phase 11 | 进行中 | 异步任务通道与三条同步角色 dispatch 均已迁移至可终止 Worker；任务持久恢复及 Worker 内固定五工具只读模型循环已交付，通用 orchestrator dispatch 保持不变 |
 | Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest/Playwright |
 
 ## 启动方式
@@ -135,4 +135,4 @@ npm run build
 - 临时测试输出使用 `.test-*` 命名并保持 Git 忽略。
 - 不把历史审计报告中的测试数量或阶段状态直接当作当前状态。
 
-Current verified test baseline for Iteration 132: aggregate 352 total (350 passed, 2 skipped); full discovery 1225 total (1223 passed, 2 skipped); Vitest 129 passed; Playwright 5 passed and 1 conditional skip.
+Current verified test baseline for Iteration 134: aggregate 428 total (426 passed, 2 skipped); full discovery 1282 total (1280 passed, 2 skipped); Vitest 129 passed; Playwright 5 passed and 1 conditional skip.
