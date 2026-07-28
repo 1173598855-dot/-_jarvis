@@ -1,3 +1,41 @@
+## Iteration #136 - 2026-07-28
+
+**Protocol**: Bounded compatibility evaluation and deterministic local resolution
+**Status**: Complete
+
+### Achievements
+
+- Added a strict numeric compatibility grammar with exact and ordered comparators, at most eight clauses, bounded components, and explicit rejection of wildcards, caret ranges, prereleases, and malformed expressions.
+- Added immutable runtime targets and capability queries with strict kind, risk, boolean, query-character, length, and `1..100` limit validation.
+- Added deterministic local resolution with exact ID/name, token, and description scoring, health/compatibility/provenance/risk quality signals, and capability-ID tie breaking.
+- Evaluated unsupported or unavailable runtimes as `unknown`, constraint mismatches as `incompatible`, and allowed callers to filter to proven-compatible results without mutating the registry snapshot.
+- Verified the live repository query `memory` resolves only `skill:memory-keeper` with an explicit compatible status; no dependency or external service was introduced.
+
+### Verification
+
+- `python -m unittest tests.test_capability_registry tests.test_capability_resolver tests.test_run_all_coverage -v`: 38/38 passed
+- `python tests/run_all.py`: 452 total (450 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1308 total (1306 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/core/kernel/capability_resolver.py`
+- `tests/test_capability_resolver.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `AGENTS.md`
+- `README.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_136.md`
+- `docs/reports/AUDIT_REPORT_126.md`
+
+---
+
 ## Iteration #135 - 2026-07-28
 
 **Protocol**: Versioned local capability records and read-only discovery

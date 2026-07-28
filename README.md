@@ -130,9 +130,11 @@ Stage D capability discovery is local and read-only. `CapabilityRegistry`
 scans fixed repository roots for Skills, Plugins, and directly exported UI
 components without importing their code. Its versioned records preserve unknown
 source, license, and version fields explicitly, expose only relative paths, and
-include bounded content digests plus health and risk reasons. Package resolution,
-installation lifecycle, and the registry HTTP/UI surface are delivered in later
-Stage D iterations; no archive or URL input is currently accepted.
+include bounded content digests plus health and risk reasons. The local resolver
+supports a strict numeric compatibility subset, bounded kind/risk/compatibility
+filters, and deterministic scoring; unsupported runtimes remain explicitly
+unknown. Package installation, lifecycle, and the registry HTTP/UI surface are
+delivered in later Stage D iterations; no archive or URL input is currently accepted.
 
 FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
 process-owned asynchronous execution. Clients create a task, poll its task ID,
