@@ -7,6 +7,7 @@
 | 文档 | 说明 |
 |---|---|
 | [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 2026-07-29 当前项目分析 |
+| [AUDIT_REPORT_138.md](AUDIT_REPORT_138.md) | 可逆禁用能力生命周期与漂移防护 |
 | [AUDIT_REPORT_137.md](AUDIT_REPORT_137.md) | 已验证的禁用能力包暂存 |
 | [AUDIT_REPORT_136.md](AUDIT_REPORT_136.md) | 有界兼容求值与确定性本地解析 |
 | [AUDIT_REPORT_135.md](AUDIT_REPORT_135.md) | 版本化本地能力记录与只读发现 |
@@ -16,14 +17,13 @@
 | [AUDIT_REPORT_131.md](AUDIT_REPORT_131.md) | 原子恢复发布与角色任务生命周期加固 |
 | [AUDIT_REPORT_130.md](AUDIT_REPORT_130.md) | 可终止异步角色任务生命周期与 OpenAPI 1.12 |
 | [AUDIT_REPORT_129.md](AUDIT_REPORT_129.md) | Phase A 认证上下文连续性与启动恢复 |
-| [AUDIT_REPORT_128.md](AUDIT_REPORT_128.md) | 默认拒绝的角色工具策略、Broker 与提示过滤 |
 | [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 安装与环境报告 |
 | [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 学习与项目实践报告 |
 | [SKILL_MARKETPLACE.md](SKILL_MARKETPLACE.md) | 本地 19 个 Skill 的市场快照 |
 
 ## 滚动策略
 
-- 当前迭代为 137；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 128-137。
+- 当前迭代为 138；仅保留最近 10 份 `AUDIT_REPORT_N.md`，当前范围为 129-138。
 - 完整迭代台账与每轮文件清单见 [CHANGELOG.md](../../CHANGELOG.md)。
 
 ## 维护规则

@@ -1,3 +1,41 @@
+## Iteration #138 - 2026-07-29
+
+**Protocol**: Reversible disabled capability lifecycle with fail-closed drift detection
+**Status**: Complete
+
+### Achievements
+
+- Added bounded immutable upgrades that publish content before atomically switching the selected revision; exact retries remain idempotent and a failed index replacement preserves the previous pointer.
+- Added explicit and previous-revision rollback with full bundle, manifest, and payload revalidation before any state switch.
+- Added canonical revision removal with tombstone restoration on index failure, deterministic fallback selection, last-revision uninstall, and preservation of unknown sibling content.
+- Added restart-safe rebuild from the stored bundle and extracted payload, atomic `revision.json` repair, preservation of root-level operator files, and fail-closed rejection of changed or injected payload content.
+- Serialized same-root writers with the existing shared `RLock`, bounded each capability to 64 revisions, and kept every installed or restored revision disabled.
+
+### Verification
+
+- `python -m unittest tests.test_file_capability_store -v`: 47/47 passed
+- `python tests/run_all.py`: 500 total (498 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1357 total (1355 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/adapters/file_capability_store.py`
+- `tests/test_file_capability_store.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `AGENTS.md`
+- `README.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_138.md`
+- `docs/reports/AUDIT_REPORT_128.md`
+
+---
+
 ## Iteration #137 - 2026-07-29
 
 **Protocol**: Verified local package staging with disabled-only publication

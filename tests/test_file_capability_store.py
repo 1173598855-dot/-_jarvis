@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import warnings
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -470,6 +471,301 @@ class TestFileCapabilityStore(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "CAPABILITY_ALREADY_INSTALLED")
         self.assertEqual(self.store.list_revisions(original.capability_id), (original,))
+
+    def test_upgrade_switches_only_after_publication_and_rollback_restores_previous(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        changed_digest = sha256(changed_bundle)
+
+        second = self.store.upgrade(changed_bundle, changed_digest)
+
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        entry = index["capabilities"][first.capability_id]
+        self.assertNotEqual(first.revision_id, second.revision_id)
+        self.assertEqual(entry["selected_revision"], second.revision_id)
+        self.assertEqual(entry["revisions"], [first.revision_id, second.revision_id])
+        self.assertTrue((self.temp_root / Path(second.relative_path)).is_dir())
+
+        restored = self.store.rollback(first.capability_id)
+
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(restored.revision_id, first.revision_id)
+        self.assertIs(restored.lifecycle, CapabilityLifecycle.DISABLED)
+        self.assertEqual(
+            index["capabilities"][first.capability_id]["selected_revision"],
+            first.revision_id,
+        )
+
+    def test_remove_selected_revision_falls_back_and_last_removal_uninstalls(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        second = self.store.upgrade(changed_bundle, sha256(changed_bundle))
+
+        self.assertTrue(self.store.remove(first.capability_id))
+
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        entry = index["capabilities"][first.capability_id]
+        self.assertEqual(entry["selected_revision"], first.revision_id)
+        self.assertEqual(entry["revisions"], [first.revision_id])
+        self.assertFalse((self.temp_root / Path(second.relative_path)).exists())
+
+        self.assertTrue(self.store.remove(first.capability_id))
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        self.assertNotIn(first.capability_id, index["capabilities"])
+        self.assertEqual(self.store.list_revisions(first.capability_id), ())
+        self.assertFalse(self.store.remove(first.capability_id))
+
+    def test_remove_explicit_revision_preserves_selected_and_unknown_siblings(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        second = self.store.upgrade(changed_bundle, sha256(changed_bundle))
+        revisions_root = (self.temp_root / Path(first.relative_path)).parent
+        unknown = revisions_root / "operator-owned"
+        unknown.mkdir()
+        (unknown / "note.txt").write_text("preserve", encoding="utf-8")
+
+        self.assertTrue(self.store.remove(first.capability_id, first.revision_id))
+
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        entry = index["capabilities"][first.capability_id]
+        self.assertEqual(entry["selected_revision"], second.revision_id)
+        self.assertEqual(entry["revisions"], [second.revision_id])
+        self.assertEqual((unknown / "note.txt").read_text(encoding="utf-8"), "preserve")
+
+    def test_rebuild_after_restart_repairs_state_and_preserves_unknown_root_content(self):
+        installed = self.store.install(self.bundle, self.digest)
+        revision_root = self.temp_root / Path(installed.relative_path)
+        state_path = revision_root / "revision.json"
+        state_path.write_text("not-json", encoding="utf-8")
+        note_path = revision_root / "operator-note.txt"
+        note_path.write_text("preserve", encoding="utf-8")
+
+        rebuilt = FileCapabilityStore(self.temp_root).rebuild(installed.capability_id)
+
+        self.assertEqual(rebuilt, installed)
+        self.assertEqual(note_path.read_text(encoding="utf-8"), "preserve")
+        self.assertEqual(
+            json.loads(state_path.read_text(encoding="utf-8"))["revision_id"],
+            installed.revision_id,
+        )
+
+    def test_rebuild_rejects_changed_and_extra_payload_content(self):
+        installed = self.store.install(self.bundle, self.digest)
+        revision_root = self.temp_root / Path(installed.relative_path)
+        payload_path = revision_root / "payload" / "main.py"
+        payload_path.write_bytes(b"VALUE = 999\n")
+
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.rebuild(installed.capability_id)
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+
+        payload_path.write_bytes(b"VALUE = 1\n")
+        injected = revision_root / "payload" / "injected.py"
+        injected.write_bytes(b"UNDECLARED = True\n")
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.rebuild(installed.capability_id)
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+
+    def test_upgrade_rejects_revision_history_beyond_fixed_bound(self):
+        first = self.store.install(self.bundle, self.digest)
+        for version in range(2, 65):
+            bundle = package_bytes(
+                manifest=manifest_bytes(version=f"{version}.0.0"),
+                payload=f"VALUE = {version}\n".encode("ascii"),
+            )
+            self.store.upgrade(bundle, sha256(bundle))
+
+        overflow_bundle = package_bytes(
+            manifest=manifest_bytes(version="65.0.0"),
+            payload=b"VALUE = 65\n",
+        )
+        overflow_digest = sha256(overflow_bundle)
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.upgrade(overflow_bundle, overflow_digest)
+
+        self.assertEqual(raised.exception.code, "REVISION_HISTORY_LIMIT")
+        revisions = self.store.list_revisions(first.capability_id)
+        self.assertEqual(len(revisions), 64)
+        self.assertFalse(
+            (
+                self.temp_root
+                / f"capabilities/skill/package-example/revisions/{overflow_digest}"
+            ).exists()
+        )
+
+    def test_rollback_refuses_drifted_target_without_switching_pointer(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        second = self.store.upgrade(changed_bundle, sha256(changed_bundle))
+        first_payload = self.temp_root / Path(first.relative_path) / "payload" / "main.py"
+        first_payload.write_bytes(b"VALUE = DRIFTED\n")
+
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.rollback(first.capability_id)
+
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            index["capabilities"][first.capability_id]["selected_revision"],
+            second.revision_id,
+        )
+
+    def test_remove_refuses_drifted_fallback_without_deleting_selected_revision(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        second = self.store.upgrade(changed_bundle, sha256(changed_bundle))
+        first_payload = self.temp_root / Path(first.relative_path) / "payload" / "main.py"
+        first_payload.write_bytes(b"VALUE = DRIFTED\n")
+
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.remove(first.capability_id)
+
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        entry = index["capabilities"][first.capability_id]
+        self.assertEqual(entry["selected_revision"], second.revision_id)
+        self.assertEqual(entry["revisions"], [first.revision_id, second.revision_id])
+        self.assertTrue((self.temp_root / Path(second.relative_path)).is_dir())
+
+    def test_exact_upgrade_retry_fails_closed_on_payload_drift(self):
+        installed = self.store.install(self.bundle, self.digest)
+        payload_path = self.temp_root / Path(installed.relative_path) / "payload" / "main.py"
+        payload_path.write_bytes(b"VALUE = DRIFTED\n")
+        index_before = (self.temp_root / "index.json").read_bytes()
+
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.upgrade(self.bundle, self.digest)
+
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+        self.assertEqual((self.temp_root / "index.json").read_bytes(), index_before)
+
+    def test_exact_install_retry_fails_closed_on_payload_drift(self):
+        installed = self.store.install(self.bundle, self.digest)
+        payload_path = self.temp_root / Path(installed.relative_path) / "payload" / "main.py"
+        payload_path.write_bytes(b"VALUE = DRIFTED\n")
+        index_before = (self.temp_root / "index.json").read_bytes()
+
+        with self.assertRaises(CapabilityStoreError) as raised:
+            self.store.install(self.bundle, self.digest)
+
+        self.assertEqual(raised.exception.code, "REVISION_DRIFT")
+        self.assertEqual((self.temp_root / "index.json").read_bytes(), index_before)
+
+    def test_failed_upgrade_preserves_pointer_and_exact_retry_is_idempotent(self):
+        first = self.store.install(self.bundle, self.digest)
+        changed_bundle = package_bytes(
+            manifest=manifest_bytes(version="2.0.0"),
+            payload=b"VALUE = 2\n",
+        )
+        changed_digest = sha256(changed_bundle)
+        real_replace = os.replace
+
+        def fail_index_replace(source, destination):
+            if Path(destination) == self.temp_root / "index.json":
+                raise OSError("injected index replacement failure")
+            return real_replace(source, destination)
+
+        with patch(
+            "adapters.file_capability_store.os.replace",
+            side_effect=fail_index_replace,
+        ):
+            with self.assertRaises(CapabilityStoreError) as raised:
+                self.store.upgrade(changed_bundle, changed_digest)
+        self.assertEqual(raised.exception.code, "STORE_IO_ERROR")
+
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        entry = index["capabilities"][first.capability_id]
+        self.assertEqual(entry["selected_revision"], first.revision_id)
+        self.assertEqual(entry["revisions"], [first.revision_id])
+
+        recovered = self.store.upgrade(changed_bundle, changed_digest)
+        index_before_retry = (self.temp_root / "index.json").read_bytes()
+        retried = self.store.upgrade(changed_bundle, changed_digest)
+        self.assertEqual(retried, recovered)
+        self.assertEqual((self.temp_root / "index.json").read_bytes(), index_before_retry)
+
+    def test_rollback_validates_missing_invalid_and_unknown_targets(self):
+        installed = self.store.install(self.bundle, self.digest)
+
+        cases = (
+            ((installed.capability_id,), "ROLLBACK_UNAVAILABLE"),
+            ((installed.capability_id, "bad"), "REVISION_ID_INVALID"),
+            ((installed.capability_id, "0" * 64), "REVISION_NOT_FOUND"),
+            (("skill:not-installed",), "CAPABILITY_NOT_INSTALLED"),
+        )
+        for arguments, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(CapabilityStoreError) as raised:
+                    self.store.rollback(*arguments)
+                self.assertEqual(raised.exception.code, code)
+
+    def test_concurrent_upgrades_serialize_shared_root_state(self):
+        first = self.store.install(self.bundle, self.digest)
+        bundles = tuple(
+            package_bytes(
+                manifest=manifest_bytes(version=f"{version}.0.0"),
+                payload=f"VALUE = {version}\n".encode("ascii"),
+            )
+            for version in (2, 3)
+        )
+        stores = (FileCapabilityStore(self.temp_root), FileCapabilityStore(self.temp_root))
+
+        def upgrade(arguments):
+            store, bundle = arguments
+            return store.upgrade(bundle, sha256(bundle))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            upgraded = tuple(executor.map(upgrade, zip(stores, bundles)))
+
+        revisions = self.store.list_revisions(first.capability_id)
+        self.assertEqual(len(revisions), 3)
+        self.assertEqual(
+            {revision.revision_id for revision in revisions},
+            {first.revision_id, *(revision.revision_id for revision in upgraded)},
+        )
+        index = json.loads((self.temp_root / "index.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            index["capabilities"][first.capability_id]["selected_revision"],
+            {revision.revision_id for revision in upgraded},
+        )
+
+    def test_remove_index_failure_restores_revision_and_pointer(self):
+        installed = self.store.install(self.bundle, self.digest)
+        index_before = (self.temp_root / "index.json").read_bytes()
+        revision_path = self.temp_root / Path(installed.relative_path)
+        real_replace = os.replace
+
+        def fail_index_replace(source, destination):
+            if Path(destination) == self.temp_root / "index.json":
+                raise OSError("injected index replacement failure")
+            return real_replace(source, destination)
+
+        with patch(
+            "adapters.file_capability_store.os.replace",
+            side_effect=fail_index_replace,
+        ):
+            with self.assertRaises(CapabilityStoreError) as raised:
+                self.store.remove(installed.capability_id)
+
+        self.assertEqual(raised.exception.code, "STORE_IO_ERROR")
+        self.assertEqual((self.temp_root / "index.json").read_bytes(), index_before)
+        self.assertTrue(revision_path.is_dir())
+        self.assertEqual(list(revision_path.parent.glob("*.remove.tmp")), [])
 
     def test_install_does_not_follow_symlinked_store_components(self):
         capabilities = self.temp_root / "capabilities"

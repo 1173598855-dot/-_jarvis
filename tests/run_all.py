@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. test suite - Iteration 137
+J.A.R.V.I.S. test suite - Iteration 138
 Run: python tests/run_all.py
 """
 import sys
@@ -340,7 +340,7 @@ def canonical_test_count():
 
 
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 137 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return f"J.A.R.V.I.S. test suite - Iteration 138 ({len(AGGREGATE_TEST_CASES)} classes)"
 
 
 SMOKE_TEST_CASES = [

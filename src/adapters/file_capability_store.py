@@ -65,6 +65,7 @@ _STORAGE_SEGMENT_SAFE = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 _READ_CHUNK_BYTES = 64 * 1024
 _STATE_SCHEMA_VERSION = 1
 _MAX_INDEX_BYTES = 4 * 1024 * 1024
+_MAX_REVISIONS_PER_CAPABILITY = 64
 _ROOT_LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[Path, threading.RLock] = {}
 
@@ -212,6 +213,14 @@ class _VerifiedPackage:
     record: CapabilityRecord
     bundle_sha256: str
     file_sha256: tuple[tuple[str, str], ...]
+
+    def to_installed(self) -> InstalledCapability:
+        return InstalledCapability(
+            record=self.record,
+            revision_id=self.bundle_sha256,
+            bundle_sha256=self.bundle_sha256,
+            file_sha256=self.file_sha256,
+        )
 
 
 def _reject_duplicate_keys(items):
@@ -381,12 +390,7 @@ class FileCapabilityStore:
 
     def install(self, bundle: bytes, expected_sha256: str) -> InstalledCapability:
         verified = self._verify_bundle(bundle, expected_sha256)
-        installed = InstalledCapability(
-            record=verified.record,
-            revision_id=verified.bundle_sha256,
-            bundle_sha256=verified.bundle_sha256,
-            file_sha256=verified.file_sha256,
-        )
+        installed = verified.to_installed()
         try:
             with self._thread_lock:
                 index = self._load_index()
@@ -404,6 +408,7 @@ class FileCapabilityStore:
                             "REVISION_CONFLICT",
                             "stored revision metadata does not match the package",
                         )
+                    self._assert_revision_content_matches_state(stored)
                     return stored
 
                 self._publish_revision(bundle, installed)
@@ -417,6 +422,210 @@ class FileCapabilityStore:
             raise
         except OSError as exc:
             raise CapabilityStoreError("STORE_IO_ERROR", "capability store write failed") from exc
+
+    def upgrade(self, bundle: bytes, expected_sha256: str) -> InstalledCapability:
+        verified = self._verify_bundle(bundle, expected_sha256)
+        installed = verified.to_installed()
+        try:
+            with self._thread_lock:
+                index = self._load_index()
+                entry = index["capabilities"].get(installed.capability_id)
+                if entry is None:
+                    raise CapabilityStoreError(
+                        "CAPABILITY_NOT_INSTALLED",
+                        "capability is not installed",
+                    )
+                if installed.revision_id in entry["revisions"]:
+                    stored = self._load_revision(
+                        installed.capability_id,
+                        installed.revision_id,
+                    )
+                    if stored != installed:
+                        raise CapabilityStoreError(
+                            "REVISION_CONFLICT",
+                            "stored revision metadata does not match the package",
+                        )
+                    self._assert_revision_content_matches_state(stored)
+                    return stored
+
+                if len(entry["revisions"]) >= _MAX_REVISIONS_PER_CAPABILITY:
+                    raise CapabilityStoreError(
+                        "REVISION_HISTORY_LIMIT",
+                        "capability revision history is full",
+                    )
+
+                self._publish_revision(bundle, installed)
+                entry["revisions"].append(installed.revision_id)
+                entry["selected_revision"] = installed.revision_id
+                self._write_index(index)
+                return self._load_revision(
+                    installed.capability_id,
+                    installed.revision_id,
+                )
+        except CapabilityStoreError:
+            raise
+        except OSError as exc:
+            raise CapabilityStoreError("STORE_IO_ERROR", "capability store write failed") from exc
+
+    def rollback(
+        self,
+        capability_id: str,
+        revision_id: str | None = None,
+    ) -> InstalledCapability:
+        try:
+            _capability_parts(capability_id)
+        except ValueError as exc:
+            raise CapabilityStoreError("CAPABILITY_ID_INVALID", "capability ID is invalid") from exc
+        if revision_id is not None and (
+            not isinstance(revision_id, str) or not _SHA256_RE.fullmatch(revision_id)
+        ):
+            raise CapabilityStoreError("REVISION_ID_INVALID", "revision ID is invalid")
+
+        try:
+            with self._thread_lock:
+                index = self._load_index()
+                entry = index["capabilities"].get(capability_id)
+                if entry is None:
+                    raise CapabilityStoreError(
+                        "CAPABILITY_NOT_INSTALLED",
+                        "capability is not installed",
+                    )
+                revisions = entry["revisions"]
+                if revision_id is None:
+                    selected_index = revisions.index(entry["selected_revision"])
+                    if selected_index == 0:
+                        raise CapabilityStoreError(
+                            "ROLLBACK_UNAVAILABLE",
+                            "no earlier revision is available",
+                        )
+                    target_revision = revisions[selected_index - 1]
+                else:
+                    target_revision = revision_id
+                    if target_revision not in revisions:
+                        raise CapabilityStoreError(
+                            "REVISION_NOT_FOUND",
+                            "revision is not installed",
+                        )
+
+                installed = self._load_revision(capability_id, target_revision)
+                self._assert_revision_content_matches_state(installed)
+                if entry["selected_revision"] != target_revision:
+                    entry["selected_revision"] = target_revision
+                    self._write_index(index)
+                return installed
+        except CapabilityStoreError:
+            raise
+        except OSError as exc:
+            raise CapabilityStoreError("STORE_IO_ERROR", "capability store write failed") from exc
+
+    def remove(
+        self,
+        capability_id: str,
+        revision_id: str | None = None,
+    ) -> bool:
+        try:
+            _capability_parts(capability_id)
+        except ValueError as exc:
+            raise CapabilityStoreError("CAPABILITY_ID_INVALID", "capability ID is invalid") from exc
+        if revision_id is not None and (
+            not isinstance(revision_id, str) or not _SHA256_RE.fullmatch(revision_id)
+        ):
+            raise CapabilityStoreError("REVISION_ID_INVALID", "revision ID is invalid")
+
+        try:
+            with self._thread_lock:
+                index = self._load_index()
+                entry = index["capabilities"].get(capability_id)
+                if entry is None:
+                    return False
+                target_revision = revision_id or entry["selected_revision"]
+                if target_revision not in entry["revisions"]:
+                    return False
+
+                self._load_revision(capability_id, target_revision)
+                revisions = entry["revisions"]
+                target_index = revisions.index(target_revision)
+                remaining = [item for item in revisions if item != target_revision]
+                fallback_revision = None
+                if entry["selected_revision"] == target_revision and remaining:
+                    fallback_revision = (
+                        revisions[target_index - 1]
+                        if target_index > 0
+                        else remaining[0]
+                    )
+                    fallback = self._load_revision(capability_id, fallback_revision)
+                    self._assert_revision_content_matches_state(fallback)
+
+                relative_path = _revision_relative_path(capability_id, target_revision)
+                revision_path = self._root / Path(relative_path)
+                tombstone = revision_path.parent / (
+                    f".{target_revision}.{uuid4().hex}.remove.tmp"
+                )
+                self._assert_store_path(revision_path)
+                self._assert_store_path(tombstone)
+                if revision_path.is_symlink() or not revision_path.is_dir():
+                    raise CapabilityStoreError(
+                        "STORE_STATE_INVALID",
+                        "stored revision is invalid",
+                    )
+
+                os.replace(revision_path, tombstone)
+                try:
+                    if remaining:
+                        entry["revisions"] = remaining
+                        if fallback_revision is not None:
+                            entry["selected_revision"] = fallback_revision
+                    else:
+                        del index["capabilities"][capability_id]
+                    self._write_index(index)
+                except Exception:
+                    # Restore the immutable revision if index publication aborts.
+                    os.replace(tombstone, revision_path)
+                    raise
+
+                shutil.rmtree(tombstone)
+                return True
+        except CapabilityStoreError:
+            raise
+        except OSError as exc:
+            raise CapabilityStoreError("STORE_IO_ERROR", "capability store write failed") from exc
+
+    def rebuild(self, capability_id: str) -> InstalledCapability:
+        try:
+            _capability_parts(capability_id)
+        except ValueError as exc:
+            raise CapabilityStoreError("CAPABILITY_ID_INVALID", "capability ID is invalid") from exc
+
+        try:
+            with self._thread_lock:
+                index = self._load_index()
+                entry = index["capabilities"].get(capability_id)
+                if entry is None:
+                    raise CapabilityStoreError(
+                        "CAPABILITY_NOT_INSTALLED",
+                        "capability is not installed",
+                    )
+                revision_id = entry["selected_revision"]
+                revision_path = self._root / Path(
+                    _revision_relative_path(capability_id, revision_id)
+                )
+                state_path = revision_path / "revision.json"
+                self._assert_store_path(state_path)
+                if state_path.is_symlink():
+                    raise CapabilityStoreError(
+                        "STORE_STATE_INVALID",
+                        "stored revision is invalid",
+                    )
+                installed = self._reconstruct_revision(capability_id, revision_id)
+                self._replace_state_file(
+                    state_path,
+                    _canonical_json(installed._to_state_dict()),
+                )
+                return installed
+        except CapabilityStoreError:
+            raise
+        except OSError as exc:
+            raise CapabilityStoreError("STORE_IO_ERROR", "capability store rebuild failed") from exc
 
     def list_revisions(self, capability_id: str) -> tuple[InstalledCapability, ...]:
         try:
@@ -938,6 +1147,165 @@ class FileCapabilityStore:
         if len(content) > _MAX_INDEX_BYTES:
             raise CapabilityStoreError("STORE_STATE_INVALID", "store state is too large")
         return content
+
+    def _read_bounded_bundle(self, path: Path) -> bytes:
+        try:
+            if path.stat().st_size > self._limits.max_archive_bytes:
+                raise CapabilityStoreError(
+                    "REVISION_DRIFT",
+                    "stored revision content has drifted",
+                )
+            with path.open("rb") as handle:
+                content = handle.read(self._limits.max_archive_bytes + 1)
+        except CapabilityStoreError:
+            raise
+        except OSError as exc:
+            raise CapabilityStoreError(
+                "STORE_STATE_INVALID",
+                "stored revision cannot be read",
+            ) from exc
+        if len(content) > self._limits.max_archive_bytes:
+            raise CapabilityStoreError(
+                "REVISION_DRIFT",
+                "stored revision content has drifted",
+            )
+        return content
+
+    def _reconstruct_revision(
+        self,
+        capability_id: str,
+        revision_id: str,
+    ) -> InstalledCapability:
+        revision_path = self._root / Path(
+            _revision_relative_path(capability_id, revision_id)
+        )
+        bundle_path = revision_path / "bundle.zip"
+        for path in (revision_path, bundle_path):
+            self._assert_store_path(path)
+        if (
+            revision_path.is_symlink()
+            or not revision_path.is_dir()
+            or bundle_path.is_symlink()
+            or not bundle_path.is_file()
+        ):
+            raise CapabilityStoreError(
+                "STORE_STATE_INVALID",
+                "stored revision is invalid",
+            )
+
+        bundle = self._read_bounded_bundle(bundle_path)
+        try:
+            verified = self._verify_bundle(bundle, revision_id)
+        except CapabilityStoreError as exc:
+            raise CapabilityStoreError(
+                "REVISION_DRIFT",
+                "stored revision content has drifted",
+            ) from exc
+        installed = verified.to_installed()
+        if installed.capability_id != capability_id:
+            raise CapabilityStoreError(
+                "REVISION_DRIFT",
+                "stored revision content has drifted",
+            )
+        self._verify_published_content(revision_path, installed)
+        return installed
+
+    def _assert_revision_content_matches_state(
+        self,
+        installed: InstalledCapability,
+    ) -> None:
+        if self._reconstruct_revision(
+            installed.capability_id,
+            installed.revision_id,
+        ) != installed:
+            raise CapabilityStoreError(
+                "REVISION_DRIFT",
+                "stored revision content has drifted",
+            )
+
+    def _verify_published_content(
+        self,
+        revision_path: Path,
+        installed: InstalledCapability,
+    ) -> None:
+        expected = dict(installed.file_sha256)
+        observed: dict[str, str] = {}
+        total_bytes = 0
+        for name in expected:
+            path = revision_path.joinpath(*PurePosixPath(name).parts)
+            self._assert_store_path(path)
+            if path.is_symlink() or not path.is_file():
+                raise CapabilityStoreError(
+                    "REVISION_DRIFT",
+                    "stored revision content has drifted",
+                )
+            digest = hashlib.sha256()
+            file_bytes = 0
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    file_bytes += len(chunk)
+                    total_bytes += len(chunk)
+                    if (
+                        file_bytes > self._limits.max_file_bytes
+                        or total_bytes > self._limits.max_uncompressed_bytes
+                    ):
+                        raise CapabilityStoreError(
+                            "REVISION_DRIFT",
+                            "stored revision content has drifted",
+                        )
+                    digest.update(chunk)
+            observed[name] = digest.hexdigest()
+
+        payload_path = revision_path / "payload"
+        self._assert_store_path(payload_path)
+        observed_entries = 1
+        for current_root, directory_names, file_names in os.walk(
+            payload_path,
+            topdown=True,
+            followlinks=False,
+        ):
+            current_path = Path(current_root)
+            for child_name in tuple(directory_names) + tuple(file_names):
+                child_path = current_path / child_name
+                self._assert_store_path(child_path)
+                observed_entries += 1
+                if observed_entries > self._limits.max_files:
+                    raise CapabilityStoreError(
+                        "REVISION_DRIFT",
+                        "stored revision content has drifted",
+                    )
+                if child_path.is_symlink():
+                    raise CapabilityStoreError(
+                        "REVISION_DRIFT",
+                        "stored revision content has drifted",
+                    )
+            for file_name in file_names:
+                relative_name = (current_path / file_name).relative_to(
+                    revision_path
+                ).as_posix()
+                if relative_name not in expected:
+                    raise CapabilityStoreError(
+                        "REVISION_DRIFT",
+                        "stored revision content has drifted",
+                    )
+
+        if observed != expected:
+            raise CapabilityStoreError(
+                "REVISION_DRIFT",
+                "stored revision content has drifted",
+            )
+
+    def _replace_state_file(self, path: Path, content: bytes) -> None:
+        temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            self._write_file(temporary, content)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def _ensure_directory(self, path: Path) -> None:
         self._assert_store_path(path)

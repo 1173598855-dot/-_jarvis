@@ -4,29 +4,29 @@
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 137 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 138 本轮测试结果
 
 ## 结论
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
-当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135-137 已完成版本化记录、只读发现、严格兼容求值、确定性解析和已验证的禁用包暂存。包内容不会被导入或执行，网络或 URL 输入不会被接受。
+当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135-138 已完成版本化记录、只读发现、严格兼容求值、确定性解析、已验证的禁用包暂存和可逆生命周期。包内容不会被导入或执行，网络或 URL 输入不会被接受。
 
 ## 当前规模
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 37 个文件，11,869 行非空代码/文档行 |
+| `src/` Python | 37 个文件，12,143 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
 | `tests/` Python | 58 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 486 个用例（484 通过、2 跳过） |
-| 完整 Python discovery | 1343 个用例（1341 通过、2 跳过） |
+| 规范 Python 聚合套件 | 500 个用例（498 通过、2 跳过） |
+| 完整 Python discovery | 1357 个用例（1355 通过、2 跳过） |
 | 前端 Vitest | 129 个用例通过 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 128-137） |
+| 滚动审计报告 | 10 份（Iteration 129-138） |
 
 ## 运行架构
 
@@ -269,6 +269,14 @@ Role-specific routes remain intentionally outside the shared contract because th
 - 当前真实快照包含 22 条记录：19 个 Skill、2 个 Plugin、1 个直接导出的 UI 组件，无扫描级错误。
 - Phase 3 桥接结论为本地能力已覆盖 D1 实现需求，本轮不新增依赖或外部部署。
 
+## Iteration 138 已解决
+
+- 新增最多 64 个不可变修订版的显式升级；只有当新内容发布和索引替换都成功后才切换当前指针。
+- 回滚和删除回退在写入索引前重新验证 bundle、Manifest 与实际 payload；漂移修订版不会被标记为当前版本。
+- 删除使用同目录 tombstone 与失败恢复，最后一个修订版删除后才移除能力记录，未知兄弟内容保持不变。
+- 重建可在重启后从已存 bundle 和 payload 原子修复状态；已声明文件改写或额外 payload 注入均以 `REVISION_DRIFT` 失败关闭。
+- 同根实例共享 `RLock` 串行写入，安装、升级、回滚与重建仍不导入、不执行且始终保持 `disabled`。
+
 ## Iteration 137 已解决
 
 - `FileCapabilityStore` 只接受调用方已提供的 ZIP 字节和匹配的 SHA-256；不下载、不导入、不执行，也不会自动启用能力包。
@@ -298,7 +306,7 @@ Role-specific routes remain intentionally outside the shared contract because th
 |---|---|---|---|
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
 | Express-only Git API | P1 | OpenAPI `1.12.0` 已覆盖共享 orchestrator、角色路由和异步角色任务；`/api/git/*` 仍是仅由 Express 提供的稳定实现面 | 用独立契约或明确的 OpenAPI 扩展记录 Git 响应与错误 schema |
-| 能力注册与安全部署 | 进行中 | D1-D2 只读目录与兼容解析已完成；包验证、可逆生命周期和 API/UI 尚未交付 | 按 Iteration 137-139 的已提交计划依次完成，并保持默认禁用和无网络输入 |
+| 能力注册与安全部署 | 进行中 | D1-D4 只读目录、兼容解析、包验证和可逆生命周期已完成；API/UI 尚未交付 | 完成 Iteration 139 只读契约与视图，并保持默认禁用和无网络输入 |
 | 角色工具执行策略 | 已完成 | Worker 内固定五工具目录、严格 Schema、预算、默认拒绝 Broker 与脱敏审计均已落地 | 保持终端、Plugin 生命周期和 HTTP capability token 在目录之外 |
 | 异步任务持久恢复 | 已完成 | 任务记录在 shutdown 时持久化，启动时核对孤儿 Worker 并恢复明确终态 | 后续存储演进必须保留原子写入和 fail-closed 恢复语义 |
 | 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |

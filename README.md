@@ -136,8 +136,10 @@ filters, and deterministic scoring; unsupported runtimes remain explicitly
 unknown. The local `FileCapabilityStore` accepts already-provided ZIP bytes only
 after bounded archive, manifest, source, license, and entrypoint validation; it
 never imports or executes package content, stores revisions by SHA-256, and
-publishes them as disabled. Package lifecycle and the registry HTTP/UI surface
-remain later Stage D work; no network archive or URL input is accepted.
+publishes them as disabled. Its bounded lifecycle supports atomic upgrade,
+content-revalidated rollback, canonical removal, and restart-safe rebuild with
+fail-closed drift detection. The registry HTTP/UI surface remains later Stage D
+work; no network archive or URL input is accepted.
 
 FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
 process-owned asynchronous execution. Clients create a task, poll its task ID,
