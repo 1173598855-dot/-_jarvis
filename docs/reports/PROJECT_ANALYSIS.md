@@ -1,32 +1,32 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-28
+**扫描时间**：2026-07-29
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 136 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 137 本轮测试结果
 
 ## 结论
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
-当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135-136 已完成版本化记录、只读发现、严格兼容求值和确定性解析，不执行发现到的代码，也不接受网络或归档输入。
+当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135-137 已完成版本化记录、只读发现、严格兼容求值、确定性解析和已验证的禁用包暂存。包内容不会被导入或执行，网络或 URL 输入不会被接受。
 
 ## 当前规模
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 36 个文件，10,914 行非空代码/文档行 |
+| `src/` Python | 37 个文件，11,869 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
-| `tests/` Python | 57 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 452 个用例（450 通过、2 跳过） |
-| 完整 Python discovery | 1308 个用例（1306 通过、2 跳过） |
+| `tests/` Python | 58 个 `test_*.py` 文件 |
+| 规范 Python 聚合套件 | 486 个用例（484 通过、2 跳过） |
+| 完整 Python discovery | 1343 个用例（1341 通过、2 跳过） |
 | 前端 Vitest | 129 个用例通过 |
 | Playwright | 5 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 127-136） |
+| 滚动审计报告 | 10 份（Iteration 128-137） |
 
 ## 运行架构
 
@@ -268,6 +268,12 @@ Role-specific routes remain intentionally outside the shared contract because th
 - 未知版本、来源和许可证保持显式未知；畸形 Plugin 清单形成 `invalid` 高风险记录，不会被静默遗漏或中断其他发现。
 - 当前真实快照包含 22 条记录：19 个 Skill、2 个 Plugin、1 个直接导出的 UI 组件，无扫描级错误。
 - Phase 3 桥接结论为本地能力已覆盖 D1 实现需求，本轮不新增依赖或外部部署。
+
+## Iteration 137 已解决
+
+- `FileCapabilityStore` 只接受调用方已提供的 ZIP 字节和匹配的 SHA-256；不下载、不导入、不执行，也不会自动启用能力包。
+- 验证覆盖压缩归档大小、条目数量、解压总量、单文件大小、路径、编码、链接、加密、压缩方式、布局和 Manifest；仅允许 MIT、Apache-2.0、BSD-2-Clause 与 BSD-3-Clause。
+- 通过临时同级目录和 `os.replace` 发布内容寻址修订版；公开状态仅含相对 POSIX 路径，精确重试幂等，损坏状态和重解析点失败关闭。
 
 ## Iteration 136 已解决
 

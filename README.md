@@ -133,8 +133,11 @@ source, license, and version fields explicitly, expose only relative paths, and
 include bounded content digests plus health and risk reasons. The local resolver
 supports a strict numeric compatibility subset, bounded kind/risk/compatibility
 filters, and deterministic scoring; unsupported runtimes remain explicitly
-unknown. Package installation, lifecycle, and the registry HTTP/UI surface are
-delivered in later Stage D iterations; no archive or URL input is currently accepted.
+unknown. The local `FileCapabilityStore` accepts already-provided ZIP bytes only
+after bounded archive, manifest, source, license, and entrypoint validation; it
+never imports or executes package content, stores revisions by SHA-256, and
+publishes them as disabled. Package lifecycle and the registry HTTP/UI surface
+remain later Stage D work; no network archive or URL input is accepted.
 
 FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
 process-owned asynchronous execution. Clients create a task, poll its task ID,

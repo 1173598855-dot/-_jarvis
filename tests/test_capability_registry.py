@@ -99,6 +99,25 @@ class TestCapabilityRecord(unittest.TestCase):
                 lifecycle="discovered",
             )
 
+    def test_record_rejects_surrogates_in_public_text(self):
+        for field_name in ("name", "version", "description", "source_url"):
+            arguments = {
+                "capability_id": "skill:example",
+                "kind": CapabilityKind.SKILL,
+                "name": "example",
+                "version": "1.0.0",
+                "description": "description",
+                "relative_path": "skills/example",
+                "entrypoint": None,
+                "source_url": "https://example.com/skill",
+            }
+            arguments[field_name] = "invalid\ud800text"
+
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(CapabilityValidationError) as raised:
+                    CapabilityRecord.create(**arguments)
+                self.assertEqual(raised.exception.code, "field_unicode_invalid")
+
 
 class TestCapabilityRegistry(unittest.TestCase):
     def setUp(self):

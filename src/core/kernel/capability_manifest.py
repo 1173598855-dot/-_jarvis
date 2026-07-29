@@ -58,6 +58,8 @@ def _validate_text(value: str, field_name: str, *, maximum: int, empty: bool = F
         raise CapabilityValidationError("field_too_long", f"{field_name} is too long")
     if any(ord(character) < 32 for character in value):
         raise CapabilityValidationError("field_control_character", f"{field_name} has control characters")
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise CapabilityValidationError("field_unicode_invalid", f"{field_name} has invalid Unicode")
     return value
 
 

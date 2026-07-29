@@ -50,6 +50,7 @@ frontend/debug.log
 # JARVIS generated state
 .auto-memory/
 artifacts/
+capability-store/
 
 # Machine-local Compound Engineering preferences
 .compound-engineering/*.local.yaml

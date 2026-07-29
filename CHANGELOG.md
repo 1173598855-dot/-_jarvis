@@ -1,3 +1,44 @@
+## Iteration #137 - 2026-07-29
+
+**Protocol**: Verified local package staging with disabled-only publication
+**Status**: Complete
+
+### Achievements
+
+- Added a standard-library `FileCapabilityStore` for content-addressed local ZIP bundles without network access, imports, process creation, or automatic enablement.
+- Enforced archive byte, entry-count, expanded-byte, and per-file limits before publication; rejected traversal, absolute/drive/backslash paths, symlinks, encrypted members, duplicate/conflicting entries, invalid encodings, unsupported compression, and malformed layouts.
+- Required a strict manifest with HTTPS source, one of four allowlisted licenses, a valid payload entrypoint, and verified immutable public metadata that retains repository-relative POSIX paths only.
+- Published verified revisions through temporary siblings and `os.replace`, retained disabled lifecycle state, failed closed on damaged state or reparse traversal, and made exact retries idempotent and failed publications retryable.
+- Added regression coverage for malformed archives, manifest and license validation, Win32 aliases, state reload, atomic failure cleanup, storage identity aliasing, and all allowlisted licenses.
+
+### Verification
+
+- `python -m unittest tests.test_file_capability_store tests.test_capability_registry -v`: 48/48 passed
+- `python tests/run_all.py`: 486 total (484 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1343 total (1341 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `.gitignore`
+- `src/adapters/file_capability_store.py`
+- `src/core/kernel/capability_manifest.py`
+- `tests/test_file_capability_store.py`
+- `tests/test_capability_registry.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `AGENTS.md`
+- `README.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_137.md`
+- `docs/reports/AUDIT_REPORT_127.md`
+
+---
+
 ## Iteration #136 - 2026-07-28
 
 **Protocol**: Bounded compatibility evaluation and deterministic local resolution

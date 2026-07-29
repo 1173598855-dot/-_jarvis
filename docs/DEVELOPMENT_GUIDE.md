@@ -1182,7 +1182,7 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 - Worker Protocol。
 - Plugin API。
 - Skill Manifest。
-- Capability Registry。
+- Capability Registry and verified disabled package staging.
 - Memory Storage Schema。
 - Context Checkpoint Schema。
 - Vision Event Schema。
