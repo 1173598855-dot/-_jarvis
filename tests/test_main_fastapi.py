@@ -6,6 +6,7 @@ import asyncio
 from contextlib import contextmanager
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -71,6 +72,36 @@ def _capability_snapshot(issues=()):
 
 # Test that the module can be imported (syntax check)
 class TestMainFastapiSyntax(unittest.TestCase):
+
+    def test_src_module_prefers_the_worktree_core_over_inherited_pythonpath(self):
+        worktree_root = Path(__file__).resolve().parents[1]
+        main_checkout_src = worktree_root.parents[1] / "src"
+        environment = os.environ.copy()
+        inherited_pythonpath = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            value
+            for value in (str(main_checkout_src), inherited_pythonpath)
+            if value
+        )
+        script = (
+            "import src.main_fastapi; "
+            "import core.kernel.plugin_sdk as plugin_sdk; "
+            "from pathlib import Path; "
+            "print(Path(plugin_sdk.__file__).resolve())"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=worktree_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plugin_sdk_path = Path(result.stdout.strip()).resolve()
+        self.assertTrue(plugin_sdk_path.is_relative_to(worktree_root))
 
     def test_import_main_fastapi(self):
         """Verify main_fastapi.py can be parsed without syntax errors"""

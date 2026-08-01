@@ -45,6 +45,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+# Resolve repository-local adapters and core modules before inherited paths.
+sys_path = str(Path(__file__).parent)
+if sys_path not in sys.path:
+    sys.path.insert(0, sys_path)
+
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,11 +108,6 @@ from core.kernel.runtime_security import (
 from core.kernel.terminal_executor import TerminalCommand, TerminalExecutor
 from core.kernel.terminal_policy import TerminalPolicyError, validate_terminal_operation
 from core.kernel.terminal_worker import TerminalWorker
-
-# Add src to path (after imports so Phase 11 modules resolve)
-sys_path = str(Path(__file__).parent)
-if sys_path not in sys.path:
-    sys.path.insert(0, sys_path)
 
 logger = logging.getLogger(__name__)
 MAX_REQUEST_BODY_BYTES = 32 * 1024
