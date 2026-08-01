@@ -4,8 +4,6 @@
   "description": "Template plugin for XiaoYi plugin development.",
   "author": "XiaoYi",
   "permissions": [
-    "system_config",
-    "file_read",
     "event_bus"
   ],
   "denied_apis": [
@@ -13,7 +11,7 @@
     "child_process",
     "network"
   ],
-  "runtime": "native",
+  "runtime": "python_worker",
   "sandbox": true,
   "entry_point": "plugin.py",
   "dependencies": [],

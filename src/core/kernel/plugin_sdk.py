@@ -1,47 +1,38 @@
-"""
-Plugin SDK — 小奕 J.A.R.V.I.S. 插件系统
-Phase 7-8: Plugin 沙箱系统基础设施
+"""Parent-side coordinator for isolated Plugin workers.
 
-功能：
-1. Manifest 权限清单解析与校验
-2. Plugin 生命周期管理（加载/启用/禁用/卸载）
-3. 运行时沙箱隔离（Python uv + JS worker_threads）
-4. 权限校验与 API 脱敏
-5. 插件崩溃自恢复
-6. 依赖注入（DI）受限 API
-
-设计原则：
-- 所有插件必须声明 manifest.json
-- 运行时仅暴露 XiaoYiPluginAPI（脱敏后的受限接口）
-- 禁止原生 fs、child_process、未授权网络
-- 插件崩溃不影响主进程
+Plugin source code is never imported by this module.  The only executable
+Plugin boundary is :class:`SubprocessPluginRuntime`, which owns a child
+process and the versioned worker protocol.
 """
 
-import os
-import sys
-import json
-import uuid
-import importlib
-import logging
-import subprocess
-import threading
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-from pathlib import Path
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+import json
+import logging
+from pathlib import Path
+import threading
+import uuid
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
+
+from adapters.subprocess_plugin_runtime import (
+    PluginRuntimeError,
+    SubprocessPluginRuntime,
+)
+from core.contracts.plugin_worker_protocol import LifecycleAction, PluginLoadSpec, redact_protocol_error
+from core.kernel.event_bus import EventBus
+from core.kernel.plugin_broker import FIRST_PARTY_EVENT_GRANTS, PluginBroker
+
 
 logger = logging.getLogger(__name__)
-
 PLUGIN_API_VERSION = "1.0.0"
+PLUGIN_RUNTIME_UNSUPPORTED = "PLUGIN_RUNTIME_UNSUPPORTED"
+PLUGIN_WORKER_LIFECYCLE_FAILED = "PLUGIN_WORKER_LIFECYCLE_FAILED"
 
-
-# ============================================================
-# 类型定义
-# ============================================================
 
 class PluginStatus(Enum):
-    """插件状态"""
     LOADED = "loaded"
     ENABLED = "enabled"
     DISABLED = "disabled"
@@ -50,16 +41,17 @@ class PluginStatus(Enum):
 
 
 class RuntimeType(Enum):
-    """运行时类型"""
+    """Known manifest values; only ``PYTHON_WORKER`` is executable."""
+
     PYTHON_UV = "python_uv"
     PYTHON_VENV = "python_venv"
     NODE_WORKER = "node_worker"
     NATIVE = "native"
+    PYTHON_WORKER = "python_worker"
 
 
 @dataclass
 class PluginManifest:
-    """插件清单（manifest.json）"""
     name: str
     version: str
     description: str
@@ -73,14 +65,15 @@ class PluginManifest:
     api_version: str = PLUGIN_API_VERSION
     plugin_id: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.plugin_id:
             self.plugin_id = str(uuid.uuid4())[:8]
 
 
 @dataclass
 class PluginInstance:
-    """插件实例"""
+    """Public lifecycle state plus private parent-owned Worker handle."""
+
     manifest: PluginManifest
     status: PluginStatus
     module: Any = None
@@ -88,22 +81,15 @@ class PluginInstance:
     loaded_at: str = ""
     last_activated: str = ""
     activation_count: int = 0
+    worker_pid: int | None = None
+    generation: int = 0
+    termination_confirmed: bool = False
+    _runtime: Any = field(default=None, repr=False, compare=False)
+    _identity: tuple[str, str] | None = field(default=None, repr=False, compare=False)
 
-
-# ============================================================
-# 受限 API 接口（XiaoYiPluginAPI）
-# ============================================================
 
 class XiaoYiPluginAPI:
-    """
-    插件受限 API — 仅暴露经过脱敏的接口
-
-    禁止直接访问：
-    - 原生文件系统（fs、open、os.remove）
-    - 子进程（child_process、subprocess、os.system）
-    - 未授权网络请求（socket、requests.post 到外部）
-    - 系统环境变量（os.environ、process.env）
-    """
+    """Worker-local restricted API that delegates every capability to Broker."""
 
     def __init__(
         self,
@@ -111,7 +97,7 @@ class XiaoYiPluginAPI:
         permissions: List[str],
         broker_call: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         audit_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ):
+    ) -> None:
         self.plugin_id = plugin_id
         self._permissions = set(permissions)
         self._audit_log: List[Dict[str, Any]] = []
@@ -119,11 +105,9 @@ class XiaoYiPluginAPI:
         self._audit_sink = audit_sink
 
     def check_permission(self, permission: str) -> bool:
-        """检查权限"""
         return permission in self._permissions
 
     def log_access(self, api_name: str, args: Dict[str, Any]) -> None:
-        """记录 API 访问日志"""
         entry = {
             "plugin_id": self.plugin_id,
             "api": api_name,
@@ -137,388 +121,340 @@ class XiaoYiPluginAPI:
             except Exception:
                 pass
 
-    # ============================================================
-    # 受限 API 实现
-    # ============================================================
+    def _call(self, permission: str, capability: str, arguments: Dict[str, Any]) -> Any:
+        if not self.check_permission(permission):
+            raise PermissionError(f"Plugin {self.plugin_id} lacks {permission} permission")
+        self.log_access(capability, arguments)
+        if self._broker_call is None:
+            raise RuntimeError("Plugin Broker is unavailable")
+        return self._broker_call(capability, arguments)
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        """Get configuration through the active Broker when available."""
-        if self._broker_call is not None:
-            self.log_access("get_config", {"key": key})
-            return self._broker_call("config.get", {"key": key, "default": default})
-        if not self.check_permission("system_config"):
-            raise PermissionError(f"插件 {self.plugin_id} 无 system_config 权限")
-        self.log_access("get_config", {"key": key})
-        return default
+        return self._call("system_config", "config.get", {"key": key, "default": default})
 
     def read_file(self, path: str) -> Any:
-        """Read through the active Broker when available."""
-        if self._broker_call is not None:
-            self.log_access("read_file", {"path": path})
-            return self._broker_call("file.read", {"path": path})
-        if not self.check_permission("file_read"):
-            raise PermissionError(f"插件 {self.plugin_id} 无 file_read 权限")
-        self.log_access("read_file", {"path": path})
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            return f"ERROR: {e}"
+        return self._call("file_read", "file.read", {"path": path})
 
     def emit_event(self, event_type: str, payload: Any) -> Any:
-        """Emit through the active Broker when available."""
-        if self._broker_call is not None:
-            self.log_access("emit_event", {"type": event_type})
-            return self._broker_call(
-                "event.emit",
-                {"event_type": event_type, "payload": payload},
-            )
-        if not self.check_permission("event_bus"):
-            raise PermissionError(f"插件 {self.plugin_id} 无 event_bus 权限")
-        self.log_access("emit_event", {"type": event_type})
-        # 实际中会调用事件总线
-        logger.info(f"[Plugin {self.plugin_id}] Event: {event_type}")
+        return self._call("event_bus", "event.emit", {"event_type": event_type, "payload": payload})
 
     def call_llm(self, prompt: str, model: str = "default") -> Any:
-        """Call through the active Broker when available."""
-        if self._broker_call is not None:
-            self.log_access("call_llm", {"model": model, "prompt_len": len(prompt)})
-            return self._broker_call("llm.call", {"prompt": prompt, "model": model})
-        if not self.check_permission("llm_access"):
-            raise PermissionError(f"插件 {self.plugin_id} 无 llm_access 权限")
-        self.log_access("call_llm", {"model": model, "prompt_len": len(prompt)})
-        return f"[LLM Response to: {prompt[:50]}...]"
+        return self._call("llm_access", "llm.call", {"prompt": prompt, "model": model})
 
     def get_system_stats(self) -> Any:
-        """Get statistics through the active Broker when available."""
-        if self._broker_call is not None:
-            self.log_access("get_system_stats", {})
-            return self._broker_call("system.stats", {})
-        if not self.check_permission("system_monitor"):
-            raise PermissionError(f"插件 {self.plugin_id} 无 system_monitor 权限")
-        self.log_access("get_system_stats", {})
-        return {"cpu": 0, "memory": 0, "disk": 0}
+        return self._call("system_monitor", "system.stats", {})
 
     def get_audit_log(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """获取插件访问日志"""
         return self._audit_log[-limit:]
 
 
-# ============================================================
-# Plugin Loader
-# ============================================================
-
 class PluginLoader:
-    """
-    插件加载器 — 负责插件的加载、启用、禁用、卸载
+    """Discover manifests and coordinate Worker handles without Plugin imports."""
 
-    隔离策略：
-    - Python 插件：使用 uv 或 venv 创建微型虚拟环境
-    - JS/TS 插件：使用 worker_threads 创建独立线程
-    - 原生插件：直接加载（需要额外权限校验）
-    """
-
-    def __init__(self, plugins_dir: str = "plugins"):
-        self.plugins_dir = Path(plugins_dir)
-        self.plugins_dir.mkdir(exist_ok=True)
+    def __init__(
+        self,
+        plugins_dir: str | Path = "plugins",
+        broker: PluginBroker | None = None,
+        runtime_factory: Callable[..., Any] = SubprocessPluginRuntime,
+    ) -> None:
+        self.plugins_dir = Path(plugins_dir).resolve()
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        if broker is None:
+            broker = PluginBroker(EventBus(), FIRST_PARTY_EVENT_GRANTS)
+            broker.register_event_emit_handler()
+        if not isinstance(broker, PluginBroker):
+            raise TypeError("broker must be a PluginBroker")
+        if not callable(runtime_factory):
+            raise TypeError("runtime_factory must be callable")
+        self._broker = broker
+        self._runtime_factory = runtime_factory
         self._plugins: Dict[str, PluginInstance] = {}
         self._sandbox_configs: Dict[str, Dict[str, Any]] = {}
+        self._next_generation: Dict[str, int] = {}
 
     def discover_plugins(self) -> List[PluginManifest]:
-        """发现所有可用插件"""
-        manifests = []
-        for plugin_path in self.plugins_dir.iterdir():
-            if not plugin_path.is_dir():
+        manifests: List[PluginManifest] = []
+        for plugin_path in sorted(self.plugins_dir.iterdir(), key=lambda item: item.name):
+            if plugin_path.is_symlink() or not plugin_path.is_dir():
                 continue
             manifest_file = plugin_path / "manifest.json"
-            if manifest_file.exists():
-                try:
-                    with open(manifest_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    manifest = PluginManifest(**data)
-                    manifests.append(manifest)
-                except Exception as e:
-                    logger.error(f"加载插件清单失败 {plugin_path}: {e}")
+            if not manifest_file.is_file() or manifest_file.is_symlink():
+                continue
+            try:
+                manifest = PluginManifest(**json.loads(manifest_file.read_text(encoding="utf-8")))
+                if manifest.plugin_id != plugin_path.name:
+                    raise ValueError("Plugin ID must match its direct root")
+                manifests.append(manifest)
+            except Exception:
+                logger.warning("Ignoring invalid Plugin manifest in %s", plugin_path.name)
         return manifests
 
     def load_plugin(self, manifest: PluginManifest) -> PluginInstance:
-        """
-        加载插件
-
-        流程：
-        1. 校验 manifest
-        2. 检查依赖
-        3. 创建沙箱环境
-        4. 加载插件模块
-        5. 初始化插件 API
-        """
-        # 检查是否已加载
-        if manifest.plugin_id in self._plugins:
-            return self._plugins[manifest.plugin_id]
-
-        # 校验 manifest
         self._validate_manifest(manifest)
         self._validate_sandbox_policy(manifest)
-
-        # 创建沙箱环境
-        sandbox_config = self._create_sandbox(manifest)
-        self._sandbox_configs[manifest.plugin_id] = sandbox_config
-
-        # 加载模块
         try:
-            module = self._load_module(manifest, sandbox_config)
-        except Exception as e:
-            logger.error(f"加载插件失败 {manifest.name}: {e}")
-            return PluginInstance(
-                manifest=manifest,
-                status=PluginStatus.ERROR,
-                error_message=str(e),
-                loaded_at=datetime.now().isoformat(),
+            root = self._plugin_root(manifest.plugin_id)
+        except PluginRuntimeError as exc:
+            return self._error_instance(manifest, exc.code)
+        identity = (str(root), manifest.entry_point)
+        existing = self._plugins.get(manifest.plugin_id)
+        if existing is not None:
+            if existing._identity != identity:
+                raise ValueError("Plugin identity changed while loaded")
+            return existing
+        if manifest.runtime != RuntimeType.PYTHON_WORKER.value:
+            return self._error_instance(manifest, PLUGIN_RUNTIME_UNSUPPORTED, identity)
+
+        runtime: Any = None
+        try:
+            generation = self._next_generation.get(manifest.plugin_id, 0) + 1
+            spec = PluginLoadSpec(
+                entry_point=manifest.entry_point,
+                permissions=tuple(manifest.permissions),
+                api_version=manifest.api_version,
+                generation=generation,
             )
+            runtime = self._runtime_factory(root, spec, self._broker)
+            snapshot = runtime.start()
+            result = runtime.invoke(LifecycleAction.LOAD)
+            if not result.success or result.status != PluginStatus.LOADED.value:
+                runtime.close()
+                return self._error_instance(manifest, PLUGIN_WORKER_LIFECYCLE_FAILED, identity, generation)
+        except PluginRuntimeError as exc:
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except Exception:
+                    pass
+            return self._error_instance(manifest, exc.code, identity, self._next_generation.get(manifest.plugin_id, 0))
+        except Exception:
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except Exception:
+                    pass
+            return self._error_instance(manifest, "PLUGIN_WORKER_START_FAILED", identity, self._next_generation.get(manifest.plugin_id, 0))
 
         instance = PluginInstance(
             manifest=manifest,
             status=PluginStatus.LOADED,
-            module=module,
+            module=None,
             loaded_at=datetime.now().isoformat(),
+            worker_pid=snapshot.pid,
+            generation=snapshot.generation,
+            termination_confirmed=snapshot.termination_confirmed,
+            _runtime=runtime,
+            _identity=identity,
         )
-
         self._plugins[manifest.plugin_id] = instance
-        logger.info(f"插件加载成功: {manifest.name} ({manifest.plugin_id})")
+        self._next_generation[manifest.plugin_id] = generation
         return instance
 
     def enable_plugin(self, plugin_id: str) -> bool:
-        """启用插件"""
-        if plugin_id not in self._plugins:
+        instance = self._plugins.get(plugin_id)
+        if instance is None:
             return False
-
-        instance = self._plugins[plugin_id]
-        if instance.status == PluginStatus.ENABLED:
+        if instance.status is PluginStatus.ENABLED:
             return True
-
-        try:
-            # 创建受限 API
-            api = XiaoYiPluginAPI(plugin_id, instance.manifest.permissions)
-            instance.module.activate(api)
-            instance.status = PluginStatus.ENABLED
-            instance.last_activated = datetime.now().isoformat()
-            instance.activation_count += 1
-            logger.info(f"插件启用成功: {instance.manifest.name}")
-            return True
-        except Exception as e:
-            instance.status = PluginStatus.ERROR
-            instance.error_message = str(e)
-            logger.error(f"插件启用失败 {instance.manifest.name}: {e}")
-            return False
+        return self._invoke_lifecycle(instance, LifecycleAction.ACTIVATE, PluginStatus.ENABLED, activate=True)
 
     def disable_plugin(self, plugin_id: str) -> bool:
-        """禁用插件"""
-        if plugin_id not in self._plugins:
+        instance = self._plugins.get(plugin_id)
+        if instance is None:
             return False
-
-        instance = self._plugins[plugin_id]
-        try:
-            if hasattr(instance.module, "deactivate"):
-                instance.module.deactivate()
-            instance.status = PluginStatus.DISABLED
-            logger.info(f"插件禁用: {instance.manifest.name}")
-            return True
-        except Exception as e:
-            logger.error(f"插件禁用失败 {instance.manifest.name}: {e}")
-            return False
+        return self._invoke_lifecycle(instance, LifecycleAction.DEACTIVATE, PluginStatus.DISABLED)
 
     def unload_plugin(self, plugin_id: str) -> bool:
-        """卸载插件"""
-        if plugin_id not in self._plugins:
+        instance = self._plugins.get(plugin_id)
+        if instance is None:
             return False
+        runtime = instance._runtime
+        if runtime is not None:
+            try:
+                runtime.invoke(LifecycleAction.CLEANUP)
+            except Exception:
+                pass
+            try:
+                runtime.close()
+            except Exception:
+                pass
+            snapshot = getattr(runtime, "snapshot", None)
+            if snapshot is not None:
+                instance.worker_pid = snapshot.pid
+                instance.termination_confirmed = bool(snapshot.termination_confirmed)
+        if runtime is None or not instance.termination_confirmed:
+            instance.status = PluginStatus.ERROR
+            instance.error_message = "PLUGIN_WORKER_TERMINATION_UNCONFIRMED"
+            return False
+        instance.status = PluginStatus.UNLOADED
+        del self._plugins[plugin_id]
+        self._sandbox_configs.pop(plugin_id, None)
+        return True
 
-        instance = self._plugins[plugin_id]
-        try:
-            if hasattr(instance.module, "cleanup"):
-                instance.module.cleanup()
-            del self._plugins[plugin_id]
-            self._sandbox_configs.pop(plugin_id, None)
-            logger.info(f"插件卸载: {instance.manifest.name}")
-            return True
-        except Exception as e:
-            logger.error(f"插件卸载失败 {instance.manifest.name}: {e}")
-            return False
+    def close(self) -> None:
+        for plugin_id in list(self._plugins):
+            try:
+                self.unload_plugin(plugin_id)
+            except Exception:
+                logger.exception("Plugin shutdown failed: %s", plugin_id)
 
     def get_plugin(self, plugin_id: str) -> Optional[PluginInstance]:
-        """获取插件实例"""
         return self._plugins.get(plugin_id)
 
     def get_all_plugins(self) -> List[PluginInstance]:
-        """获取所有插件"""
         return list(self._plugins.values())
 
     def get_plugins_by_status(self, status: PluginStatus) -> List[PluginInstance]:
-        """按状态获取插件"""
-        return [p for p in self._plugins.values() if p.status == status]
+        return [instance for instance in self._plugins.values() if instance.status is status]
 
-    # ============================================================
-    # 内部方法
-    # ============================================================
+    def _invoke_lifecycle(
+        self,
+        instance: PluginInstance,
+        action: LifecycleAction,
+        expected_status: PluginStatus,
+        *,
+        activate: bool = False,
+    ) -> bool:
+        try:
+            result = instance._runtime.invoke(action)
+            if not result.success or result.status != expected_status.value:
+                raise PluginRuntimeError(PLUGIN_WORKER_LIFECYCLE_FAILED)
+        except PluginRuntimeError as exc:
+            instance.status = PluginStatus.ERROR
+            instance.error_message = exc.code
+            return False
+        except Exception:
+            instance.status = PluginStatus.ERROR
+            instance.error_message = PLUGIN_WORKER_LIFECYCLE_FAILED
+            return False
+        instance.status = expected_status
+        if activate:
+            instance.last_activated = datetime.now().isoformat()
+            instance.activation_count += 1
+        return True
+
+    def _error_instance(
+        self,
+        manifest: PluginManifest,
+        code: str,
+        identity: tuple[str, str] | None = None,
+        generation: int = 0,
+    ) -> PluginInstance:
+        return PluginInstance(
+            manifest=manifest,
+            status=PluginStatus.ERROR,
+            module=None,
+            error_message=redact_protocol_error(code),
+            loaded_at=datetime.now().isoformat(),
+            generation=generation,
+            _identity=identity,
+        )
+
+    def _plugin_root(self, plugin_id: str) -> Path:
+        candidate = self.plugins_dir / plugin_id
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise PluginRuntimeError("PLUGIN_ROOT_INVALID", "Plugin root is invalid")
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.plugins_dir)
+        except ValueError as exc:
+            raise PluginRuntimeError("PLUGIN_ROOT_INVALID", "Plugin root escapes configured directory") from exc
+        if resolved.parent != self.plugins_dir:
+            raise PluginRuntimeError("PLUGIN_ROOT_INVALID", "Plugin root must be a direct child")
+        return resolved
 
     def _validate_manifest(self, manifest: PluginManifest) -> None:
-        """校验 manifest"""
         if not manifest.name:
-            raise ValueError("插件名称不能为空")
+            raise ValueError("Plugin name cannot be empty")
         if not manifest.version:
-            raise ValueError("插件版本不能为空")
+            raise ValueError("Plugin version cannot be empty")
         if not manifest.entry_point:
-            raise ValueError("插件入口点不能为空")
-
-        # 检查危险权限
-        dangerous_perms = {"fs_write", "child_process", "network_all", "system_control"}
-        granted_dangerous = set(manifest.permissions) & dangerous_perms
-        if granted_dangerous:
-            raise ValueError(f"插件请求危险权限: {granted_dangerous}")
-
+            raise ValueError("Plugin entry point cannot be empty")
+        dangerous = {"fs_write", "child_process", "network_all", "system_control"}
+        requested = set(manifest.permissions) & dangerous
+        if requested:
+            raise ValueError(f"Plugin requests dangerous permissions: {requested}")
 
     def _validate_sandbox_policy(self, manifest: PluginManifest) -> None:
-        """校验沙箱策略"""
-        if not manifest.sandbox:
-            return
-        required_denied = {"fs", "child_process", "network"}
-        missing = required_denied - set(manifest.denied_apis)
-        if missing:
-            raise ValueError(f"插件沙箱策略缺失禁用 API: {missing}")
+        if manifest.sandbox:
+            missing = {"fs", "child_process", "network"} - set(manifest.denied_apis)
+            if missing:
+                raise ValueError(f"Plugin sandbox policy misses denied APIs: {missing}")
+
     def _create_sandbox(self, manifest: PluginManifest) -> Dict[str, Any]:
-        """创建沙箱环境"""
-        runtime = manifest.runtime
+        """Compatibility metadata only; it does not execute any runtime."""
         config = {
-            "runtime": runtime,
-            "permissions": manifest.permissions,
-            "denied_apis": manifest.denied_apis,
+            "runtime": manifest.runtime,
+            "permissions": list(manifest.permissions),
+            "denied_apis": list(manifest.denied_apis),
             "timeout": 30,
-            "memory_limit": "128MB",
         }
-
-        if runtime == RuntimeType.PYTHON_UV.value:
-            # Python uv 沙箱
+        if manifest.runtime == RuntimeType.PYTHON_UV.value:
             venv_path = self.plugins_dir / manifest.plugin_id / "venv"
-            config["venv_path"] = str(venv_path)
-            config["python_path"] = str(venv_path / "bin" / "python")
-
-        elif runtime == RuntimeType.NODE_WORKER.value:
-            # Node.js worker 沙箱
+            config.update({"venv_path": str(venv_path), "python_path": str(venv_path / "bin" / "python")})
+        elif manifest.runtime == RuntimeType.NODE_WORKER.value:
             config["worker_type"] = "isolated"
-
         return config
 
-    def _load_module(self, manifest: PluginManifest, sandbox_config: Dict[str, Any]):
-        """加载插件模块"""
-        runtime = manifest.runtime
-
-        if runtime == RuntimeType.NATIVE.value:
-            # 原生 Python 模块
-            plugin_path = self.plugins_dir / manifest.plugin_id
-            sys.path.insert(0, str(plugin_path))
-            module_name = manifest.entry_point.replace(".py", "").replace("/", ".")
-            module = importlib.import_module(module_name)
-            return module
-
-        elif runtime == RuntimeType.PYTHON_UV.value:
-            # uv 沙箱中运行
-            python_path = sandbox_config.get("python_path")
-            if not python_path or not Path(python_path).exists():
-                raise RuntimeError(f"Python 沙箱环境不存在: {python_path}")
-            # 实际中会在子进程中执行
-            logger.info(f"使用 uv 沙箱运行: {python_path}")
-            return None
-
-        elif runtime == RuntimeType.NODE_WORKER.value:
-            # worker_threads 沙箱
-            logger.info(f"使用 worker_threads 沙箱运行")
-            return None
-
-        else:
-            raise ValueError(f"不支持的运行时: {runtime}")
-
-
-# ============================================================
-# Plugin Manager（单例）
-# ============================================================
 
 class PluginManager:
-    """
-    插件管理器 — 单例模式
+    """Per-service Plugin owner.  Global access remains an import shim only."""
 
-    功能：
-    - 插件发现、加载、启用、禁用、卸载
-    - 沙箱隔离
-    - 权限校验
-    - 崩溃自恢复
-    """
+    _instance: Optional["PluginManager"] = None  # Legacy attribute, intentionally unused.
 
-    _instance: Optional["PluginManager"] = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self, plugins_dir: str = "plugins"):
-        if self._initialized:
-            return
-        self._initialized = True
-        self.loader = PluginLoader(plugins_dir)
+    def __init__(
+        self,
+        plugins_dir: str | Path = "plugins",
+        event_bus: EventBus | None = None,
+        grants: Mapping[str, Iterable[str]] | None = None,
+        runtime_factory: Callable[..., Any] = SubprocessPluginRuntime,
+    ) -> None:
+        bus = event_bus or EventBus()
+        broker = PluginBroker(bus, FIRST_PARTY_EVENT_GRANTS if grants is None else grants)
+        broker.register_event_emit_handler()
+        self.loader = PluginLoader(plugins_dir, broker, runtime_factory)
         self._crash_count: Dict[str, int] = {}
         self._max_crashes = 3
 
     def discover(self) -> List[PluginManifest]:
-        """发现所有插件"""
         return self.loader.discover_plugins()
 
     def load(self, manifest: PluginManifest) -> PluginInstance:
-        """加载插件"""
         return self.loader.load_plugin(manifest)
 
     def enable(self, plugin_id: str) -> bool:
-        """启用插件（带崩溃恢复）"""
         result = self.loader.enable_plugin(plugin_id)
-        if not result:
+        if result:
+            self._crash_count.pop(plugin_id, None)
+        else:
             self._crash_count[plugin_id] = self._crash_count.get(plugin_id, 0) + 1
             if self._crash_count[plugin_id] >= self._max_crashes:
-                logger.warning(f"插件 {plugin_id} 连续崩溃 {self._crash_count[plugin_id]} 次，自动禁用")
                 self.loader.disable_plugin(plugin_id)
-        else:
-            self._crash_count.pop(plugin_id, None)
         return result
 
     def disable(self, plugin_id: str) -> bool:
-        """禁用插件"""
         return self.loader.disable_plugin(plugin_id)
 
     def unload(self, plugin_id: str) -> bool:
-        """卸载插件"""
         return self.loader.unload_plugin(plugin_id)
 
+    def close(self) -> None:
+        self.loader.close()
+
     def get_plugin(self, plugin_id: str) -> Optional[PluginInstance]:
-        """获取插件"""
         return self.loader.get_plugin(plugin_id)
 
     def get_all_plugins(self) -> List[PluginInstance]:
-        """获取所有插件"""
         return self.loader.get_all_plugins()
 
     def load_all(self) -> Dict[str, PluginInstance]:
-        """加载所有发现的插件"""
-        manifests = self.discover()
-        results = {}
-        for manifest in manifests:
-            instance = self.load(manifest)
-            results[manifest.plugin_id] = instance
-        return results
+        return {manifest.plugin_id: self.load(manifest) for manifest in self.discover()}
 
 
-# 全局单例
 class _LazyPluginManager:
-    """Preserve the legacy global import without constructing it in a Worker."""
+    """Compatibility object for direct imports from older service entrypoints."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._manager: Optional[PluginManager] = None
         self._lock = threading.Lock()
 
@@ -532,5 +468,4 @@ class _LazyPluginManager:
         return getattr(self._resolve(), name)
 
 
-# Compatibility object. Service composition moves to owned managers in Task 6.
 global_plugin_manager = _LazyPluginManager()

@@ -4,6 +4,7 @@ Additional plugin_sdk tests - Iteration 37
 Tests PluginManager singleton/crash recovery, PluginLoader internals, PluginManifest edge cases
 """
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from core.kernel.plugin_sdk import (
     XiaoYiPluginAPI,
     global_plugin_manager,
 )
+from core.kernel.event_bus import EventBus
 
 
 def _make_manifest(**overrides):
@@ -51,7 +53,7 @@ def _make_plugin_dir(tmp, plugin_id, name="test_plugin", permissions=None):
         "permissions": permissions or ["system_config"],
         "plugin_id": plugin_id,
         "entry_point": "main.py",
-        "runtime": "native",
+        "runtime": "python_worker",
     }
     (pdir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (pdir / "main.py").write_text(
@@ -83,6 +85,75 @@ class TestPluginStatus(unittest.TestCase):
         self.assertEqual(RuntimeType.NATIVE.value, "native")
         self.assertEqual(RuntimeType.PYTHON_UV.value, "python_uv")
         self.assertEqual(RuntimeType.NODE_WORKER.value, "node_worker")
+        self.assertEqual(RuntimeType.PYTHON_WORKER.value, "python_worker")
+
+
+class TestWorkerPluginLifecycle(unittest.TestCase):
+    def _manifest(self, manager, plugin_id):
+        return next(item for item in manager.discover() if item.plugin_id == plugin_id)
+
+    def test_first_party_plugin_runs_in_distinct_pid_and_emits_parent_owned_event(self):
+        root = Path(__file__).parent.parent
+        bus = EventBus()
+        manager = PluginManager(root / "plugins", event_bus=bus)
+        try:
+            instance = manager.load(self._manifest(manager, "event-logger"))
+            self.assertNotEqual(instance.worker_pid, os.getpid())
+            self.assertTrue(manager.enable("event-logger"))
+            event = bus.get_history()[-1]
+            self.assertEqual(event.event_type, "plugin.activated")
+            self.assertEqual(event.source, "plugin:event-logger")
+        finally:
+            manager.close()
+
+    def test_second_exact_load_returns_existing_instance(self):
+        root = Path(__file__).parent.parent
+        manager = PluginManager(root / "plugins", event_bus=EventBus())
+        try:
+            manifest = self._manifest(manager, "event-logger")
+            self.assertIs(manager.load(manifest), manager.load(manifest))
+        finally:
+            manager.close()
+
+    def test_generation_is_parent_owned_and_advances_after_reloading(self):
+        root = Path(__file__).parent.parent
+        manager = PluginManager(root / "plugins", event_bus=EventBus())
+        try:
+            manifest = self._manifest(manager, "event-logger")
+            first = manager.load(manifest)
+            self.assertTrue(manager.unload("event-logger"))
+            second = manager.load(manifest)
+            self.assertGreater(second.generation, first.generation)
+        finally:
+            manager.close()
+
+    def test_legacy_runtime_is_rejected_without_importing_plugin_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "legacy"
+            root.mkdir()
+            (root / "plugin.py").write_text("raise RuntimeError('must not import')", encoding="utf-8")
+            manifest = PluginManifest(
+                name="legacy", version="1", description="", plugin_id="legacy",
+                runtime="native", entry_point="plugin.py",
+            )
+            loader = PluginLoader(tmp)
+            result = loader.load_plugin(manifest)
+            self.assertEqual(result.status, PluginStatus.ERROR)
+            self.assertEqual(result.error_message, "PLUGIN_RUNTIME_UNSUPPORTED")
+
+    def test_changed_entrypoint_or_generation_for_loaded_id_is_rejected(self):
+        root = Path(__file__).parent.parent
+        manager = PluginManager(root / "plugins", event_bus=EventBus())
+        try:
+            manifest = self._manifest(manager, "event-logger")
+            manager.load(manifest)
+            changed = PluginManifest(**{**manifest.__dict__, "entry_point": "other.py"})
+            with self.assertRaises(ValueError):
+                manager.load(changed)
+            with self.assertRaises(TypeError):
+                PluginManifest(**{**manifest.__dict__, "generation": 2})
+        finally:
+            manager.close()
 
 
 # ============================================================
@@ -168,23 +239,23 @@ class TestXiaoYiPluginAPI(unittest.TestCase):
         self.assertFalse(self.api.check_permission("network_access"))
         self.assertFalse(self.api.check_permission("os_write"))
 
-    def test_get_config_with_permission(self):
-        result = self.api.get_config("key", default="fallback")
-        self.assertEqual(result, "fallback")
+    def test_get_config_requires_broker(self):
+        with self.assertRaises(RuntimeError):
+            self.api.get_config("key", default="fallback")
 
     def test_get_config_without_permission_raises(self):
         api = XiaoYiPluginAPI("no_perm", [])
         with self.assertRaises(PermissionError):
             api.get_config("key")
 
-    def test_read_file_with_permission(self):
+    def test_read_file_requires_broker(self):
         api = XiaoYiPluginAPI("reader", ["file_read"])
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
             f.write("hello plugin")
             tmp_path = f.name
         try:
-            result = api.read_file(tmp_path)
-            self.assertIn("hello plugin", result)
+            with self.assertRaises(RuntimeError):
+                api.read_file(tmp_path)
         finally:
             Path(tmp_path).unlink()
 
@@ -193,28 +264,27 @@ class TestXiaoYiPluginAPI(unittest.TestCase):
         with self.assertRaises(PermissionError):
             api.read_file("/etc/passwd")
 
-    def test_call_llm_with_permission(self):
-        result = self.api.call_llm("test prompt", model="llama3")
-        self.assertIn("test prompt", result)
+    def test_call_llm_requires_broker(self):
+        with self.assertRaises(RuntimeError):
+            self.api.call_llm("test prompt", model="llama3")
 
     def test_call_llm_without_permission_raises(self):
         api = XiaoYiPluginAPI("no_llm", [])
         with self.assertRaises(PermissionError):
             api.call_llm("hello")
 
-    def test_get_system_stats_with_permission(self):
-        result = self.api.get_system_stats()
-        self.assertIn("cpu", result)
-        self.assertIn("memory", result)
+    def test_get_system_stats_requires_broker(self):
+        with self.assertRaises(RuntimeError):
+            self.api.get_system_stats()
 
     def test_get_system_stats_without_permission_raises(self):
         api = XiaoYiPluginAPI("no_stats", [])
         with self.assertRaises(PermissionError):
             api.get_system_stats()
 
-    def test_emit_event_with_permission(self):
-        result = self.api.emit_event("test_event", {"key": "value"})
-        self.assertIsNone(result)
+    def test_emit_event_requires_broker(self):
+        with self.assertRaises(RuntimeError):
+            self.api.emit_event("test_event", {"key": "value"})
 
     def test_emit_event_without_permission_raises(self):
         api = XiaoYiPluginAPI("no_event", [])
@@ -222,15 +292,15 @@ class TestXiaoYiPluginAPI(unittest.TestCase):
             api.emit_event("test", {})
 
     def test_audit_log_records_access(self):
-        self.api.get_config("test_key")
+        self.api.log_access("config.get", {"key": "test_key"})
         log = self.api.get_audit_log()
         self.assertEqual(len(log), 1)
-        self.assertEqual(log[0]["api"], "get_config")
+        self.assertEqual(log[0]["api"], "config.get")
         self.assertEqual(log[0]["plugin_id"], "test_plugin")
 
     def test_audit_log_limit(self):
         for i in range(5):
-            self.api.get_config(f"key{i}")
+            self.api.log_access("config.get", {"key": f"key{i}"})
         log = self.api.get_audit_log(limit=3)
         self.assertEqual(len(log), 3)
 
@@ -701,11 +771,11 @@ class TestPluginManager(unittest.TestCase):
         ps.global_plugin_manager = self.original_gpm
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_singleton_same_instance(self):
-        """PluginManager returns same instance on multiple construction"""
+    def test_managers_are_per_service_owners(self):
+        """PluginManager construction creates independent service owners."""
         m1 = PluginManager(plugins_dir=self.tmp)
         m2 = PluginManager(plugins_dir=self.tmp)
-        self.assertIs(m1, m2)
+        self.assertIsNot(m1, m2)
 
     def test_load_all_empty_dir(self):
         """load_all returns empty dict when no plugins"""
@@ -754,11 +824,12 @@ class TestPluginManager(unittest.TestCase):
         self.mgr._crash_count["crash_mock2"] = 2
 
         # enable_plugin returns False -> crash_count becomes 3 >= max -> auto-disable
-        with patch.object(self.mgr.loader, "enable_plugin", return_value=False):
+        with patch.object(self.mgr.loader, "enable_plugin", return_value=False), \
+             patch.object(self.mgr.loader, "disable_plugin", return_value=True) as mock_disable:
             result = self.mgr.enable("crash_mock2")
 
         self.assertFalse(result)
-        self.assertEqual(fake_instance.status, PluginStatus.DISABLED)
+        mock_disable.assert_called_once_with("crash_mock2")
 
     def test_enable_success_clears_crash_count(self):
         """Successful enable clears previous crash_count entry"""
@@ -851,7 +922,7 @@ class TestPluginSandboxPolicy(unittest.TestCase):
             permissions=["system_config"],
             plugin_id="sandbox1",
             entry_point="main.py",
-            runtime="native",
+            runtime="python_worker",
             sandbox=True,
             denied_apis=["fs"],
         )
@@ -859,6 +930,9 @@ class TestPluginSandboxPolicy(unittest.TestCase):
             self.loader.load_plugin(manifest)
 
     def test_sandbox_false_allows_missing_denied_apis(self):
+        root = Path(self.tmp) / "nonsandbox1"
+        root.mkdir()
+        (root / "main.py").write_text("def activate(api): pass", encoding="utf-8")
         manifest = PluginManifest(
             name="nonsandbox_plugin",
             version="1.0.0",
@@ -867,7 +941,7 @@ class TestPluginSandboxPolicy(unittest.TestCase):
             permissions=["system_config"],
             plugin_id="nonsandbox1",
             entry_point="main.py",
-            runtime="native",
+            runtime="python_worker",
             sandbox=False,
             denied_apis=[],
         )
@@ -875,6 +949,9 @@ class TestPluginSandboxPolicy(unittest.TestCase):
         self.assertEqual(instance.status, PluginStatus.LOADED)
 
     def test_sandbox_true_with_full_denied_apis_loads(self):
+        root = Path(self.tmp) / "safebox1"
+        root.mkdir()
+        (root / "main.py").write_text("def activate(api): pass", encoding="utf-8")
         manifest = PluginManifest(
             name="safe_sandbox_plugin",
             version="1.0.0",
@@ -883,7 +960,7 @@ class TestPluginSandboxPolicy(unittest.TestCase):
             permissions=["system_config"],
             plugin_id="safebox1",
             entry_point="main.py",
-            runtime="native",
+            runtime="python_worker",
             sandbox=True,
             denied_apis=["fs", "child_process", "network"],
         )
@@ -901,7 +978,7 @@ def run_all_tests():
                TestPluginManifestEdgeCases, TestPluginInstanceFields,
                TestXiaoYiPluginAPILogAccess, TestPluginLoaderInternals,
                TestPluginLoaderLifecycle, TestPluginManager,
-               TestPluginSandboxPolicy]:
+               TestPluginSandboxPolicy, TestWorkerPluginLifecycle]:
         suite.addTests(loader.loadTestsFromTestCase(tc))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

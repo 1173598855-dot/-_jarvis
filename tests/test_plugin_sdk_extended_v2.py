@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
@@ -12,6 +13,8 @@ from core.kernel.plugin_sdk import (
     PluginManifest,
     XiaoYiPluginAPI,
 )
+from core.kernel.event_bus import EventBus
+from core.contracts.plugin_worker_protocol import LifecycleAction, PluginLifecycleResult
 
 
 class TestValidateManifest(unittest.TestCase):
@@ -79,22 +82,23 @@ class TestCreateSandbox(unittest.TestCase):
         self.assertEqual(config["worker_type"], "isolated")
 
 
-class TestPluginManagerSingleton(unittest.TestCase):
+class TestPluginManagerOwnership(unittest.TestCase):
     def setUp(self):
         PluginManager._instance = None
 
     def tearDown(self):
         PluginManager._instance = None
 
-    def test_same_instance_returned(self):
+    def test_managers_are_per_service_owners(self):
         m1 = PluginManager()
         m2 = PluginManager()
-        self.assertIs(m1, m2)
+        self.assertIsNot(m1, m2)
 
-    def test_different_dirs_second_call_keeps_first(self):
-        m1 = PluginManager(plugins_dir="/tmp/test_pm_a")
-        m2 = PluginManager(plugins_dir="/tmp/test_pm_b")
-        self.assertIs(m1, m2)
+    def test_different_dirs_remain_independent(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            m1 = PluginManager(plugins_dir=first)
+            m2 = PluginManager(plugins_dir=second)
+            self.assertNotEqual(m1.loader.plugins_dir, m2.loader.plugins_dir)
 
 
 class TestPluginManagerCrashRecovery(unittest.TestCase):
@@ -108,14 +112,14 @@ class TestPluginManagerCrashRecovery(unittest.TestCase):
 
 
 class TestXiaoYiPluginAPIReadFile(unittest.TestCase):
-    def test_read_file_with_permission(self):
+    def test_read_file_with_permission_still_requires_broker(self):
         api = XiaoYiPluginAPI("p1", ["file_read"])
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("hello plugin")
             fname = f.name
         try:
-            content = api.read_file(fname)
-            self.assertIn("hello plugin", content)
+            with self.assertRaises(RuntimeError):
+                api.read_file(fname)
         finally:
             import os as _os
             _os.remove(fname)
@@ -133,6 +137,89 @@ class TestPluginLoaderLoadError(unittest.TestCase):
                 loader.load_plugin(m)
 
 
+class TestWorkerCoordinatorGuards(unittest.TestCase):
+    def test_invalid_root_or_entrypoint_returns_bounded_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = PluginManifest(
+                name="missing", version="1", description="", plugin_id="missing",
+                runtime="python_worker", entry_point="../outside.py",
+            )
+            result = PluginLoader(tmp).load_plugin(manifest)
+            self.assertEqual(result.status.value, "error")
+            self.assertIn("PLUGIN_", result.error_message)
+
+    def test_disable_is_successful_when_plugin_has_no_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "no-hook"
+            root.mkdir()
+            (root / "plugin.py").write_text("def activate(api): pass", encoding="utf-8")
+            manifest = PluginManifest(
+                name="no-hook", version="1", description="", plugin_id="no-hook",
+                runtime="python_worker", entry_point="plugin.py",
+            )
+            manager = PluginManager(tmp, event_bus=EventBus())
+            try:
+                self.assertEqual(manager.load(manifest).status.value, "loaded")
+                self.assertTrue(manager.disable("no-hook"))
+                self.assertEqual(manager.get_plugin("no-hook").status.value, "disabled")
+            finally:
+                manager.close()
+
+    def test_unload_missing_returns_false(self):
+        manager = PluginManager(tempfile.mkdtemp(), event_bus=EventBus())
+        try:
+            self.assertFalse(manager.unload("missing"))
+        finally:
+            manager.close()
+
+    def test_manager_close_attempts_every_worker_when_cleanup_fails(self):
+        closed = []
+
+        class Runtime:
+            def __init__(self, root, spec, broker):
+                self.name = Path(root).name
+                self.snapshot = SimpleNamespace(
+                    pid=100 + len(closed), generation=spec.generation,
+                    termination_confirmed=False,
+                )
+
+            def start(self):
+                return self.snapshot
+
+            def invoke(self, action):
+                if action is LifecycleAction.CLEANUP and self.name == "first":
+                    raise RuntimeError("cleanup failed")
+                status = {
+                    LifecycleAction.LOAD: "loaded",
+                    LifecycleAction.CLEANUP: "unloaded",
+                }.get(action, "disabled")
+                return PluginLifecycleResult(
+                    request_id="request-1", plugin_id=self.name, success=True,
+                    status=status, error="", audit=(),
+                )
+
+            def close(self):
+                closed.append(self.name)
+                self.snapshot.termination_confirmed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for plugin_id in ("first", "second"):
+                root = Path(tmp) / plugin_id
+                root.mkdir()
+                (root / "plugin.py").write_text("", encoding="utf-8")
+            manager = PluginManager(tmp, event_bus=EventBus(), runtime_factory=Runtime)
+            try:
+                for plugin_id in ("first", "second"):
+                    manager.load(PluginManifest(
+                        name=plugin_id, version="1", description="", plugin_id=plugin_id,
+                        runtime="python_worker", entry_point="plugin.py",
+                    ))
+                manager.close()
+                self.assertCountEqual(closed, ["first", "second"])
+            finally:
+                manager.close()
+
+
 def run_all_tests():
     print("=" * 60)
     print("J.A.R.V.I.S. plugin_sdk extended v2 - Iteration 58 (fixed)")
@@ -142,10 +229,11 @@ def run_all_tests():
     for tc in [
         TestValidateManifest,
         TestCreateSandbox,
-        TestPluginManagerSingleton,
+        TestPluginManagerOwnership,
         TestPluginManagerCrashRecovery,
         TestXiaoYiPluginAPIReadFile,
         TestPluginLoaderLoadError,
+        TestWorkerCoordinatorGuards,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(tc))
     runner = unittest.TextTestRunner(verbosity=2)

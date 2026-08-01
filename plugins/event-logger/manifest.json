@@ -11,7 +11,7 @@
     "child_process",
     "network"
   ],
-  "runtime": "native",
+  "runtime": "python_worker",
   "sandbox": true,
   "entry_point": "plugin.py",
   "dependencies": [],

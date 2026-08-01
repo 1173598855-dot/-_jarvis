@@ -67,6 +67,8 @@ from test_run_state import TestRunState
 from test_secret_redaction import TestSecretRedaction
 from test_plugin_installation import TestPluginInstallation
 from test_plugin_broker import TestPluginBroker
+from test_plugin_sdk import TestWorkerPluginLifecycle
+from test_plugin_sdk_extended_v2 import TestWorkerCoordinatorGuards
 from test_plugin_worker_protocol import TestPluginWorkerProtocol
 from test_worker_protocol import TestWorkerProtocol
 
@@ -303,6 +305,8 @@ AGGREGATE_TEST_CASES = [
     TestOllamaManagerChat,
     TestPluginInstallation,
     TestPluginBroker,
+    TestWorkerPluginLifecycle,
+    TestWorkerCoordinatorGuards,
     TestRunState,
     TestContextBudgetMonitor,
     TestResumeDocument,
@@ -353,6 +357,7 @@ SMOKE_TEST_CASES = [
     TestPythonDependencies,
     TestIterationLedger,
     TestPluginInstallation,
+    TestWorkerPluginLifecycle,
 ]
 
 

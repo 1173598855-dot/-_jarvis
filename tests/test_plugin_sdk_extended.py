@@ -129,7 +129,8 @@ class TestPluginLoader(unittest.TestCase):
                 "description": "test plugin",
                 "author": "tester",
                 "permissions": [],
-                "runtime": "native",
+                "runtime": "python_worker",
+                "plugin_id": "test_plugin",
             }
             (plugin_dir / "manifest.json").write_text(
                 json.dumps(manifest_data), encoding="utf-8")
@@ -142,9 +143,10 @@ class TestPluginLoader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plugin_dir = Path(tmp) / "p"
             plugin_dir.mkdir()
+            (plugin_dir / "main.py").write_text("def activate(api): pass", encoding="utf-8")
             m = PluginManifest(name="p", version="1.0",
                               description="d", author="a",
-                              entry_point="main")
+                              entry_point="main.py", plugin_id="p", runtime="python_worker")
             manifest_data = asdict(m)
             (plugin_dir / "manifest.json").write_text(
                 json.dumps(manifest_data), encoding="utf-8")
@@ -152,6 +154,7 @@ class TestPluginLoader(unittest.TestCase):
             inst = loader.load_plugin(m)
             self.assertEqual(inst.status, PluginStatus.LOADED)
             self.assertEqual(inst.manifest.name, "p")
+            loader.close()
 
 
 class TestPluginStatusEnum(unittest.TestCase):
@@ -164,7 +167,7 @@ class TestPluginStatusEnum(unittest.TestCase):
 class TestRuntimeTypeEnum(unittest.TestCase):
     def test_all_runtimes_defined(self):
         for r in ["python_uv", "python_venv",
-                   "node_worker", "native"]:
+                   "node_worker", "native", "python_worker"]:
             self.assertIn(r, [e.value for e in RuntimeType])
 
 

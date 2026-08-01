@@ -2,6 +2,7 @@
 Plugin installation and discovery guardrails.
 """
 import sys
+import os
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 class TestPluginInstallation(unittest.TestCase):
+    def test_first_party_manifests_use_python_workers(self):
+        from core.kernel.plugin_sdk import PluginLoader
+
+        manifests = PluginLoader(plugins_dir=str(ROOT / "plugins")).discover_plugins()
+        first_party = {manifest.plugin_id: manifest for manifest in manifests}
+        self.assertEqual(first_party["event-logger"].runtime, "python_worker")
+        self.assertEqual(first_party["plugin-template"].runtime, "python_worker")
+
     def test_plugin_template_is_discoverable(self):
         from core.kernel.plugin_sdk import PluginLoader
 
@@ -74,6 +83,20 @@ class TestPluginInstallation(unittest.TestCase):
 
         self.assertTrue(loader.unload_plugin(manifest.plugin_id))
         self.assertIsNone(loader.get_plugin(manifest.plugin_id))
+
+    def test_first_party_modules_are_not_imported_by_parent(self):
+        from core.kernel.event_bus import EventBus
+        from core.kernel.plugin_sdk import PluginManager
+
+        manager = PluginManager(ROOT / "plugins", event_bus=EventBus())
+        try:
+            manifest = next(item for item in manager.discover() if item.plugin_id == "event-logger")
+            instance = manager.load(manifest)
+            self.assertNotEqual(instance.worker_pid, os.getpid())
+            self.assertIsNone(instance.module)
+            self.assertNotIn("plugin", sys.modules)
+        finally:
+            manager.close()
 
 
 def run_all_tests():
