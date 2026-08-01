@@ -47,8 +47,9 @@ from typing import Optional
 
 # Resolve repository-local adapters and core modules before inherited paths.
 sys_path = str(Path(__file__).parent)
-if sys_path not in sys.path:
-    sys.path.insert(0, sys_path)
+if sys_path in sys.path:
+    sys.path.remove(sys_path)
+sys.path.insert(0, sys_path)
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError

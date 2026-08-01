@@ -80,7 +80,11 @@ class TestMainFastapiSyntax(unittest.TestCase):
         inherited_pythonpath = environment.get("PYTHONPATH", "")
         environment["PYTHONPATH"] = os.pathsep.join(
             value
-            for value in (str(main_checkout_src), inherited_pythonpath)
+            for value in (
+                str(main_checkout_src),
+                str(worktree_root / "src"),
+                inherited_pythonpath,
+            )
             if value
         )
         script = (
