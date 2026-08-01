@@ -104,6 +104,15 @@ class TestPluginWorkerProtocol(unittest.TestCase):
                 with self.assertRaises(PluginWorkerProtocolError):
                     decode_message(stable_json_bytes(payload) + b"\n")
 
+    def test_decoder_rejects_duplicate_json_object_keys(self):
+        line = (
+            b'{"protocol_version":1,"kind":"hello","worker_id":"worker-1",'
+            b'"worker_id":"worker-2","pid":1234}\n'
+        )
+
+        with self.assertRaises(PluginWorkerProtocolError):
+            decode_message(line)
+
     def test_decoder_rejects_invalid_utf8_empty_and_oversized_lines(self):
         for line in (b"\xff\n", b"\n", b"x" * (MAX_PLUGIN_WORKER_LINE_BYTES + 1)):
             with self.subTest(line=line[:10]):

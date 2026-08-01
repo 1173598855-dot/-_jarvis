@@ -493,6 +493,15 @@ def _reject_json_constant(value: str) -> None:
     raise PluginWorkerProtocolError(f"unsupported JSON constant {value}")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PluginWorkerProtocolError("protocol object contains duplicate keys")
+        result[key] = value
+    return result
+
+
 def decode_message(line: bytes) -> ProtocolMessage:
     """Decode exactly one bounded, validated plugin worker JSON message."""
     if not isinstance(line, bytes):
@@ -511,7 +520,11 @@ def decode_message(line: bytes) -> ProtocolMessage:
     except UnicodeDecodeError as exc:
         raise PluginWorkerProtocolError("protocol line must be valid UTF-8") from exc
     try:
-        raw = json.loads(decoded, parse_constant=_reject_json_constant)
+        raw = json.loads(
+            decoded,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise PluginWorkerProtocolError("protocol line must contain valid JSON") from exc
     if not isinstance(raw, Mapping):
