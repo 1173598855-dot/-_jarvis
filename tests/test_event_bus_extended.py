@@ -138,6 +138,18 @@ class TestEventBusPublish(unittest.TestCase):
         history = bus.get_history()
         self.assertEqual(len(history), 1)
 
+    def test_publish_preserves_event_source(self):
+        bus = EventBus()
+        event = Event(
+            event_type='plugin.activated',
+            source='plugin:event-logger',
+            data={'plugin_id': 'event-logger'},
+        )
+
+        bus.publish(event)
+
+        self.assertEqual(bus.get_history()[-1].source, 'plugin:event-logger')
+
 
 class TestEventBusHistory(unittest.TestCase):
     def test_get_history_empty(self):

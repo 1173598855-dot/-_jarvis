@@ -173,6 +173,16 @@ class TestRunAllCoverage(unittest.TestCase):
         self.assertIn(expected, case_ids)
         self.assertEqual(case_ids.count(expected), 1)
 
+    def test_aggregate_runner_includes_plugin_broker_guard_once(self):
+        case_ids = [
+            (case.__module__, case.__name__)
+            for case in run_all.AGGREGATE_TEST_CASES
+        ]
+        expected = ("test_plugin_broker", "TestPluginBroker")
+
+        self.assertIn(expected, case_ids)
+        self.assertEqual(case_ids.count(expected), 1)
+
     def test_aggregate_runner_includes_synchronous_role_dispatch_guards(self):
         case_names = {case.__name__ for case in run_all.AGGREGATE_TEST_CASES}
         expected = {

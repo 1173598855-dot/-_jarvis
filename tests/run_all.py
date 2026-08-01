@@ -66,6 +66,7 @@ from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordi
 from test_run_state import TestRunState
 from test_secret_redaction import TestSecretRedaction
 from test_plugin_installation import TestPluginInstallation
+from test_plugin_broker import TestPluginBroker
 from test_plugin_worker_protocol import TestPluginWorkerProtocol
 from test_worker_protocol import TestWorkerProtocol
 
@@ -301,6 +302,7 @@ AGGREGATE_TEST_CASES = [
     TestOllamaChat,
     TestOllamaManagerChat,
     TestPluginInstallation,
+    TestPluginBroker,
     TestRunState,
     TestContextBudgetMonitor,
     TestResumeDocument,

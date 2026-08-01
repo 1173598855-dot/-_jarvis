@@ -71,14 +71,19 @@ class EventBus:
 
     def emit(self, event_type: str, payload: Any = None) -> None:
         """Emit an event to all subscribers."""
-        event = Event(event_type=event_type, source="event_bus", data=payload)
+        self.publish(Event(event_type=event_type, source="event_bus", data=payload))
+
+    def publish(self, event: Event) -> None:
+        """Publish an Event object while preserving its supplied source."""
+        if not isinstance(event, Event):
+            raise TypeError("event must be an Event")
         with self._lock:
             self._history.append(event)
 
         subscribers_to_call = []
         with self._lock:
-            if event_type in self._subscribers:
-                subscribers_to_call.extend(self._subscribers[event_type])
+            if event.event_type in self._subscribers:
+                subscribers_to_call.extend(self._subscribers[event.event_type])
             if "*" in self._subscribers:
                 subscribers_to_call.extend(self._subscribers["*"])
 
@@ -94,10 +99,6 @@ class EventBus:
         if once_subs:
             for sub_id in once_subs:
                 self.unsubscribe(sub_id)
-
-    def publish(self, event: Event) -> None:
-        """Publish an Event object."""
-        self.emit(str(event.event_type), event.data)
 
     def get_history(self, event_type: Optional[str] = None, limit: int = 100) -> List[Event]:
         """Get event history, optionally filtered by type."""
