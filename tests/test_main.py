@@ -14,9 +14,25 @@ import unittest
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from core.kernel.capability_manifest import (  # noqa: E402
+    CapabilityHealth,
+    CapabilityKind,
+    CapabilityLifecycle,
+    CapabilityRecord,
+    CapabilityRisk,
+    CapabilitySnapshot,
+)
+from core.kernel.capability_resolver import (  # noqa: E402
+    CapabilityQuery,
+    CapabilityResolver,
+    CompatibilityTarget,
+)
+from core.kernel.plugin_sdk import PluginManifest  # noqa: E402
 
 
 def _load_main():
@@ -47,6 +63,72 @@ def _make_handler(command="GET", path="/api/health", headers=None):
     handler.close_connection = False
     handler.protocol_version = "HTTP/1.1"
     handler.log_message = MagicMock()
+    return handler
+
+
+def _capability_snapshot(issues=()):
+    records = (
+        CapabilityRecord.create(
+            capability_id="skill:memory-keeper",
+            kind=CapabilityKind.SKILL,
+            name="Memory Keeper",
+            version=None,
+            description="Local memory management",
+            relative_path="skills/memory-keeper",
+            entrypoint="skills/memory-keeper/SKILL.md",
+            lifecycle=CapabilityLifecycle.DISCOVERED,
+            permissions=("memory.read",),
+            compatibility={"python": ">=3.10", "jarvis_api": ">=1.0"},
+            source_url="https://example.invalid/memory-keeper",
+            license_name="MIT",
+            sha256="a" * 64,
+            provenance_status="verified",
+            health=CapabilityHealth.HEALTHY,
+            risk=CapabilityRisk.LOW,
+        ),
+        CapabilityRecord.create(
+            capability_id="plugin:event-logger",
+            kind=CapabilityKind.PLUGIN,
+            name="Event Logger",
+            version="1.0.0",
+            description="Records local events",
+            relative_path="plugins/event-logger",
+            entrypoint="plugins/event-logger/plugin.py",
+            lifecycle=CapabilityLifecycle.DISABLED,
+            permissions=("events.read",),
+            source_url="https://example.invalid/event-logger",
+            license_name="Apache-2.0",
+            sha256="b" * 64,
+            provenance_status="complete",
+            health=CapabilityHealth.DEGRADED,
+            health_issues=("disabled",),
+            risk=CapabilityRisk.MEDIUM,
+            risk_reasons=("event_access",),
+        ),
+    )
+    return CapabilitySnapshot.create(records, issues)
+
+
+def _capability_state(snapshot=None, error=None):
+    registry = MagicMock()
+    if error is None:
+        registry.snapshot.return_value = snapshot or _capability_snapshot()
+    else:
+        registry.snapshot.side_effect = error
+    return SimpleNamespace(
+        capability_registry=registry,
+        capability_resolver=CapabilityResolver(),
+        capability_target=CompatibilityTarget(
+            python="3.13.0",
+            jarvis_api="1.1.0",
+        ),
+    )
+
+
+def _prepare_json_handler(path):
+    handler = _make_handler(path=path)
+    for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+        setattr(handler, attr, MagicMock())
     return handler
 
 
@@ -522,6 +604,14 @@ class TestMainHTTPGETRouting(unittest.TestCase):
         handler.do_GET()
         handler.handle_plugins_list.assert_called_once()
 
+    def test_do_get_capability_registry_routes_with_query(self):
+        handler = self._make_routed_handler(
+            "/api/capabilities/registry?q=memory&limit=5"
+        )
+        handler.handle_capabilities_registry = MagicMock()
+        handler.do_GET()
+        handler.handle_capabilities_registry.assert_called_once()
+
     def test_do_get_memory_entries_routes(self):
         handler = self._make_routed_handler("/api/memory/entries")
         handler.handle_memory_entries = MagicMock()
@@ -888,6 +978,121 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertIn("plugins", parsed)
         self.assertIsInstance(parsed["plugins"], list)
+
+    def test_handle_capability_registry_filters_and_serializes_public_records(self):
+        handler = _prepare_json_handler(
+            "/api/capabilities/registry"
+            "?q=memory&kind=skill&compatible_only=true&max_risk=low&limit=1"
+        )
+        handler.app_state = _capability_state()
+
+        handler.handle_capabilities_registry()
+
+        handler.send_response.assert_called_once_with(200)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(
+            set(parsed),
+            {"schema_version", "capabilities", "count", "issues"},
+        )
+        self.assertEqual(parsed["schema_version"], 1)
+        self.assertEqual(parsed["count"], 1)
+        self.assertEqual(
+            parsed["capabilities"][0]["capability_id"],
+            "skill:memory-keeper",
+        )
+        self.assertEqual(
+            parsed["capabilities"][0]["compatibility"]["status"],
+            "compatible",
+        )
+        self.assertNotIn("match", parsed["capabilities"][0])
+        self.assertEqual(parsed["issues"], [])
+        self.assertNotIn(
+            str(Path(__file__).parent.parent.resolve()),
+            json.dumps(parsed),
+        )
+
+    def test_handle_capability_registry_rejects_non_scalar_or_invalid_queries(self):
+        invalid_paths = (
+            "/api/capabilities/registry?q=one&q=two",
+            "/api/capabilities/registry?kind=archive",
+            "/api/capabilities/registry?kind=skill&kind=plugin",
+            "/api/capabilities/registry?compatible_only=1",
+            "/api/capabilities/registry?max_risk=critical",
+            "/api/capabilities/registry?limit=0",
+            "/api/capabilities/registry?limit=101",
+            "/api/capabilities/registry?limit=abc",
+            f"/api/capabilities/registry?q={'x' * 257}",
+            "/api/capabilities/registry?q%5B%5D=memory",
+            "/api/capabilities/registry?root=C%3A%5Csecret",
+        )
+        for path in invalid_paths:
+            with self.subTest(path=path):
+                handler = _prepare_json_handler(path)
+                handler.app_state = _capability_state()
+
+                handler.handle_capabilities_registry()
+
+                handler.send_response.assert_called_once_with(400)
+                parsed = json.loads(handler.wfile.write.call_args[0][0])
+                self.assertEqual(parsed["error"]["code"], "INVALID_REQUEST")
+                handler.app_state.capability_registry.snapshot.assert_not_called()
+
+    def test_handle_capability_registry_hides_unavailable_path_details(self):
+        repository_root = Path(__file__).parent.parent.resolve()
+        handler = _prepare_json_handler("/api/capabilities/registry")
+        handler.app_state = _capability_state(
+            error=OSError(f"cannot read {repository_root / 'skills'}")
+        )
+
+        handler.handle_capabilities_registry()
+
+        handler.send_response.assert_called_once_with(503)
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertEqual(
+            parsed["error"]["code"],
+            "CAPABILITY_REGISTRY_UNAVAILABLE",
+        )
+        self.assertNotIn(str(repository_root), json.dumps(parsed))
+
+    def test_handle_capability_registry_reports_bounded_snapshot_issues(self):
+        issues = tuple(f"skill_invalid:item-{index}:read_failed" for index in range(101))
+        handler = _prepare_json_handler("/api/capabilities/registry")
+        handler.app_state = _capability_state(
+            snapshot=_capability_snapshot(issues),
+        )
+
+        handler.handle_capabilities_registry()
+
+        parsed = json.loads(handler.wfile.write.call_args[0][0])
+        self.assertIn("issues", parsed)
+        self.assertEqual(len(parsed["issues"]), 100)
+        self.assertEqual(parsed["issues"][-1], "issues_truncated")
+
+    def test_default_capability_registry_uses_the_repository_root(self):
+        expected_root = Path(__file__).parent.parent.resolve()
+        self.assertEqual(_main.state.capability_registry._root, expected_root)
+
+    def test_default_capability_target_matches_the_plugin_sdk(self):
+        manifest = PluginManifest(name="fixture", version="1.0.0", description="")
+        self.assertEqual(
+            _main.state.capability_target.jarvis_api,
+            manifest.api_version,
+        )
+
+    def test_default_registry_keeps_first_party_plugins_compatible(self):
+        matches = _main.state.capability_resolver.resolve(
+            _main.state.capability_registry.snapshot(),
+            CapabilityQuery(
+                kind=CapabilityKind.PLUGIN,
+                compatible_only=True,
+                limit=100,
+            ),
+            _main.state.capability_target,
+        )
+        self.assertEqual(
+            {match.record.capability_id for match in matches},
+            {"plugin:event-logger", "plugin:plugin-template"},
+        )
 
     def test_handle_memory_entries_returns_entries(self):
         handler = _make_handler()

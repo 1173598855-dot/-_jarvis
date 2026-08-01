@@ -119,16 +119,17 @@ class CapabilityMatch:
     compatibility_status: str
     compatibility_reasons: tuple[str, ...]
 
-    def to_public_dict(self) -> dict[str, object]:
+    def to_public_dict(self, *, include_match: bool = True) -> dict[str, object]:
         body = self.record.to_public_dict()
         compatibility = dict(body["compatibility"])
         compatibility["status"] = self.compatibility_status
         compatibility["reasons"] = list(self.compatibility_reasons)
         body["compatibility"] = compatibility
-        body["match"] = {
-            "score": self.score,
-            "reasons": list(self.reasons),
-        }
+        if include_match:
+            body["match"] = {
+                "score": self.score,
+                "reasons": list(self.reasons),
+            }
         return body
 
 

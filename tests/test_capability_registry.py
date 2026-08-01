@@ -1,10 +1,14 @@
 """Capability manifest and local registry contract tests."""
 
 import json
+import inspect
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parent.parent
@@ -19,6 +23,7 @@ from core.kernel.capability_manifest import (  # noqa: E402
     CapabilityRisk,
     CapabilityValidationError,
 )
+from core.kernel import capability_registry as capability_registry_module  # noqa: E402
 from core.kernel.capability_registry import CapabilityRegistry  # noqa: E402
 
 
@@ -190,6 +195,57 @@ class TestCapabilityRegistry(unittest.TestCase):
             if record.kind is CapabilityKind.SKILL
         )
         self.assertNotEqual(before.sha256, after.sha256)
+
+    def test_snapshot_cache_coalesces_concurrent_scans_and_expires(self):
+        self.assertIn(
+            "cache_ttl_seconds",
+            inspect.signature(CapabilityRegistry).parameters,
+        )
+        now = [0.0]
+        registry = CapabilityRegistry(
+            self.root,
+            cache_ttl_seconds=5.0,
+            clock=lambda: now[0],
+        )
+        original_scan = registry._build_snapshot
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+
+        def slow_scan():
+            scan_started.set()
+            self.assertTrue(release_scan.wait(timeout=2))
+            return original_scan()
+
+        with patch.object(registry, "_build_snapshot", side_effect=slow_scan) as scan:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(registry.snapshot) for _ in range(4)]
+                self.assertTrue(scan_started.wait(timeout=2))
+                release_scan.set()
+                snapshots = [future.result(timeout=2) for future in futures]
+
+            self.assertEqual(scan.call_count, 1)
+            self.assertTrue(all(snapshot is snapshots[0] for snapshot in snapshots))
+
+            now[0] = 6.0
+            registry.snapshot()
+            self.assertEqual(scan.call_count, 2)
+
+    def test_direct_child_scan_is_bounded_per_capability_kind(self):
+        for name in ("alpha", "beta"):
+            directory = self.root / "skills" / name
+            directory.mkdir()
+            (directory / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+
+        self.assertTrue(hasattr(capability_registry_module, "_MAX_CHILDREN"))
+        with patch.object(capability_registry_module, "_MAX_CHILDREN", 2):
+            snapshot = CapabilityRegistry(self.root).snapshot()
+
+        skill_records = [
+            record for record in snapshot.records
+            if record.kind is CapabilityKind.SKILL
+        ]
+        self.assertEqual(len(skill_records), 2)
+        self.assertIn("skill_child_limit", snapshot.issues)
 
     def test_generated_files_do_not_change_content_digest(self):
         registry = CapabilityRegistry(self.root)

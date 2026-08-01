@@ -50,7 +50,7 @@ The first screen is the working application, not a landing page. It exposes six 
 - Read-only repository status and commit history.
 - Local Ollama runtime and installed-model inventory.
 - Searchable memory browsing and controlled writes through the Core API.
-- Plugin inventory, permissions, and capability-gated lifecycle controls.
+- Plugin lifecycle controls plus a read-only Skill, Plugin, and UI capability inventory with provenance, compatibility, health, risk, and permissions.
 
 The desktop shell uses stable `216px / minmax(0, 1fr) / 320px` tracks. At `1279px` the status rail becomes a drawer; at `767px` the sidebar becomes bottom navigation.
 
@@ -138,8 +138,11 @@ after bounded archive, manifest, source, license, and entrypoint validation; it
 never imports or executes package content, stores revisions by SHA-256, and
 publishes them as disabled. Its bounded lifecycle supports atomic upgrade,
 content-revalidated rollback, canonical removal, and restart-safe rebuild with
-fail-closed drift detection. The registry HTTP/UI surface remains later Stage D
-work; no network archive or URL input is accepted.
+fail-closed drift detection. `GET /api/capabilities/registry` now exposes only
+bounded public metadata through Python HTTPServer, FastAPI, and the Express Core
+bridge; the Plugins view polls that read-only inventory and keeps lifecycle
+controls confined to the existing Plugin API. No network archive, URL input, or
+HTTP lifecycle mutation is accepted.
 
 FastAPI and the Express Core API bridge also expose `/api/roles/tasks` for
 process-owned asynchronous execution. Clients create a task, poll its task ID,
@@ -244,7 +247,9 @@ The stable cross-implementation response contract is maintained in
 | `/api/ollama/token-usage` | Python / FastAPI / Express | Session token totals and samples |
 | `/api/git/status` | Express | Read-only working-tree status |
 | `/api/git/log` | Express | Read-only commit history |
+| `/api/git/branches` | Express | Read-only branch list |
 | `/api/capabilities` | Express | Core API bridge availability |
+| `/api/capabilities/registry` | Python / FastAPI / Express | Read-only local Skill, Plugin, and UI capability metadata |
 | `/api/terminal/execute` | Python / FastAPI / Express | Opt-in token-gated fixed diagnostic operations |
 | `/api/plugins` | Python / FastAPI / Express | Plugin inventory |
 | `/api/plugins/load` | Python / FastAPI / Express | Load plugin |
@@ -266,6 +271,10 @@ The stable cross-implementation response contract is maintained in
 | `/api/roles/dispatch` | Python / FastAPI / Express | Synchronous role dispatch through a terminable Worker |
 | `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Capability-selected synchronous dispatch through a terminable Worker |
 | `/api/roles/batch_dispatch` | Python / FastAPI / Express | Ordered batch dispatch through terminable Workers |
+
+Git endpoints are Express-only and are declared in `contracts/core-api.openapi.json`
+with `x-jarvis-implementations: ["frontend/server.js"]`; Python services do not
+implement or proxy them.
 
 ## Notes
 

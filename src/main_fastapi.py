@@ -34,6 +34,7 @@ import atexit
 import json
 import logging
 import os
+import platform
 import sys
 import threading
 import time
@@ -77,7 +78,18 @@ from core.contracts.worker_protocol import WorkerTaskRequest, WorkerTaskStatus
 
 # Phase 11 imports (moved to top to resolve E402)
 from core.kernel.ollama_manager import OllamaManager
-from core.kernel.plugin_sdk import global_plugin_manager
+from core.kernel.capability_api import (
+    CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+    CapabilityRegistryRequestError,
+    parse_capability_query_items,
+    resolve_capability_registry,
+)
+from core.kernel.capability_registry import CapabilityRegistry
+from core.kernel.capability_resolver import (
+    CapabilityResolver,
+    CompatibilityTarget,
+)
+from core.kernel.plugin_sdk import PLUGIN_API_VERSION, global_plugin_manager
 from core.kernel.runtime_security import (
     configured_allowed_origins as configured_security_origins,
     terminal_access_enabled,
@@ -94,6 +106,7 @@ if sys_path not in sys.path:
 
 logger = logging.getLogger(__name__)
 MAX_REQUEST_BODY_BYTES = 32 * 1024
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
 def configured_allowed_origins() -> list[str]:
@@ -335,6 +348,9 @@ class AppState:
         run_lifecycle: RunLifecycleCoordinator | None = None,
         role_tasks: RoleWorkerSupervisor | None = None,
         role_dispatch: RoleDispatchService | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        capability_resolver: CapabilityResolver | None = None,
+        capability_target: CompatibilityTarget | None = None,
     ):
         if role_dispatch is not None:
             dispatch_supervisor = role_dispatch.supervisor
@@ -373,6 +389,27 @@ class AppState:
             role_dispatch
             if role_dispatch is not None
             else RoleDispatchService(self.role_registry, self.role_tasks)
+        )
+        self.capability_registry = (
+            capability_registry
+            if capability_registry is not None
+            else CapabilityRegistry(
+                REPOSITORY_ROOT,
+                cache_ttl_seconds=CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+            )
+        )
+        self.capability_resolver = (
+            capability_resolver
+            if capability_resolver is not None
+            else CapabilityResolver()
+        )
+        self.capability_target = (
+            capability_target
+            if capability_target is not None
+            else CompatibilityTarget(
+                python=platform.python_version(),
+                jarvis_api=PLUGIN_API_VERSION,
+            )
         )
         if run_lifecycle is None:
             repository = FileRunStateRepository(
@@ -732,6 +769,42 @@ async def plugins_list():
             for p in plugins
         ]
     }
+
+
+@app.get("/api/capabilities/registry")
+async def capabilities_registry(request: Request):
+    """Return a bounded, read-only view of repository capabilities."""
+    try:
+        query = parse_capability_query_items(request.query_params.multi_items())
+    except CapabilityRegistryRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Capability registry query is invalid",
+            },
+        ) from error
+
+    registry = state.capability_registry
+    resolver = state.capability_resolver
+    target = state.capability_target
+    try:
+        return await asyncio.to_thread(
+            resolve_capability_registry,
+            registry,
+            resolver,
+            target,
+            query,
+        )
+    except Exception as error:
+        logger.exception("Capability registry resolution failed")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CAPABILITY_REGISTRY_UNAVAILABLE",
+                "message": "Capability registry is unavailable",
+            },
+        ) from error
 
 @app.post("/api/plugins/load")
 async def plugin_load(request: PluginLoadRequest):

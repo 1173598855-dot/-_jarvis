@@ -1,32 +1,32 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-29
+**扫描时间**：2026-07-31
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 138 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 140 本轮测试结果
 
 ## 结论
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
-当前工程重点已转入阶段 D：在既有三服务契约、真实集成门禁和 Worker 安全边界上，建立本地优先的能力注册、解析与安全部署链。Iteration 135-138 已完成版本化记录、只读发现、严格兼容求值、确定性解析、已验证的禁用包暂存和可逆生命周期。包内容不会被导入或执行，网络或 URL 输入不会被接受。
+阶段 D 已在 Iteration 135-139 完成：版本化记录、有界只读发现、严格兼容求值、确定性解析、已验证的禁用包暂存、可逆生命周期、短期 single-flight 快照缓存、三服务只读 API 与 Plugins 视图形成完整本地链路。包内容不会被导入或执行，HTTP 不接受归档、路径、URL 或生命周期写操作；下一阶段重点转向 Plugin/Skill 隔离运行时。
 
 ## 当前规模
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 37 个文件，12,143 行非空代码/文档行 |
+| `src/` Python | 38 个文件，12,429 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
-| `frontend/src/` | 38 个 TS/TSX 文件，约 4,211 行 |
+| `frontend/src/` | 38 个 TS/TSX 文件，约 5,033 行 |
 | `tests/` Python | 58 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 500 个用例（498 通过、2 跳过） |
-| 完整 Python discovery | 1357 个用例（1355 通过、2 跳过） |
-| 前端 Vitest | 129 个用例通过 |
-| Playwright | 5 项通过，1 项按桌面条件跳过 |
+| 规范 Python 聚合套件 | 513 个用例（511 通过、2 跳过） |
+| 完整 Python discovery | 1384 个用例（1382 通过、2 跳过） |
+| 前端 Vitest | 136 个用例通过 |
+| Playwright | 7 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 129-138） |
+| 滚动审计报告 | 10 份（Iteration 131-140） |
 
 ## 运行架构
 
@@ -277,6 +277,20 @@ Role-specific routes remain intentionally outside the shared contract because th
 - 重建可在重启后从已存 bundle 和 payload 原子修复状态；已声明文件改写或额外 payload 注入均以 `REVISION_DRIFT` 失败关闭。
 - 同根实例共享 `RLock` 串行写入，安装、升级、回滚与重建仍不导入、不执行且始终保持 `disabled`。
 
+## Iteration 139 已解决
+
+- OpenAPI 升级到 `1.14.0`，新增只读 `GET /api/capabilities/registry`、严格标量查询边界、完整公共记录 schema，以及相对 POSIX 路径约束。
+- Python HTTPServer 与 FastAPI 复用同一查询解析和响应整形模块，仅扫描固定仓库根；Express 保留原始查询并透传 Core 状态与错误 envelope。
+- Solid.js 类型化客户端按 Core 可用性轮询注册表，Plugins 视图展示类型计数、生命周期、来源、兼容、健康、风险和权限，同时保留原 Plugin 生命周期操作。
+- Vitest 覆盖加载、降级、空、不可用和只读控制边界；Playwright 在 1440px 与 390px 验证元数据可见、无水平溢出和信息带重叠，并通过截图复核移动标题布局。
+- Stage D 完成后仍无 HTTP 安装/升级/回滚/删除路由，已验证包保持禁用且不会被导入或执行。
+
+## Iteration 140 已解决
+
+- OpenAPI 升级到 `1.15.0`，以 path-level `x-jarvis-implementations` 声明 Express-only Git 路径，不再把 `/api/git/*` 留在共享契约之外。
+- 新增 `GitStatus`、`GitChangedFile`、`GitCommit`、`GitLogResponse` 与 `GitBranchesResponse` schema，并声明 500 `GIT_COMMAND_FAILED` ErrorResponse。
+- Express 端点和前端类型化客户端保持只读；新增 `gitBranches` 服务方法及对应契约/Vitest/Express 回归覆盖。
+
 ## Iteration 137 已解决
 
 - `FileCapabilityStore` 只接受调用方已提供的 ZIP 字节和匹配的 SHA-256；不下载、不导入、不执行，也不会自动启用能力包。
@@ -295,18 +309,18 @@ Role-specific routes remain intentionally outside the shared contract because th
 
 | 维度 | 得分 | 依据 |
 |---|---:|---|
-| 可维护性 | 95 | POST/GET SSE 路径均由 OpenAPI 和真实三服务 harness 回归，Python 适配器复用单一写入路径 |
-| 扩展性 | 95 | 角色工具 broker、版本化能力记录和无状态解析器分别隔离执行、发现与选择 |
+| 可维护性 | 96 | OpenAPI、共享查询整形、三适配器回归和类型化前端共同约束能力注册表 |
+| 扩展性 | 96 | 角色工具 broker、版本化能力记录、无状态解析器和只读 API 分离执行、发现、选择与展示 |
 | 性能 | 84 | 前端按视图拆包，重型视图仍需低端设备实测 |
-| 安全性 | 94 | HTTP 终端和角色工具默认拒绝；能力发现不跟随符号链接、不导入代码并限制读取预算 |
+| 安全性 | 95 | HTTP 终端和角色工具默认拒绝；能力发现、存储与只读 API 不接受调用方路径且不导入代码 |
 
 ## 技术债清单
 
 | 位置 | 严重程度 | 问题 | 修复建议 |
 |---|---|---|---|
 | 内部通用终端执行器 | P1 | 默认实例已有最小环境和专用目录，但仍运行于服务用户上下文 | 将脚本能力迁移到低权限 worker；不得再次暴露为通用 HTTP/Plugin API |
-| Express-only Git API | P1 | OpenAPI `1.12.0` 已覆盖共享 orchestrator、角色路由和异步角色任务；`/api/git/*` 仍是仅由 Express 提供的稳定实现面 | 用独立契约或明确的 OpenAPI 扩展记录 Git 响应与错误 schema |
-| 能力注册与安全部署 | 进行中 | D1-D4 只读目录、兼容解析、包验证和可逆生命周期已完成；API/UI 尚未交付 | 完成 Iteration 139 只读契约与视图，并保持默认禁用和无网络输入 |
+| Express-only Git API | 已完成 | OpenAPI `1.15.0` 已用 path-level `x-jarvis-implementations` 记录三个 Git 路径及响应/错误 schema；Python 不实现或代理该实现面 | 后续 Git 行为变更必须同步更新 Express 与对应 schema |
+| 能力注册与安全部署 | 已完成 | D1-D5 已覆盖发现、解析、包验证、可逆生命周期、只读 API 与 UI | Stage E 继续保持默认禁用，并在执行前增加独立 Worker/Broker |
 | 角色工具执行策略 | 已完成 | Worker 内固定五工具目录、严格 Schema、预算、默认拒绝 Broker 与脱敏审计均已落地 | 保持终端、Plugin 生命周期和 HTTP capability token 在目录之外 |
 | 异步任务持久恢复 | 已完成 | 任务记录在 shutdown 时持久化，启动时核对孤儿 Worker 并恢复明确终态 | 后续存储演进必须保留原子写入和 fail-closed 恢复语义 |
 | 本机真实集成 | 已完成 | CI 使用仓库自有 Ollama fixture、FastAPI 与 Express 临时端口运行 `--require-services` | 保留真实 Ollama 工作站 profile 作为可选补充 |
@@ -322,9 +336,9 @@ HTTP 路径不再直接使用通用 `TerminalExecutor` 的宽松 allowlist；默
 
 ### P1：多套 API 行为漂移
 
-Express、Python HTTPServer 和 FastAPI 已由共享 OpenAPI 文件约束健康、系统遥测、Ollama 状态/模型、Token、插件、记忆、事件、共享 orchestrator、角色路由、异步角色任务、首批写操作错误、非流式 Ollama chat 与 GET/POST 规范 SSE 帧。Express Git 失败和未知 API 路由也已使用稳定 ErrorResponse，但 `/api/git/*` 仍是未纳入共享契约的 Express-only 实现面。
+Express、Python HTTPServer 和 FastAPI 已由共享 OpenAPI 文件约束健康、系统遥测、Ollama 状态/模型、Token、插件、能力注册表、记忆、事件、共享 orchestrator、角色路由、异步角色任务、首批写操作错误、非流式 Ollama chat 与 GET/POST 规范 SSE 帧。Express Git 和未知 API 路由也已使用稳定 ErrorResponse。
 
-已完成：OpenAPI 升级到 `1.12.0`，增加 Express-only `x-jarvis-api-fallback`，并为 Ollama、Core API、共享 orchestrator、角色路由与异步角色任务声明请求、响应和 `ErrorResponse`。Python HTTPServer 不提供异步任务生命周期，Express-only `/api/git/*` 继续保持显式实现范围，不能被误称为三端共享能力。
+已完成：OpenAPI 升级到 `1.15.0`，增加 Express-only `x-jarvis-api-fallback`，并以 path-level `x-jarvis-implementations` 为 `/api/git/status`、`/api/git/log`、`/api/git/branches` 声明响应和 `ErrorResponse`。Python HTTPServer 不提供异步任务生命周期，也不实现或代理 Express-only Git 实现面。
 
 ### P1：真实集成仍依赖本机服务
 

@@ -409,7 +409,147 @@ class TestSharedApiContract(unittest.TestCase):
 
     def test_contract_is_openapi_31_document(self):
         _assert_contract_document(self, self.contract)
-        self.assertEqual(self.spec["info"]["version"], "1.13.0")
+        self.assertEqual(self.spec["info"]["version"], "1.15.0")
+
+    def test_capability_registry_path_is_read_only_and_schema_bound(self):
+        path = self.spec["paths"]["/api/capabilities/registry"]
+        self.assertEqual(set(path), {"get"})
+
+        operation = path["get"]
+        self.assertEqual(operation["operationId"], "listCapabilities")
+        parameters = {
+            parameter["name"]: parameter
+            for parameter in operation["parameters"]
+        }
+        self.assertEqual(
+            set(parameters),
+            {"q", "kind", "compatible_only", "max_risk", "limit"},
+        )
+        for parameter in parameters.values():
+            self.assertEqual(parameter["in"], "query")
+            self.assertFalse(parameter.get("required", False))
+
+        self.assertEqual(
+            parameters["q"]["schema"],
+            {"type": "string", "default": "", "maxLength": 256},
+        )
+        self.assertEqual(
+            parameters["kind"]["schema"]["enum"],
+            ["skill", "plugin", "ui_component"],
+        )
+        self.assertEqual(
+            parameters["compatible_only"]["schema"],
+            {"type": "boolean", "default": False},
+        )
+        self.assertEqual(
+            parameters["max_risk"]["schema"],
+            {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "default": "high",
+            },
+        )
+        self.assertEqual(
+            parameters["limit"]["schema"],
+            {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+        )
+
+        responses = operation["responses"]
+        self.assertEqual(set(responses), {"200", "400", "502", "503"})
+        self.assertIn("INVALID_REQUEST", responses["400"]["description"])
+        self.assertIn(
+            "CAPABILITY_REGISTRY_UNAVAILABLE",
+            responses["503"]["description"],
+        )
+
+        schema = responses["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            schema,
+            {"$ref": "#/components/schemas/CapabilityRegistryResponse"},
+        )
+        capability = {
+            "schema_version": 1,
+            "capability_id": "skill:memory-keeper",
+            "kind": "skill",
+            "name": "Memory Keeper",
+            "version": None,
+            "description": "Local memory management",
+            "relative_path": "skills/memory-keeper",
+            "entrypoint": "skills/memory-keeper/SKILL.md",
+            "lifecycle": "discovered",
+            "permissions": ["memory.read"],
+            "compatibility": {
+                "constraints": {"python": ">=3.10"},
+                "status": "compatible",
+                "reasons": [],
+            },
+            "provenance": {
+                "source_url": "https://example.invalid/memory-keeper",
+                "license": "MIT",
+                "sha256": "a" * 64,
+                "status": "verified",
+            },
+            "health": {"status": "healthy", "issues": []},
+            "risk": {"level": "low", "reasons": []},
+        }
+        _assert_json_shape(
+            self,
+            self.spec,
+            schema,
+            {
+                "schema_version": 1,
+                "capabilities": [capability],
+                "count": 1,
+                "issues": ["skill_invalid:broken:read_failed"],
+            },
+            "capability registry",
+        )
+
+        record_schema = self.spec["components"]["schemas"]["CapabilityRecord"]
+        self.assertFalse(record_schema["additionalProperties"])
+        self.assertNotIn("match", record_schema["properties"])
+        self.assertEqual(
+            set(record_schema["required"]),
+            set(capability),
+        )
+        entrypoint_schema = record_schema["properties"]["entrypoint"]
+        self.assertEqual(
+            entrypoint_schema.get("pattern"),
+            record_schema["properties"]["relative_path"]["pattern"],
+        )
+        response_schema = self.spec["components"]["schemas"]["CapabilityRegistryResponse"]
+        self.assertEqual(
+            set(response_schema["required"]),
+            {"schema_version", "capabilities", "count", "issues"},
+        )
+        self.assertEqual(response_schema["properties"]["issues"]["maxItems"], 100)
+        for invalid_entrypoint in (
+            "C:/outside/plugin.py",
+            "/outside/plugin.py",
+            "../outside/plugin.py",
+            "skills\\outside.py",
+        ):
+            with self.subTest(entrypoint=invalid_entrypoint):
+                invalid_capability = {
+                    **capability,
+                    "entrypoint": invalid_entrypoint,
+                }
+                with self.assertRaises(AssertionError):
+                    _assert_json_shape(
+                        self,
+                        self.spec,
+                        schema,
+                        {
+                            "schema_version": 1,
+                            "capabilities": [invalid_capability],
+                            "count": 1,
+                        },
+                        "capability registry",
+                    )
+        self.assertNotIn("root", parameters)
+        self.assertNotIn("path", parameters)
+        self.assertNotIn("archive", parameters)
+        self.assertNotIn("lifecycle", parameters)
 
     def test_synchronous_role_routes_declare_terminable_worker_contract(self):
         paths = self.spec["paths"]
@@ -634,6 +774,73 @@ class TestSharedApiContract(unittest.TestCase):
             {"$ref": "#/components/schemas/ErrorResponse"},
         )
 
+    def test_express_git_paths_are_declared_as_express_only(self):
+        for path in ("/api/git/status", "/api/git/log", "/api/git/branches"):
+            with self.subTest(path=path):
+                path_item = self.contract["paths"][path]
+                self.assertEqual(
+                    path_item.get("x-jarvis-implementations"),
+                    ["frontend/server.js"],
+                )
+                self.assertEqual(set(path_item), {"x-jarvis-implementations", "get"})
+                self.assertEqual(
+                    path_item["get"]["responses"]["500"]["content"][
+                        "application/json"
+                    ]["schema"],
+                    {"$ref": "#/components/schemas/ErrorResponse"},
+                )
+
+    def test_express_git_response_schemas_match_runtime_shapes(self):
+        status_schema = self.contract["components"]["schemas"]["GitStatus"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            status_schema,
+            {
+                "branch": "codex/jarvis-command-center",
+                "clean": False,
+                "changedFiles": [
+                    {
+                        "status": " M",
+                        "file": "frontend/src/App.tsx",
+                        "staged": False,
+                    },
+                ],
+                "count": 1,
+            },
+            "git status",
+        )
+
+        log_schema = self.contract["components"]["schemas"]["GitLogResponse"]
+        _assert_json_shape(
+            self,
+            self.contract,
+            log_schema,
+            {
+                "commits": [
+                    {
+                        "hash": "abc12345",
+                        "author": "Codex",
+                        "email": "codex@example.com",
+                        "date": "2026-07-10T10:00:00+08:00",
+                        "subject": "feat: command center",
+                    },
+                ],
+            },
+            "git log",
+        )
+
+        branches_schema = self.contract["components"]["schemas"][
+            "GitBranchesResponse"
+        ]
+        _assert_json_shape(
+            self,
+            self.contract,
+            branches_schema,
+            {"branches": ["main", "codex/jarvis-command-center"]},
+            "git branches",
+        )
+
     def test_declared_json_error_responses_use_error_response_schema(self):
         for path, operations in self.contract["paths"].items():
             for method, operation in operations.items():
@@ -657,6 +864,7 @@ class TestSharedApiContract(unittest.TestCase):
             ("/api/ollama/models", "get"): {"502", "503"},
             ("/api/system/stats", "get"): {"500"},
             ("/api/plugins", "get"): {"502", "503"},
+            ("/api/capabilities/registry", "get"): {"400", "502", "503"},
             ("/api/memory/entries", "get"): {"502", "503"},
             ("/api/events", "get"): {"502", "503"},
             ("/api/orchestrator/agents", "get"): {"502", "503"},
@@ -730,6 +938,7 @@ class TestSharedApiContract(unittest.TestCase):
         self.assertIn("get", self.contract["paths"]["/api/ollama/token-usage"])
         self.assertIn("get", self.contract["paths"]["/api/orchestrator/agents"])
         self.assertIn("get", self.contract["paths"]["/api/orchestrator/history"])
+        self.assertIn("get", self.contract["paths"]["/api/capabilities/registry"])
         self.assertIn("post", self.contract["paths"]["/api/orchestrator/dispatch"])
 
     def test_shared_orchestrator_subset_has_error_contracts(self):
@@ -1016,6 +1225,10 @@ class TestSharedApiContract(unittest.TestCase):
         }
         for path, operations in self.contract["paths"].items():
             for method in operations:
+                if method.startswith("x-"):
+                    continue
+                if path.startswith("/api/git/"):
+                    continue
                 self.assertIn((method, path), routes)
 
     def test_all_implementations_match_stable_response_schemas(self):

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "J.A.R.V.I.S. Shared Core API",
-    "version": "1.13.0",
+    "version": "1.15.0",
     "description": "Stable response contract shared by Express, Python HTTPServer, and FastAPI."
   },
   "x-jarvis-implementations": [
@@ -360,6 +360,108 @@
         }
       }
     },
+    "/api/capabilities/registry": {
+      "get": {
+        "operationId": "listCapabilities",
+        "description": "Resolve verified repository-local capability metadata without loading or executing packages.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "",
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "plugin",
+                "ui_component"
+              ]
+            }
+          },
+          {
+            "name": "compatible_only",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "max_risk",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "default": "high"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved public capability metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityRegistryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_REQUEST: a query parameter is repeated, unknown, or outside its declared bounds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "CAPABILITY_REGISTRY_UNAVAILABLE, or the Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/plugins/load": {
       "post": {
         "operationId": "loadPlugin",
@@ -469,6 +571,113 @@
           },
           "503": {
             "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/git/status": {
+      "x-jarvis-implementations": [
+        "frontend/server.js"
+      ],
+      "get": {
+        "operationId": "getGitStatus",
+        "description": "Read-only Express Git working-tree status.",
+        "responses": {
+          "200": {
+            "description": "Git working-tree status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Git metadata is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/git/log": {
+      "x-jarvis-implementations": [
+        "frontend/server.js"
+      ],
+      "get": {
+        "operationId": "getGitLog",
+        "description": "Read-only Express Git commit history.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum commit count, clamped by Express to 1..100.",
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Git commit history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitLogResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Git metadata is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/git/branches": {
+      "x-jarvis-implementations": [
+        "frontend/server.js"
+      ],
+      "get": {
+        "operationId": "getGitBranches",
+        "description": "Read-only Express Git branch list.",
+        "responses": {
+          "200": {
+            "description": "Git branch list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitBranchesResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Git metadata is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1761,6 +1970,348 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PluginInfo"
+            }
+          }
+        }
+      },
+      "GitChangedFile": {
+        "type": "object",
+        "required": [
+          "status",
+          "file",
+          "staged"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "staged": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GitStatus": {
+        "type": "object",
+        "required": [
+          "branch",
+          "clean",
+          "changedFiles",
+          "count"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "clean": {
+            "type": "boolean"
+          },
+          "changedFiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitChangedFile"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "GitCommit": {
+        "type": "object",
+        "required": [
+          "hash",
+          "author",
+          "email",
+          "date",
+          "subject"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        }
+      },
+      "GitLogResponse": {
+        "type": "object",
+        "required": [
+          "commits"
+        ],
+        "properties": {
+          "commits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitCommit"
+            }
+          }
+        }
+      },
+      "GitBranchesResponse": {
+        "type": "object",
+        "required": [
+          "branches"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CapabilityCompatibility": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "constraints",
+          "status",
+          "reasons"
+        ],
+        "properties": {
+          "constraints": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "compatible",
+              "incompatible"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CapabilityProvenance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_url",
+          "license",
+          "sha256",
+          "status"
+        ],
+        "properties": {
+          "source_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "license": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "incomplete",
+              "complete",
+              "verified"
+            ]
+          }
+        }
+      },
+      "CapabilityHealth": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "issues"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "invalid"
+            ]
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CapabilityRisk": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "level",
+          "reasons"
+        ],
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CapabilityRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "capability_id",
+          "kind",
+          "name",
+          "version",
+          "description",
+          "relative_path",
+          "entrypoint",
+          "lifecycle",
+          "permissions",
+          "compatibility",
+          "provenance",
+          "health",
+          "risk"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "capability_id": {
+            "type": "string",
+            "pattern": "^(skill|plugin|ui_component):[a-z0-9][a-z0-9._-]{0,127}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "skill",
+              "plugin",
+              "ui_component"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "relative_path": {
+            "type": "string",
+            "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+          },
+          "entrypoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "discovered",
+              "disabled",
+              "enabled",
+              "invalid"
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/CapabilityCompatibility"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/CapabilityProvenance"
+          },
+          "health": {
+            "$ref": "#/components/schemas/CapabilityHealth"
+          },
+          "risk": {
+            "$ref": "#/components/schemas/CapabilityRisk"
+          }
+        }
+      },
+      "CapabilityRegistryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "capabilities",
+          "count",
+          "issues"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityRecord"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "issues": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "maxLength": 512
             }
           }
         }

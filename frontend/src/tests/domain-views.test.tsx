@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@solidjs/testing-library';
 import {
   afterEach,
@@ -35,6 +36,7 @@ const apiMocks = vi.hoisted(() => ({
   gitLog: vi.fn(),
   memories: vi.fn(),
   storeMemory: vi.fn(),
+  capabilityRegistry: vi.fn(),
   plugins: vi.fn(),
   pluginAction: vi.fn(),
   events: vi.fn(),
@@ -150,6 +152,88 @@ beforeEach(() => {
     ],
   });
   apiMocks.storeMemory.mockResolvedValue({ success: true, path: '.auto-memory/new.md' });
+  apiMocks.capabilityRegistry.mockResolvedValue({
+    schema_version: 1,
+    capabilities: [
+      {
+        schema_version: 1,
+        capability_id: 'skill:memory-keeper',
+        kind: 'skill',
+        name: 'Memory Keeper',
+        version: null,
+        description: 'Local memory management',
+        relative_path: 'skills/memory-keeper',
+        entrypoint: 'skills/memory-keeper/SKILL.md',
+        lifecycle: 'discovered',
+        permissions: ['memory.read'],
+        compatibility: {
+          constraints: { python: '>=3.10' },
+          status: 'compatible',
+          reasons: [],
+        },
+        provenance: {
+          source_url: 'https://example.invalid/memory-keeper',
+          license: 'MIT',
+          sha256: 'a'.repeat(64),
+          status: 'verified',
+        },
+        health: { status: 'healthy', issues: [] },
+        risk: { level: 'low', reasons: [] },
+      },
+      {
+        schema_version: 1,
+        capability_id: 'plugin:event-logger',
+        kind: 'plugin',
+        name: 'Event Logger Contract',
+        version: '1.0.0',
+        description: 'Records local events',
+        relative_path: 'plugins/event-logger',
+        entrypoint: 'plugins/event-logger/plugin.py',
+        lifecycle: 'disabled',
+        permissions: ['events.read'],
+        compatibility: {
+          constraints: { jarvis_api: '>=1.0' },
+          status: 'compatible',
+          reasons: [],
+        },
+        provenance: {
+          source_url: null,
+          license: 'Apache-2.0',
+          sha256: 'b'.repeat(64),
+          status: 'complete',
+        },
+        health: { status: 'degraded', issues: ['disabled'] },
+        risk: { level: 'medium', reasons: ['event_access'] },
+      },
+      {
+        schema_version: 1,
+        capability_id: 'ui_component:statusindicator',
+        kind: 'ui_component',
+        name: 'Status Indicator',
+        version: null,
+        description: 'Shared health indicator',
+        relative_path: 'frontend/src/components/ui/StatusIndicator.tsx',
+        entrypoint: 'frontend/src/components/ui/StatusIndicator.tsx',
+        lifecycle: 'discovered',
+        permissions: [],
+        compatibility: {
+          constraints: { node: '>=20' },
+          status: 'unknown',
+          reasons: ['node_target_unknown'],
+        },
+        provenance: {
+          source_url: null,
+          license: null,
+          sha256: 'c'.repeat(64),
+          status: 'incomplete',
+        },
+        health: { status: 'healthy', issues: [] },
+        risk: { level: 'low', reasons: [] },
+      },
+    ],
+    count: 3,
+    issues: [],
+  });
   apiMocks.plugins.mockResolvedValue({
     plugins: [
       {
@@ -280,6 +364,59 @@ describe('MemoryView', () => {
 });
 
 describe('PluginsView', () => {
+  it('renders registry counts and trust metadata without controls on read-only kinds', async () => {
+    renderDomain(() => <PluginsView />);
+
+    expect(await screen.findByText('Memory Keeper')).not.toBeNull();
+    expect(screen.getByText('1 Skill')).not.toBeNull();
+    expect(screen.getByText('1 Plugin')).not.toBeNull();
+    expect(screen.getByText('1 UI 组件')).not.toBeNull();
+    expect(screen.getByText('部分能力元数据异常')).not.toBeNull();
+
+    const skill = screen.getByRole('listitem', { name: '能力 Memory Keeper' });
+    expect(within(skill).getByText('memory.read')).not.toBeNull();
+    expect(within(skill).getByText('来源 verified')).not.toBeNull();
+    expect(within(skill).getByText('兼容 compatible')).not.toBeNull();
+    expect(within(skill).getByText('健康 healthy')).not.toBeNull();
+    expect(within(skill).getByText('风险 low')).not.toBeNull();
+    expect(within(skill).getByText('MIT')).not.toBeNull();
+    expect(within(skill).queryByRole('button')).toBeNull();
+
+    const ui = screen.getByRole('listitem', { name: '能力 Status Indicator' });
+    expect(within(ui).getByText('无声明权限')).not.toBeNull();
+    expect(within(ui).queryByRole('button')).toBeNull();
+  });
+
+  it('distinguishes loading and empty registry states', async () => {
+    apiMocks.capabilityRegistry.mockReturnValue(new Promise(() => undefined));
+    const loading = renderDomain(() => <PluginsView />);
+
+    expect(screen.getByLabelText('正在读取能力注册表')).not.toBeNull();
+    loading.unmount();
+
+    apiMocks.capabilityRegistry.mockResolvedValue({
+      schema_version: 1,
+      capabilities: [],
+      count: 0,
+      issues: [],
+    });
+    renderDomain(() => <PluginsView />);
+    expect(await screen.findByText('未发现已注册能力')).not.toBeNull();
+  });
+
+  it('shows a degraded registry when discovery reports snapshot issues', async () => {
+    apiMocks.capabilityRegistry.mockResolvedValue({
+      schema_version: 1,
+      capabilities: [],
+      count: 0,
+      issues: ['skill_invalid:broken:read_failed'],
+    });
+
+    renderDomain(() => <PluginsView />);
+
+    expect(await screen.findByText('部分能力元数据异常')).not.toBeNull();
+  });
+
   it('maps lifecycle controls to plugin status and confirms disable', async () => {
     renderDomain(() => <PluginsView />);
 
@@ -310,6 +447,7 @@ describe('PluginsView', () => {
 
     expect(screen.getByText('Core API 未连接')).not.toBeNull();
     expect(screen.queryByText('未检测到插件')).toBeNull();
+    expect(apiMocks.capabilityRegistry).not.toHaveBeenCalled();
     expect(apiMocks.plugins).not.toHaveBeenCalled();
   });
 });

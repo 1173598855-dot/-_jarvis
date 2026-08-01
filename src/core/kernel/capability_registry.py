@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import threading
+import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from .capability_manifest import (
     CapabilityHealth,
@@ -33,6 +36,7 @@ _IGNORED_PARTS = {
 _MAX_FILES = 512
 _MAX_FILE_BYTES = 1024 * 1024
 _MAX_TOTAL_BYTES = 4 * 1024 * 1024
+_MAX_CHILDREN = 1024
 
 
 def _slugify(value: str) -> str:
@@ -96,13 +100,53 @@ def _hash_file(path: Path) -> str:
 class CapabilityRegistry:
     """Discovers capabilities below fixed repository roots without executing them."""
 
-    def __init__(self, repository_root: Path):
+    def __init__(
+        self,
+        repository_root: Path,
+        *,
+        cache_ttl_seconds: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         root = Path(repository_root)
         if root.is_symlink() or not root.is_dir():
             raise CapabilityValidationError("repository_root_invalid", "repository root is not trusted")
+        if (
+            isinstance(cache_ttl_seconds, bool)
+            or not isinstance(cache_ttl_seconds, (int, float))
+            or not math.isfinite(cache_ttl_seconds)
+            or not 0.0 <= cache_ttl_seconds <= 60.0
+        ):
+            raise CapabilityValidationError(
+                "cache_ttl_invalid",
+                "cache TTL must be between zero and sixty seconds",
+            )
+        if not callable(clock):
+            raise CapabilityValidationError("clock_invalid", "clock must be callable")
         self._root = root.resolve(strict=True)
+        self._cache_ttl_seconds = float(cache_ttl_seconds)
+        self._clock = clock
+        self._snapshot_lock = threading.Lock()
+        self._cached_snapshot: Optional[CapabilitySnapshot] = None
+        self._cached_at = 0.0
 
     def snapshot(self) -> CapabilitySnapshot:
+        if self._cache_ttl_seconds == 0.0:
+            return self._build_snapshot()
+
+        with self._snapshot_lock:
+            now = self._clock()
+            if (
+                self._cached_snapshot is not None
+                and now >= self._cached_at
+                and now - self._cached_at < self._cache_ttl_seconds
+            ):
+                return self._cached_snapshot
+            snapshot = self._build_snapshot()
+            self._cached_snapshot = snapshot
+            self._cached_at = now
+            return snapshot
+
+    def _build_snapshot(self) -> CapabilitySnapshot:
         records = []
         issues = []
         self._discover_skills(records, issues)
@@ -131,8 +175,12 @@ class CapabilityRegistry:
         if root.is_symlink():
             issues.append(f"{kind}_root_symlink_rejected")
             return ()
+        entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+        if len(entries) > _MAX_CHILDREN:
+            issues.append(f"{kind}_child_limit")
+            entries = entries[:_MAX_CHILDREN]
         children = []
-        for child in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
+        for child in entries:
             if child.is_symlink():
                 issues.append(f"{kind}_symlink_rejected:{child.name}")
                 continue

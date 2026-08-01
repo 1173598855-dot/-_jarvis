@@ -16,6 +16,58 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from core.kernel.capability_manifest import (  # noqa: E402
+    CapabilityHealth,
+    CapabilityKind,
+    CapabilityLifecycle,
+    CapabilityRecord,
+    CapabilityRisk,
+    CapabilitySnapshot,
+)
+from core.kernel.plugin_sdk import PluginManifest  # noqa: E402
+
+
+def _capability_snapshot(issues=()):
+    return CapabilitySnapshot.create((
+        CapabilityRecord.create(
+            capability_id="skill:memory-keeper",
+            kind=CapabilityKind.SKILL,
+            name="Memory Keeper",
+            version=None,
+            description="Local memory management",
+            relative_path="skills/memory-keeper",
+            entrypoint="skills/memory-keeper/SKILL.md",
+            lifecycle=CapabilityLifecycle.DISCOVERED,
+            permissions=("memory.read",),
+            compatibility={"python": ">=3.10", "jarvis_api": ">=1.0"},
+            source_url="https://example.invalid/memory-keeper",
+            license_name="MIT",
+            sha256="a" * 64,
+            provenance_status="verified",
+            health=CapabilityHealth.HEALTHY,
+            risk=CapabilityRisk.LOW,
+        ),
+        CapabilityRecord.create(
+            capability_id="plugin:event-logger",
+            kind=CapabilityKind.PLUGIN,
+            name="Event Logger",
+            version="1.0.0",
+            description="Records local events",
+            relative_path="plugins/event-logger",
+            entrypoint="plugins/event-logger/plugin.py",
+            lifecycle=CapabilityLifecycle.DISABLED,
+            permissions=("events.read",),
+            source_url="https://example.invalid/event-logger",
+            license_name="Apache-2.0",
+            sha256="b" * 64,
+            provenance_status="complete",
+            health=CapabilityHealth.DEGRADED,
+            health_issues=("disabled",),
+            risk=CapabilityRisk.MEDIUM,
+            risk_reasons=("event_access",),
+        ),
+    ), issues)
+
 # Test that the module can be imported (syntax check)
 class TestMainFastapiSyntax(unittest.TestCase):
 
@@ -1148,6 +1200,126 @@ class TestQueryEndpoints(unittest.TestCase):
         data = resp.json()
         self.assertIn("roles", data)
         self.assertIn("count", data)
+
+
+class TestCapabilityRegistryEndpoint(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from fastapi.testclient import TestClient
+
+        import main_fastapi
+        cls.main_fastapi = main_fastapi
+        cls.client = TestClient(main_fastapi.app)
+
+    @contextmanager
+    def registry(self, error=None, snapshot=None):
+        registry = MagicMock()
+        if error is None:
+            registry.snapshot.return_value = snapshot or _capability_snapshot()
+        else:
+            registry.snapshot.side_effect = error
+        with patch.object(
+            self.main_fastapi._default_state,
+            "capability_registry",
+            registry,
+            create=True,
+        ):
+            yield registry
+
+    def test_registry_filters_and_serializes_public_records(self):
+        with self.registry():
+            response = self.client.get(
+                "/api/capabilities/registry"
+                "?q=memory&kind=skill&compatible_only=true&max_risk=low&limit=1"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            set(body),
+            {"schema_version", "capabilities", "count", "issues"},
+        )
+        self.assertEqual(body["schema_version"], 1)
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(
+            body["capabilities"][0]["capability_id"],
+            "skill:memory-keeper",
+        )
+        self.assertEqual(
+            body["capabilities"][0]["compatibility"]["status"],
+            "compatible",
+        )
+        self.assertNotIn("match", body["capabilities"][0])
+        self.assertEqual(body["issues"], [])
+        self.assertNotIn(
+            str(Path(__file__).parent.parent.resolve()),
+            json.dumps(body),
+        )
+
+    def test_registry_rejects_duplicate_unknown_and_invalid_queries(self):
+        invalid_paths = (
+            "/api/capabilities/registry?q=one&q=two",
+            "/api/capabilities/registry?kind=archive",
+            "/api/capabilities/registry?kind=skill&kind=plugin",
+            "/api/capabilities/registry?compatible_only=1",
+            "/api/capabilities/registry?max_risk=critical",
+            "/api/capabilities/registry?limit=0",
+            "/api/capabilities/registry?limit=101",
+            "/api/capabilities/registry?limit=abc",
+            f"/api/capabilities/registry?q={'x' * 257}",
+            "/api/capabilities/registry?q%5B%5D=memory",
+            "/api/capabilities/registry?root=C%3A%5Csecret",
+        )
+        with self.registry() as registry:
+            for path in invalid_paths:
+                with self.subTest(path=path):
+                    response = self.client.get(path)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(
+                        response.json()["error"]["code"],
+                        "INVALID_REQUEST",
+                    )
+
+        registry.snapshot.assert_not_called()
+
+    def test_registry_unavailable_hides_internal_path_details(self):
+        repository_root = Path(__file__).parent.parent.resolve()
+        with self.registry(
+            OSError(f"cannot read {repository_root / 'skills'}")
+        ):
+            response = self.client.get("/api/capabilities/registry")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "CAPABILITY_REGISTRY_UNAVAILABLE",
+        )
+        self.assertNotIn(str(repository_root), response.text)
+
+    def test_registry_reports_bounded_snapshot_issues(self):
+        issues = tuple(f"ui_component_invalid:item-{index}:read_failed" for index in range(101))
+        with self.registry(snapshot=_capability_snapshot(issues)):
+            response = self.client.get("/api/capabilities/registry")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("issues", body)
+        self.assertEqual(len(body["issues"]), 100)
+        self.assertEqual(body["issues"][-1], "issues_truncated")
+
+    def test_default_registry_uses_the_repository_root(self):
+        expected_root = Path(__file__).parent.parent.resolve()
+        self.assertEqual(
+            self.main_fastapi._default_state.capability_registry._root,
+            expected_root,
+        )
+
+    def test_default_capability_target_matches_the_plugin_sdk(self):
+        manifest = PluginManifest(name="fixture", version="1.0.0", description="")
+        self.assertEqual(
+            self.main_fastapi._default_state.capability_target.jarvis_api,
+            manifest.api_version,
+        )
 
 
 class TestOrchestratorInputValidation(unittest.TestCase):

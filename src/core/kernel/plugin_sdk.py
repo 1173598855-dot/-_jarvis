@@ -33,6 +33,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+PLUGIN_API_VERSION = "1.0.0"
+
 
 # ============================================================
 # 类型定义
@@ -68,7 +70,7 @@ class PluginManifest:
     sandbox: bool = True
     entry_point: str = ""
     dependencies: List[str] = field(default_factory=list)
-    api_version: str = "1.0.0"
+    api_version: str = PLUGIN_API_VERSION
     plugin_id: str = ""
 
     def __post_init__(self):

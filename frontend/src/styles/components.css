@@ -802,8 +802,117 @@
 .changed-files,
 .commit-list,
 .memory-list,
+.capability-list,
 .plugin-list {
   border-top: 1px solid var(--color-border);
+}
+
+.capability-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.capability-summary span {
+  border-right: 1px solid var(--color-border-soft);
+  padding: 1px 10px;
+  white-space: nowrap;
+}
+
+.capability-summary span:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.capability-record {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+  border-bottom: 1px solid var(--color-border-soft);
+  padding: 12px 4px;
+}
+
+.capability-record__icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-inset);
+  color: var(--color-accent-strong);
+}
+
+.capability-record__body {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.capability-record__heading,
+.capability-record__identity,
+.capability-record__origin,
+.capability-record__signals {
+  display: flex;
+  align-items: center;
+}
+
+.capability-record__heading {
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.capability-record__identity {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+}
+
+.capability-record__identity strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.capability-record__identity code,
+.capability-record__origin code {
+  overflow-wrap: anywhere;
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.capability-record__body p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.capability-record__origin {
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 11px;
+  color: var(--color-subtle);
+  font-size: 10px;
+}
+
+.capability-record__origin > :nth-child(2),
+.capability-record__origin > :nth-child(3) {
+  min-width: 0;
+  flex: 1 1 180px;
+  overflow-wrap: anywhere;
+}
+
+.capability-record__signals {
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .changed-file {
@@ -1660,6 +1769,18 @@
     align-items: flex-start;
   }
 
+  .capability-summary {
+    width: 100%;
+  }
+
+  .section-heading--capabilities {
+    flex-direction: column;
+  }
+
+  .capability-summary span:first-child {
+    padding-left: 0;
+  }
+
   .metric-grid--three,
   .runtime-charts,
   .runtime-facts {
@@ -1688,6 +1809,37 @@
   .plugin-row,
   .plugin-row__heading {
     align-items: flex-start;
+  }
+
+  .capability-record {
+    grid-template-columns: 26px minmax(0, 1fr);
+    gap: 8px;
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .capability-record__icon {
+    width: 26px;
+    height: 26px;
+  }
+
+  .capability-record__heading,
+  .capability-record__identity {
+    align-items: flex-start;
+  }
+
+  .capability-record__heading {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .capability-record__identity {
+    flex-direction: column;
+  }
+
+  .capability-record__origin > :nth-child(2),
+  .capability-record__origin > :nth-child(3) {
+    flex-basis: 100%;
   }
 
   .plugin-row {

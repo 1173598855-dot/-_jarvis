@@ -118,6 +118,36 @@ async function installApiFixtures(page: Page) {
           base_url: 'http://127.0.0.1:8080',
         },
       },
+      '/api/capabilities/registry': {
+        schema_version: 1,
+        capabilities: [{
+          schema_version: 1,
+          capability_id: 'skill:memory-keeper',
+          kind: 'skill',
+          name: 'Memory Keeper',
+          version: null,
+          description: 'Local memory indexing and retrieval with repository-scoped storage.',
+          relative_path: 'skills/memory-keeper',
+          entrypoint: 'skills/memory-keeper/SKILL.md',
+          lifecycle: 'discovered',
+          permissions: ['memory.read'],
+          compatibility: {
+            constraints: { python: '>=3.10', jarvis_api: '>=1.0' },
+            status: 'compatible',
+            reasons: [],
+          },
+          provenance: {
+            source_url: 'https://github.com/example/memory-keeper',
+            license: 'MIT',
+            sha256: 'a'.repeat(64),
+            status: 'verified',
+          },
+          health: { status: 'healthy', issues: [] },
+          risk: { level: 'low', reasons: [] },
+        }],
+        count: 1,
+        issues: [],
+      },
       '/api/memory/entries': {
         entries: [{
           id: 'memory-1',
@@ -230,6 +260,70 @@ test('streams a local assistant response', async ({ page }, testInfo) => {
 
   await page.screenshot({
     path: testInfo.outputPath('command-center.png'),
+    fullPage: false,
+  });
+});
+
+test('shows capability metadata without overlap or horizontal overflow', async ({ page }, testInfo) => {
+  const errors = trackConsole(page);
+  await page.goto('/');
+
+  if (testInfo.project.name === 'mobile') {
+    await page.getByRole('button', { name: '更多', exact: true }).click();
+    const moreDialog = page.getByRole('dialog', { name: '更多视图' });
+    await expect(moreDialog).toBeVisible();
+    await moreDialog.getByRole('button', { name: '插件与工具', exact: true }).click();
+  } else {
+    await page.getByRole('button', { name: '插件与工具', exact: true }).click();
+  }
+
+  await expect(page.getByRole('heading', { name: '能力注册表', level: 2 })).toBeVisible();
+  const capability = page.getByRole('listitem', { name: '能力 Memory Keeper' });
+  await expect(capability).toBeVisible();
+  await expect(capability.getByText('来源 verified')).toBeVisible();
+  await expect(capability.getByText('兼容 compatible')).toBeVisible();
+  await expect(capability.getByText('健康 healthy')).toBeVisible();
+  await expect(capability.getByText('风险 low')).toBeVisible();
+  await expect(capability.getByText('memory.read')).toBeVisible();
+
+  const registryHeading = page.locator('#capability-registry-title');
+  const headingLines = await registryHeading.evaluate((heading) => {
+    const lineCount = (element: Element | null) => {
+      if (!element) return 0;
+      const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+      return Math.round(element.getBoundingClientRect().height / lineHeight);
+    };
+    return {
+      title: lineCount(heading),
+      count: lineCount(heading.parentElement?.querySelector('p') || null),
+    };
+  });
+  expect(headingLines).toEqual({ title: 1, count: 1 });
+
+  const layout = await capability.evaluate((record) => {
+    const sections = Array.from(
+      record.querySelectorAll<HTMLElement>('.capability-record__body > *'),
+    );
+    return {
+      pageHasHorizontalOverflow:
+        document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      recordHasHorizontalOverflow: record.scrollWidth > record.clientWidth + 1,
+      sectionsOverlap: sections.some((section, index) => {
+        const next = sections[index + 1];
+        if (!next) return false;
+        return section.getBoundingClientRect().bottom > next.getBoundingClientRect().top + 1;
+      }),
+    };
+  });
+  expect(layout).toEqual({
+    pageHasHorizontalOverflow: false,
+    recordHasHorizontalOverflow: false,
+    sectionsOverlap: false,
+  });
+  expect(errors).toEqual([]);
+
+  await page.screenshot({
+    path: testInfo.outputPath('capability-registry.png'),
     fullPage: false,
   });
 });

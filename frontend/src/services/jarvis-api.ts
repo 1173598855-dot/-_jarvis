@@ -1,7 +1,9 @@
 import type {
   ApiErrorPayload,
+  CapabilityRegistryResponse,
   CapabilityState,
   EventInfo,
+  GitBranches,
   GitCommit,
   GitStatus,
   MemoryEntry,
@@ -88,8 +90,17 @@ export const jarvisApi = {
   gitLog: (limit = 20, signal?: AbortSignal) =>
     requestJson<{ commits: GitCommit[] }>(`/api/git/log?limit=${limit}`, { signal }),
 
+  gitBranches: (signal?: AbortSignal) =>
+    requestJson<GitBranches>('/api/git/branches', { signal }),
+
   capabilities: (signal?: AbortSignal) =>
     requestJson<{ core_api: CapabilityState }>('/api/capabilities', { signal }),
+
+  capabilityRegistry: (signal?: AbortSignal) =>
+    requestJson<CapabilityRegistryResponse>(
+      '/api/capabilities/registry?limit=100',
+      { signal },
+    ),
 
   memories: (signal?: AbortSignal) =>
     requestJson<{ entries: MemoryEntry[] }>('/api/memory/entries', { signal }),

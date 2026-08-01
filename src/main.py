@@ -33,12 +33,13 @@ import atexit
 import json
 import logging
 import os
+import platform
 import socket
 import sys
 import threading
 import time
 import uuid
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -77,7 +78,21 @@ from core.brain.role_worker import (  # noqa: E402
     execute_role_task,
 )
 from core.kernel.ollama_manager import OllamaManager  # noqa: E402
-from core.kernel.plugin_sdk import global_plugin_manager  # noqa: E402
+from core.kernel.capability_api import (  # noqa: E402
+    CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+    CapabilityRegistryRequestError,
+    parse_capability_query_items,
+    resolve_capability_registry,
+)
+from core.kernel.capability_registry import CapabilityRegistry  # noqa: E402
+from core.kernel.capability_resolver import (  # noqa: E402
+    CapabilityResolver,
+    CompatibilityTarget,
+)
+from core.kernel.plugin_sdk import (  # noqa: E402
+    PLUGIN_API_VERSION,
+    global_plugin_manager,
+)
 from core.kernel.runtime_security import (  # noqa: E402
     configured_allowed_origins,
     terminal_access_enabled,
@@ -92,6 +107,7 @@ MAX_REQUEST_BODY_BYTES = 32 * 1024
 REQUEST_BODY_CHUNK_BYTES = 8 * 1024
 REQUEST_BODY_READ_TIMEOUT_SECONDS = 2.0
 REQUEST_BODY_DISCARD_TIMEOUT_SECONDS = 0.25
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
 class InvalidJsonBody(ValueError):
@@ -149,6 +165,9 @@ class AppState:
         terminal=None,
         role_tasks: RoleWorkerSupervisor | None = None,
         role_dispatch: RoleDispatchService | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        capability_resolver: CapabilityResolver | None = None,
+        capability_target: CompatibilityTarget | None = None,
     ):
         if role_dispatch is not None:
             dispatch_supervisor = role_dispatch.supervisor
@@ -187,6 +206,27 @@ class AppState:
             role_dispatch
             if role_dispatch is not None
             else RoleDispatchService(self.role_registry, self.role_tasks)
+        )
+        self.capability_registry = (
+            capability_registry
+            if capability_registry is not None
+            else CapabilityRegistry(
+                REPOSITORY_ROOT,
+                cache_ttl_seconds=CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+            )
+        )
+        self.capability_resolver = (
+            capability_resolver
+            if capability_resolver is not None
+            else CapabilityResolver()
+        )
+        self.capability_target = (
+            capability_target
+            if capability_target is not None
+            else CompatibilityTarget(
+                python=platform.python_version(),
+                jarvis_api=PLUGIN_API_VERSION,
+            )
         )
         self.start_time = time.time()
         self.request_count = 0
@@ -401,6 +441,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/ollama/chat/stream": self.handle_ollama_chat_stream,
             "/api/ollama/token-usage": self.handle_ollama_token_usage,
             "/api/plugins": self.handle_plugins_list,
+            "/api/capabilities/registry": self.handle_capabilities_registry,
             "/api/memory/entries": self.handle_memory_entries,
             "/api/events": self.handle_events,
             "/api/orchestrator/agents": self.handle_orchestrator_agents,
@@ -695,6 +736,41 @@ class JARVISHandler(BaseHTTPRequestHandler):
                 for p in plugins
             ]
         })
+
+    def handle_capabilities_registry(self):
+        """Return a bounded, read-only view of repository capabilities."""
+        try:
+            raw_query = urlsplit(self.path).query
+            items = parse_qsl(
+                raw_query,
+                keep_blank_values=True,
+                max_num_fields=10,
+            )
+            query = parse_capability_query_items(items)
+        except (CapabilityRegistryRequestError, ValueError):
+            self._send_error(
+                "Capability registry query is invalid",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+
+        try:
+            response = resolve_capability_registry(
+                self.app_state.capability_registry,
+                self.app_state.capability_resolver,
+                self.app_state.capability_target,
+                query,
+            )
+        except Exception:
+            logger.exception("Capability registry resolution failed")
+            self._send_error(
+                "Capability registry is unavailable",
+                503,
+                "CAPABILITY_REGISTRY_UNAVAILABLE",
+            )
+            return
+        self._send_json(response)
 
     def handle_plugin_load(self):
         """加载插件"""

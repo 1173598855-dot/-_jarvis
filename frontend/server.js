@@ -472,6 +472,10 @@ app.get('/api/capabilities', async (req, res) => {
   res.json({ core_api: await coreApi.status() });
 });
 
+app.get('/api/capabilities/registry', async (req, res) => {
+  await proxyCoreRequest(req, res, 'capabilities');
+});
+
 app.post('/api/terminal/execute', async (req, res) => {
   if (!req.body || Array.isArray(req.body) || typeof req.body !== 'object') {
     return sendApiError(res, 400, 'INVALID_REQUEST', 'Request body must be a JSON object');

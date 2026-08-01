@@ -1,11 +1,25 @@
+import Blocks from 'lucide-solid/icons/blocks';
+import Braces from 'lucide-solid/icons/braces';
 import Download from 'lucide-solid/icons/download';
+import PackageSearch from 'lucide-solid/icons/package-search';
 import Play from 'lucide-solid/icons/play';
 import Power from 'lucide-solid/icons/power';
-import { For, Show, createSignal } from 'solid-js';
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createMemo,
+  createSignal,
+} from 'solid-js';
 import { useRuntimeResources } from '../app/runtime-resources';
 import { createPollingResource } from '../primitives/create-polling-resource';
 import { jarvisApi } from '../services/jarvis-api';
-import type { PluginInfo } from '../types/api';
+import type {
+  CapabilityKind,
+  CapabilityRecord,
+  PluginInfo,
+} from '../types/api';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { ResourceState } from '../components/ui/ResourceState';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
@@ -33,6 +47,36 @@ function statusTone(status: string) {
   return 'neutral' as const;
 }
 
+function kindLabel(kind: CapabilityKind) {
+  if (kind === 'skill') return 'Skill';
+  if (kind === 'plugin') return 'Plugin';
+  return 'UI 组件';
+}
+
+function compatibilityTone(status: CapabilityRecord['compatibility']['status']) {
+  if (status === 'compatible') return 'success' as const;
+  if (status === 'incompatible') return 'error' as const;
+  return 'neutral' as const;
+}
+
+function provenanceTone(status: CapabilityRecord['provenance']['status']) {
+  if (status === 'verified') return 'success' as const;
+  if (status === 'incomplete') return 'warning' as const;
+  return 'neutral' as const;
+}
+
+function healthTone(status: CapabilityRecord['health']['status']) {
+  if (status === 'healthy') return 'success' as const;
+  if (status === 'degraded') return 'warning' as const;
+  return 'error' as const;
+}
+
+function riskTone(level: CapabilityRecord['risk']['level']) {
+  if (level === 'low') return 'success' as const;
+  if (level === 'medium') return 'warning' as const;
+  return 'error' as const;
+}
+
 export function PluginsView() {
   const resources = useRuntimeResources();
   const toast = useToast();
@@ -45,6 +89,28 @@ export function PluginsView() {
     intervalMs: 30_000,
     enabled: coreAvailable,
     classify: (value) => value.plugins.length ? 'ready' : 'empty',
+  });
+  const registry = createPollingResource({
+    load: jarvisApi.capabilityRegistry,
+    intervalMs: 30_000,
+    enabled: coreAvailable,
+    classify: (value) => {
+      if (value.issues.length > 0 || value.capabilities.some(
+        (capability) => capability.health.status !== 'healthy',
+      )) return 'degraded';
+      return value.capabilities.length === 0 ? 'empty' : 'ready';
+    },
+  });
+  const kindCounts = createMemo(() => {
+    const counts: Record<CapabilityKind, number> = {
+      skill: 0,
+      plugin: 0,
+      ui_component: 0,
+    };
+    for (const capability of registry.data()?.capabilities || []) {
+      counts[capability.kind] += 1;
+    }
+    return counts;
   });
 
   const runAction = async (action: PluginAction, plugin: PluginInfo) => {
@@ -62,6 +128,13 @@ export function PluginsView() {
   };
 
   const capabilityLoading = () => resources.capabilities.phase() === 'loading';
+  const registryTitle = () => {
+    if (registry.phase() === 'loading') return '正在读取能力注册表';
+    if (registry.phase() === 'empty') return '未发现已注册能力';
+    if (registry.phase() === 'degraded') return '部分能力元数据异常';
+    if (registry.phase() === 'stale') return '能力注册表刷新失败';
+    return '能力注册表不可用';
+  };
 
   return (
     <div class="view-stack">
@@ -81,6 +154,112 @@ export function PluginsView() {
           </div>
         )}
       >
+        <section class="view-section" aria-labelledby="capability-registry-title">
+          <div class="section-heading section-heading--capabilities">
+            <div>
+              <h2 id="capability-registry-title">能力注册表</h2>
+              <p>{registry.data()?.count || 0} 个本地记录</p>
+            </div>
+            <Show when={registry.data()}>
+              <div class="capability-summary" aria-label="能力类型统计">
+                <span>{kindCounts().skill} Skill</span>
+                <span>{kindCounts().plugin} Plugin</span>
+                <span>{kindCounts().ui_component} UI 组件</span>
+              </div>
+            </Show>
+          </div>
+          <ResourceState
+            phase={registry.phase()}
+            title={registryTitle()}
+            description={registry.error()?.message}
+            onRetry={() => void registry.refresh()}
+          >
+            <Show when={registry.data()}>
+              {(snapshot) => (
+                <div class="capability-list" role="list">
+                  <For each={snapshot().capabilities}>
+                    {(capability) => (
+                      <article
+                        class="capability-record"
+                        role="listitem"
+                        aria-label={`能力 ${capability.name}`}
+                      >
+                        <span class="capability-record__icon" aria-hidden="true">
+                          <Switch>
+                            <Match when={capability.kind === 'skill'}>
+                              <Blocks size={17} />
+                            </Match>
+                            <Match when={capability.kind === 'plugin'}>
+                              <PackageSearch size={17} />
+                            </Match>
+                            <Match when={capability.kind === 'ui_component'}>
+                              <Braces size={17} />
+                            </Match>
+                          </Switch>
+                        </span>
+                        <div class="capability-record__body">
+                          <div class="capability-record__heading">
+                            <div class="capability-record__identity">
+                              <strong>{capability.name}</strong>
+                              <code>{capability.capability_id}</code>
+                            </div>
+                            <StatusIndicator
+                              label={capability.lifecycle}
+                              tone={statusTone(capability.lifecycle)}
+                              compact
+                            />
+                          </div>
+                          <Show when={capability.description}>
+                            <p>{capability.description}</p>
+                          </Show>
+                          <div class="capability-record__origin">
+                            <span>{kindLabel(capability.kind)}</span>
+                            <code>{capability.relative_path}</code>
+                            <span>{capability.provenance.source_url || '本地仓库'}</span>
+                            <span>{capability.provenance.license || '许可证未知'}</span>
+                          </div>
+                          <div class="capability-record__signals" aria-label="能力状态">
+                            <StatusIndicator
+                              label={`来源 ${capability.provenance.status}`}
+                              tone={provenanceTone(capability.provenance.status)}
+                              compact
+                            />
+                            <StatusIndicator
+                              label={`兼容 ${capability.compatibility.status}`}
+                              tone={compatibilityTone(capability.compatibility.status)}
+                              compact
+                            />
+                            <StatusIndicator
+                              label={`健康 ${capability.health.status}`}
+                              tone={healthTone(capability.health.status)}
+                              compact
+                            />
+                            <StatusIndicator
+                              label={`风险 ${capability.risk.level}`}
+                              tone={riskTone(capability.risk.level)}
+                              compact
+                            />
+                          </div>
+                          <div class="permission-list" aria-label="能力权限">
+                            <Show
+                              when={capability.permissions.length > 0}
+                              fallback={<span>无声明权限</span>}
+                            >
+                              <For each={capability.permissions}>
+                                {(permission) => <code>{permission}</code>}
+                              </For>
+                            </Show>
+                          </div>
+                        </div>
+                      </article>
+                    )}
+                  </For>
+                </div>
+              )}
+            </Show>
+          </ResourceState>
+        </section>
+
         <section class="view-section" aria-labelledby="plugin-list-title">
           <div class="section-heading">
             <div>

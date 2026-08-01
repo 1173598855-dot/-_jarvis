@@ -4,9 +4,9 @@
 
 **项目路径**：`C:\GitHub\贾维斯\`
 
-**最后更新**：2026-07-29
+**最后更新**：2026-07-31
 
-**最新迭代**：Iteration 138
+**最新迭代**：Iteration 140
 
 ## 项目目标
 
@@ -30,7 +30,7 @@
 | Express 服务 | `frontend/server.js` | Ollama/SSE、真实系统与 Token 遥测、Git 数据、Core API 桥接 |
 | Python HTTP 服务 | `src/main.py` | 标准库 HTTP API，默认端口 8080 |
 | FastAPI 服务 | `src/main_fastapi.py` | 更完整的异步 API 与角色调度入口 |
-| Kernel | `src/core/kernel/` | Ollama、终端、插件、事件总线 |
+| Kernel | `src/core/kernel/` | Ollama、终端、插件、事件总线与能力注册/解析 |
 | Brain | `src/core/brain/` | 上下文压缩、编排器、角色注册、Agent 工厂与角色工具授权 |
 | Plugin | `plugins/` | 插件模板与事件记录插件 |
 | Skill | `skills/` | 19 个本地技能包 |
@@ -65,13 +65,13 @@
 
 ## 当前规模
 
-- `src/`：37 个 Python 文件、12,143 行非空代码/文档行；服务端源代码统一使用 Python。
+- `src/`：38 个 Python 文件、12,429 行非空代码/文档行；服务端源代码统一使用 Python。
 - `frontend/src/`：38 个 TypeScript/TSX 文件。
-- `tests/`：58 个 `test_*.py` 文件；规范聚合套件 500 个用例；完整 discovery 1357 个用例。
-- 前端验证：Vitest 129 个用例；Playwright 5 项通过、1 项按桌面条件跳过。
+- `tests/`：58 个 `test_*.py` 文件；规范聚合套件 511 个用例；完整 discovery 1382 个用例。
+- 前端验证：Vitest 135 个用例；Playwright 7 项通过、1 项按桌面条件跳过。
 - `skills/`：19 个技能目录。
 - `plugins/`：`plugin-template` 与 `event-logger`。
-- `docs/reports/`：滚动保留最近 10 份审计报告，当前为 Iteration 125-134。
+- `docs/reports/`：滚动保留最近 10 份审计报告，当前为 Iteration 131-140。
 
 ## 阶段状态
 
@@ -86,7 +86,7 @@
 | Phase 11 | 进行中 | 异步任务通道与三条同步角色 dispatch 均已迁移至可终止 Worker；任务持久恢复及 Worker 内固定五工具只读模型循环已交付，通用 orchestrator dispatch 保持不变 |
 | Phase 12 | 进行中 | Python 聚合/扩展测试与前端 Vitest/Playwright |
 
-Stage D 能力注册表已启动：当前只读扫描可生成 19 个 Skill、2 个 Plugin 和 1 个直接导出 UI 组件的版本化记录；严格兼容求值、确定性本地解析、已验证的禁用包暂存和可逆生命周期已交付，只读 API/UI 接入仍在后续迭代中。
+Stage D 能力注册表已完成：当前只读扫描可生成 19 个 Skill、2 个 Plugin 和 1 个直接导出 UI 组件的版本化记录；严格兼容求值、确定性本地解析、已验证的禁用包暂存、可逆生命周期、OpenAPI `1.15.0` 只读接口与 Plugins 视图均已交付。Express-only Git 路径也已通过 path-level 实现标记纳入同一契约。包内容仍默认禁用，HTTP 不接受归档、路径、URL 或生命周期写操作。
 
 ## 启动方式
 
@@ -137,4 +137,4 @@ npm run build
 - 临时测试输出使用 `.test-*` 命名并保持 Git 忽略。
 - 不把历史审计报告中的测试数量或阶段状态直接当作当前状态。
 
-Current verified test baseline for Iteration 138: aggregate 500 total (498 passed, 2 skipped); full discovery 1357 total (1355 passed, 2 skipped); Vitest 129 passed; Playwright 5 passed and 1 conditional skip.
+Current verified test baseline for Iteration 140: aggregate 513 total (511 passed, 2 skipped); full discovery 1384 total (1382 passed, 2 skipped); Vitest 136 passed; Playwright 7 passed and 1 conditional skip.

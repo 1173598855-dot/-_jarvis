@@ -1,3 +1,118 @@
+## Iteration #140 - 2026-07-31
+
+**Protocol**: Express-only Git API contract and OpenAPI boundary
+**Status**: Complete
+
+### Achievements
+
+- Upgraded the shared OpenAPI contract to `1.15.0` and declared
+  `/api/git/status`, `/api/git/log`, and `/api/git/branches` as Express-only
+  through path-level `x-jarvis-implementations`.
+- Added Git status, changed-file, commit, log, and branches response schemas
+  plus the shared `500` ErrorResponse contract without changing Express Git
+  behavior.
+- Added a typed `gitBranches` client method and Vitest coverage for all three
+  Git read-only endpoints; Express server tests now cover all Git error paths.
+- Updated README, development guide, project analysis, report index, AGENTS,
+  and iteration-ledger counts so the machine-readable boundary and current
+  evidence stay aligned.
+
+### Verification
+
+- `python -m unittest tests.test_api_contract.TestSharedApiContract -v`: 27/27 passed
+- `python tests/run_all.py`: 513 total (511 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1384 total (1382 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `cd frontend; npm test -- --run`: 136/136 passed
+- `cd frontend; JARVIS_E2E_PORT=5189; npm run test:e2e`: 7 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `contracts/core-api.openapi.json`
+- `tests/test_api_contract.py`
+- `tests/run_all.py`
+- `tests/test_run_all_coverage.py`
+- `frontend/server.test.js`
+- `frontend/src/services/jarvis-api.ts`
+- `frontend/src/types/api.ts`
+- `frontend/src/tests/jarvis-api.test.ts`
+- `README.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_140.md`
+- `docs/reports/AUDIT_REPORT_130.md`
+- `AGENTS.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #139 - 2026-07-31
+
+**Protocol**: Read-only capability registry contract and operational Plugins view
+**Status**: Complete
+
+### Achievements
+
+- Added shared OpenAPI `1.14.0` coverage for `GET /api/capabilities/registry`, including bounded scalar query parameters, explicit public capability schemas, repository-relative path constraints, and stable invalid/unavailable errors.
+- Added one shared capability query parser and response shaper, then wired repository-root-only discovery and deterministic resolution into Python HTTPServer and FastAPI without accepting caller-controlled roots or lifecycle mutations.
+- Hardened the registry after independent review with a shared Plugin API version, real first-party compatibility coverage, a two-second single-flight snapshot cache, per-kind child bounds, bounded discovery issues, and a record-only public wire shape without resolver scores.
+- Added an Express Core API proxy that preserves the original registry query and Core status/error envelope; no archive upload, URL fetch, install, enable, rollback, or removal endpoint was introduced.
+- Added strict TypeScript capability records, a Core-gated polling client, and a read-only Plugins view inventory for kind counts, lifecycle, provenance, compatibility, health, risk, permissions, and relative origin metadata while preserving existing Plugin lifecycle actions.
+- Covered loading, degraded, issue-only, empty, unavailable, and lifecycle states in Vitest, and added Playwright desktop/mobile evidence that capability metadata remains visible without overlap or horizontal overflow at 1440px and 390px.
+- Completed Stage D while keeping package content local, disabled, unimported, unexecuted, and unavailable to HTTP mutation callers.
+
+### Verification
+
+- `python -m unittest tests.test_api_contract tests.test_capability_registry tests.test_capability_resolver tests.test_main tests.test_main_fastapi`: 394/394 passed
+- `python tests/run_all.py`: 511 total (509 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1382 total (1380 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `cd frontend; npm test -- --run`: 135/135 passed
+- `cd frontend; JARVIS_E2E_PORT=5189; npm run test:e2e`: 7 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `contracts/core-api.openapi.json`
+- `src/core/kernel/capability_api.py`
+- `src/core/kernel/capability_registry.py`
+- `src/core/kernel/capability_resolver.py`
+- `src/core/kernel/plugin_sdk.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `frontend/src/types/api.ts`
+- `frontend/src/services/jarvis-api.ts`
+- `frontend/src/views/PluginsView.tsx`
+- `frontend/src/styles/components.css`
+- `frontend/src/tests/domain-views.test.tsx`
+- `frontend/src/tests/jarvis-api.test.ts`
+- `frontend/src/tests/polling-resource.test.ts`
+- `frontend/e2e/command-center.spec.ts`
+- `tests/test_api_contract.py`
+- `tests/test_capability_registry.py`
+- `tests/test_main.py`
+- `tests/test_main_fastapi.py`
+- `README.md`
+- `AGENTS.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_139.md`
+- `docs/reports/AUDIT_REPORT_129.md`
+
+---
+
 ## Iteration #138 - 2026-07-29
 
 **Protocol**: Reversible disabled capability lifecycle with fail-closed drift detection

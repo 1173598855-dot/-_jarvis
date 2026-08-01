@@ -14,6 +14,7 @@ let ollamaServer;
 let coreServer;
 let ollamaStatusMode = 'healthy';
 let coreMode = 'healthy';
+let coreCapabilityUrl;
 let coreHistoryUrl;
 let coreDispatchBody;
 let coreRoleUrl;
@@ -136,6 +137,40 @@ beforeAll(async () => {
 
     if (req.url === '/api/health') {
       res.end(JSON.stringify({ status: 'healthy' }));
+      return;
+    }
+    if (req.url?.startsWith('/api/capabilities/registry')) {
+      coreCapabilityUrl = req.url;
+      res.end(JSON.stringify({
+        schema_version: 1,
+        capabilities: [{
+          schema_version: 1,
+          capability_id: 'skill:memory-keeper',
+          kind: 'skill',
+          name: 'Memory Keeper',
+          version: null,
+          description: 'Local memory management',
+          relative_path: 'skills/memory-keeper',
+          entrypoint: 'skills/memory-keeper/SKILL.md',
+          lifecycle: 'discovered',
+          permissions: ['memory.read'],
+          compatibility: {
+            constraints: { python: '>=3.10' },
+            status: 'compatible',
+            reasons: [],
+          },
+          provenance: {
+            source_url: null,
+            license: 'MIT',
+            sha256: 'a'.repeat(64),
+            status: 'verified',
+          },
+          health: { status: 'healthy', issues: [] },
+          risk: { level: 'low', reasons: [] },
+        }],
+        count: 1,
+        issues: [],
+      }));
       return;
     }
     if (req.url === '/api/plugins') {
@@ -478,16 +513,18 @@ describe('System telemetry', () => {
 
 describe('Shared API errors', () => {
   test('returns a stable envelope when Git cannot start', async () => {
-    const response = await fetch(`http://127.0.0.1:${apiPort}/api/git/status`);
-    const body = await response.json();
+    for (const path of ['/api/git/status', '/api/git/log', '/api/git/branches']) {
+      const response = await fetch(`http://127.0.0.1:${apiPort}${path}`);
+      const body = await response.json();
 
-    expect(response.status).toBe(500);
-    expect(body).toEqual({
-      error: {
-        code: 'GIT_COMMAND_FAILED',
-        message: 'Git repository metadata is unavailable',
-      },
-    });
+      expect(response.status).toBe(500);
+      expect(body).toEqual({
+        error: {
+          code: 'GIT_COMMAND_FAILED',
+          message: 'Git repository metadata is unavailable',
+        },
+      });
+    }
   });
 
   test('does not proxy terminal execution without an explicit capability', async () => {
@@ -521,6 +558,24 @@ describe('Shared API errors', () => {
 });
 
 describe('Core API bridge', () => {
+  test('proxies the read-only capability registry query unchanged', async () => {
+    coreCapabilityUrl = undefined;
+
+    const response = await fetch(
+      `http://127.0.0.1:${apiPort}/api/capabilities/registry?q=memory&limit=5`,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      schema_version: 1,
+      count: 1,
+      capabilities: [
+        expect.objectContaining({ capability_id: 'skill:memory-keeper' }),
+      ],
+    });
+    expect(coreCapabilityUrl).toBe('/api/capabilities/registry?q=memory&limit=5');
+  });
+
   test('reports capability availability and proxies plugins', async () => {
     const capabilitiesResponse = await fetch(
       `http://127.0.0.1:${apiPort}/api/capabilities`,
