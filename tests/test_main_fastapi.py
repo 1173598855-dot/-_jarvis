@@ -25,6 +25,7 @@ from core.kernel.capability_manifest import (  # noqa: E402
     CapabilitySnapshot,
 )
 from core.kernel.plugin_sdk import PluginManifest  # noqa: E402
+from core.kernel.event_bus import EventBus  # noqa: E402
 
 
 def _capability_snapshot(issues=()):
@@ -1521,6 +1522,88 @@ class TestPluginLifecycleEndpoints(unittest.TestCase):
     def test_plugin_disable_nonexistent_returns_error(self):
         resp = self.client.post("/api/plugins/disable", json={"plugin_id": "nonexistent_xyz_999"})
         self.assertIn(resp.status_code, [200, 404, 500])
+
+
+class TestPluginServiceOwnership(unittest.TestCase):
+    def test_plugins_endpoint_uses_the_active_state_manager(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        manager = MagicMock()
+        manager.get_all_plugins.return_value = []
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                plugin_manager=manager,
+            )
+            with TestClient(main_fastapi.create_app(app_state)) as client:
+                self.assertEqual(client.get("/api/plugins").json(), {"plugins": []})
+
+        manager.get_all_plugins.assert_called_once_with()
+
+    def test_events_endpoint_reads_the_active_state_event_bus(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        event_bus = EventBus()
+        event_bus.emit("plugin.loaded", {"plugin_id": "fixture"})
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                event_bus=event_bus,
+                plugin_manager=MagicMock(),
+            )
+            with TestClient(main_fastapi.create_app(app_state)) as client:
+                response = client.get("/api/events")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["events"][0]["type"], "plugin.loaded")
+
+    def test_shutdown_destroys_event_bus_after_plugin_cleanup_error(self):
+        import main_fastapi
+
+        manager = MagicMock()
+        manager.close.side_effect = RuntimeError("plugin cleanup failed")
+        event_bus = MagicMock()
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                event_bus=event_bus,
+                plugin_manager=manager,
+            )
+            with self.assertRaisesRegex(RuntimeError, "plugin cleanup failed"):
+                app_state.shutdown()
+
+        manager.close.assert_called_once_with()
+        event_bus.destroy.assert_called_once_with()
+
+    def test_plugin_endpoints_reject_worker_controls_before_calling_manager(self):
+        from fastapi.testclient import TestClient
+        import main_fastapi
+
+        manager = MagicMock()
+        with tempfile.TemporaryDirectory() as memory_dir:
+            app_state = main_fastapi.AppState(
+                memory_dir=memory_dir,
+                plugin_manager=manager,
+            )
+            with TestClient(main_fastapi.create_app(app_state)) as client:
+                for path in (
+                    "/api/plugins/load",
+                    "/api/plugins/enable",
+                    "/api/plugins/disable",
+                ):
+                    response = client.post(
+                        path,
+                        json={"plugin_id": "event-logger", "worker_pid": 1234},
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"]["code"], "INVALID_REQUEST")
+
+        manager.discover.assert_not_called()
+        manager.load.assert_not_called()
+        manager.enable.assert_not_called()
+        manager.disable.assert_not_called()
 
 
 class TestPydanticModels(unittest.TestCase):

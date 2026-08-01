@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "J.A.R.V.I.S. Shared Core API",
-    "version": "1.15.0",
+    "version": "1.16.0",
     "description": "Stable response contract shared by Express, Python HTTPServer, and FastAPI."
   },
   "x-jarvis-implementations": [
@@ -326,6 +326,7 @@
     "/api/plugins": {
       "get": {
         "operationId": "listPlugins",
+        "description": "List service-owned Worker-isolated plugins without exposing Worker controls.",
         "responses": {
           "200": {
             "description": "Installed plugins",
@@ -465,12 +466,14 @@
     "/api/plugins/load": {
       "post": {
         "operationId": "loadPlugin",
+        "description": "Load one service-owned Worker-isolated plugin. Only plugin_id is accepted; Worker runtime controls are not caller-configurable.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
+                "additionalProperties": false,
                 "required": [
                   "plugin_id"
                 ],
@@ -485,6 +488,16 @@
           }
         },
         "responses": {
+          "200": {
+            "description": "Plugin load result. A runtime failure is represented by status=error while preserving this response shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginLoadResponse"
+                }
+              }
+            }
+          },
           "400": {
             "description": "Plugin ID is missing or the request is invalid",
             "content": {
@@ -497,6 +510,102 @@
           },
           "404": {
             "description": "Plugin does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/enable": {
+      "post": {
+        "operationId": "enablePlugin",
+        "description": "Enable one service-owned Worker-isolated plugin. Only plugin_id is accepted; Worker runtime controls are not caller-configurable.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "plugin_id"
+                ],
+                "properties": {
+                  "plugin_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin enable result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginActionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Plugin ID is missing or the request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/disable": {
+      "post": {
+        "operationId": "disablePlugin",
+        "description": "Disable one service-owned Worker-isolated plugin. Only plugin_id is accepted; Worker runtime controls are not caller-configurable.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "plugin_id"
+                ],
+                "properties": {
+                  "plugin_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin disable result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginActionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Plugin ID is missing or the request is invalid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1971,6 +2080,40 @@
             "items": {
               "$ref": "#/components/schemas/PluginInfo"
             }
+          }
+        }
+      },
+      "PluginLoadResponse": {
+        "type": "object",
+        "required": [
+          "plugin_id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "plugin_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginActionResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "plugin_id"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "plugin_id": {
+            "type": "string"
           }
         }
       },

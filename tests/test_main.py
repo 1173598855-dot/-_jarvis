@@ -32,7 +32,8 @@ from core.kernel.capability_resolver import (  # noqa: E402
     CapabilityResolver,
     CompatibilityTarget,
 )
-from core.kernel.plugin_sdk import PluginManifest  # noqa: E402
+from core.kernel.event_bus import EventBus  # noqa: E402
+from core.kernel.plugin_sdk import FIRST_PARTY_EVENT_GRANTS, PluginManifest  # noqa: E402
 
 
 def _load_main():
@@ -50,7 +51,7 @@ _main = _load_main()
 JARVISHandler = _main.JARVISHandler
 
 
-def _make_handler(command="GET", path="/api/health", headers=None):
+def _make_handler(command="GET", path="/api/health", headers=None, app_state=None):
     handler = object.__new__(JARVISHandler)
     handler.command = command
     handler.path = path
@@ -63,6 +64,8 @@ def _make_handler(command="GET", path="/api/health", headers=None):
     handler.close_connection = False
     handler.protocol_version = "HTTP/1.1"
     handler.log_message = MagicMock()
+    if app_state is not None:
+        handler.app_state = app_state
     return handler
 
 
@@ -978,6 +981,67 @@ class TestMainHTTPHandleMethodsRouting(unittest.TestCase):
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertIn("plugins", parsed)
         self.assertIsInstance(parsed["plugins"], list)
+
+    def test_plugin_handlers_use_the_injected_app_state_manager(self):
+        manager = MagicMock()
+        manager.get_all_plugins.return_value = []
+        app_state = _main.AppState(plugin_manager=manager)
+        handler = _make_handler(app_state=app_state)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        try:
+            handler.handle_plugins_list()
+        finally:
+            app_state.shutdown()
+
+        manager.get_all_plugins.assert_called_once_with()
+
+    def test_plugin_event_history_uses_the_injected_event_bus(self):
+        event_bus = EventBus()
+        event_bus.emit("plugin.loaded", {"plugin_id": "fixture"})
+        app_state = _main.AppState(
+            event_bus=event_bus,
+            plugin_manager=MagicMock(),
+        )
+        handler = _make_handler(app_state=app_state)
+        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
+            setattr(handler, attr, MagicMock())
+
+        try:
+            handler.handle_events()
+            payload = json.loads(handler.wfile.write.call_args.args[0])
+        finally:
+            app_state.shutdown()
+
+        self.assertEqual(payload["events"][0]["type"], "plugin.loaded")
+        self.assertEqual(payload["events"][0]["payload"], "{'plugin_id': 'fixture'}")
+
+    def test_plugin_handlers_reject_worker_controls_before_calling_manager(self):
+        manager = MagicMock()
+        app_state = _main.AppState(plugin_manager=manager)
+        try:
+            with _running_http_server(app_state) as address:
+                for path in (
+                    "/api/plugins/load",
+                    "/api/plugins/enable",
+                    "/api/plugins/disable",
+                ):
+                    status, body = _http_json(
+                        address,
+                        "POST",
+                        path,
+                        {"plugin_id": "event-logger", "worker_pid": 1234},
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertEqual(body["error"]["code"], "INVALID_REQUEST")
+        finally:
+            app_state.shutdown()
+
+        manager.discover.assert_not_called()
+        manager.load.assert_not_called()
+        manager.enable.assert_not_called()
+        manager.disable.assert_not_called()
 
     def test_handle_capability_registry_filters_and_serializes_public_records(self):
         handler = _prepare_json_handler(
@@ -1971,6 +2035,37 @@ class TestMainHTTPStateLifecycle(unittest.TestCase):
             "role_tasks",
         ])
         self.assertEqual(role_tasks.shutdown_calls, 2)
+
+    def test_app_state_constructs_a_manager_bound_to_its_event_bus(self):
+        terminal = MagicMock()
+        with patch.object(_main, "PluginManager") as plugin_manager_type:
+            app_state = _main.AppState(terminal=terminal)
+            try:
+                plugin_manager_type.assert_called_once_with(
+                    event_bus=app_state.event_bus,
+                    grants=FIRST_PARTY_EVENT_GRANTS,
+                )
+            finally:
+                app_state.shutdown()
+
+    def test_shutdown_closes_plugin_manager_before_destroying_event_bus(self):
+        order = []
+        manager = MagicMock()
+        manager.close.side_effect = lambda: order.append("plugin_manager")
+        event_bus = MagicMock()
+        event_bus.destroy.side_effect = lambda: order.append("event_bus")
+        terminal = MagicMock()
+        terminal.close.side_effect = lambda: order.append("terminal")
+        app_state = _main.AppState(
+            terminal=terminal,
+            event_bus=event_bus,
+            plugin_manager=manager,
+        )
+
+        app_state.shutdown()
+
+        self.assertLess(order.index("terminal"), order.index("plugin_manager"))
+        self.assertEqual(order[-2:], ["plugin_manager", "event_bus"])
 
     def test_run_server_closes_server_and_active_state_from_finally(self):
         active_state = MagicMock()

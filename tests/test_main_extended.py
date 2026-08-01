@@ -167,28 +167,30 @@ class TestHandleOllamaChatStream(unittest.TestCase):
 class TestHandlePluginEndpointsExtended(unittest.TestCase):
     def test_plugin_enable_returns_success(self):
         handler = _make_handler(command="POST", path="/api/plugins/enable")
+        handler.app_state = MagicMock()
         handler.headers = {"Content-Length": "0"}
         for attr in ["send_response", "send_header", "end_headers", "wfile"]:
             setattr(handler, attr, MagicMock())
         body_data = json.dumps({"plugin_id": "test_plugin"}).encode()
         handler.headers["Content-Length"] = str(len(body_data))
         handler.rfile = io.BytesIO(body_data)
-        with patch.object(mod.global_plugin_manager, "enable", return_value=True):
-            handler.handle_plugin_enable()
+        handler.app_state.plugin_manager.enable.return_value = True
+        handler.handle_plugin_enable()
         handler.send_response.assert_called_once_with(200)
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertTrue(parsed["success"])
 
     def test_plugin_disable_returns_success(self):
         handler = _make_handler(command="POST", path="/api/plugins/disable")
+        handler.app_state = MagicMock()
         handler.headers = {"Content-Length": "0"}
         for attr in ["send_response", "send_header", "end_headers", "wfile"]:
             setattr(handler, attr, MagicMock())
         body_data = json.dumps({"plugin_id": "test_plugin"}).encode()
         handler.headers["Content-Length"] = str(len(body_data))
         handler.rfile = io.BytesIO(body_data)
-        with patch.object(mod.global_plugin_manager, "disable", return_value=True):
-            handler.handle_plugin_disable()
+        handler.app_state.plugin_manager.disable.return_value = True
+        handler.handle_plugin_disable()
         handler.send_response.assert_called_once_with(200)
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertTrue(parsed["success"])

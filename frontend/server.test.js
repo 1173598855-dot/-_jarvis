@@ -17,6 +17,8 @@ let coreMode = 'healthy';
 let coreCapabilityUrl;
 let coreHistoryUrl;
 let coreDispatchBody;
+let corePluginActionUrl;
+let corePluginActionBody;
 let coreRoleUrl;
 let coreRoleBody;
 let coreRoleTaskUrl;
@@ -171,6 +173,37 @@ beforeAll(async () => {
         count: 1,
         issues: [],
       }));
+      return;
+    }
+    if (req.method === 'POST' && /^\/api\/plugins\/(load|enable|disable)$/.test(req.url || '')) {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk.toString(); });
+      req.on('end', () => {
+        corePluginActionUrl = req.url;
+        corePluginActionBody = JSON.parse(body || '{}');
+        if (Object.hasOwn(corePluginActionBody, 'worker_pid')) {
+          res.writeHead(400);
+          res.end(JSON.stringify({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'Plugin request accepts only plugin_id',
+            },
+          }));
+          return;
+        }
+        if (req.url === '/api/plugins/load') {
+          res.end(JSON.stringify({
+            plugin_id: corePluginActionBody.plugin_id,
+            name: 'Event Logger',
+            status: 'loaded',
+          }));
+          return;
+        }
+        res.end(JSON.stringify({
+          success: true,
+          plugin_id: corePluginActionBody.plugin_id,
+        }));
+      });
       return;
     }
     if (req.url === '/api/plugins') {
@@ -597,6 +630,54 @@ describe('Core API bridge', () => {
       expect.objectContaining({ id: 'event-logger', status: 'enabled' }),
     ]);
   });
+
+  test.each(['load', 'enable', 'disable'])(
+    'forwards plugin %s requests unchanged',
+    async (action) => {
+      corePluginActionUrl = undefined;
+      corePluginActionBody = undefined;
+      const response = await fetch(`http://127.0.0.1:${apiPort}/api/plugins/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin_id: 'event-logger' }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(corePluginActionUrl).toBe(`/api/plugins/${action}`);
+      expect(corePluginActionBody).toEqual({ plugin_id: 'event-logger' });
+      if (action === 'load') {
+        await expect(response.json()).resolves.toEqual({
+          plugin_id: 'event-logger',
+          name: 'Event Logger',
+          status: 'loaded',
+        });
+        return;
+      }
+      await expect(response.json()).resolves.toEqual({
+        success: true,
+        plugin_id: 'event-logger',
+      });
+    },
+  );
+
+  test.each(['load', 'enable', 'disable'])(
+    'preserves Core rejection of %s Worker controls',
+    async (action) => {
+      const response = await fetch(`http://127.0.0.1:${apiPort}/api/plugins/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin_id: 'event-logger', worker_pid: 1234 }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Plugin request accepts only plugin_id',
+        },
+      });
+    },
+  );
 
   test('proxies scoped memory probe deletion', async () => {
     const response = await fetch(

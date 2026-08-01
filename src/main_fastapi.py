@@ -49,7 +49,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from adapters.file_run_state_repository import (
     FileRunStateRepository,
@@ -89,7 +89,12 @@ from core.kernel.capability_resolver import (
     CapabilityResolver,
     CompatibilityTarget,
 )
-from core.kernel.plugin_sdk import PLUGIN_API_VERSION, global_plugin_manager
+from core.kernel.event_bus import EventBus
+from core.kernel.plugin_sdk import (
+    FIRST_PARTY_EVENT_GRANTS,
+    PLUGIN_API_VERSION,
+    PluginManager,
+)
 from core.kernel.runtime_security import (
     configured_allowed_origins as configured_security_origins,
     terminal_access_enabled,
@@ -292,6 +297,11 @@ async def request_validation_exception_handler(
     )
     is_orchestrator_history = request.url.path == "/api/orchestrator/history"
     is_role_task_path = request.url.path.startswith("/api/roles/tasks")
+    is_plugin_lifecycle_path = request.url.path in {
+        "/api/plugins/load",
+        "/api/plugins/enable",
+        "/api/plugins/disable",
+    }
     status_code = (
         400
         if (
@@ -300,6 +310,7 @@ async def request_validation_exception_handler(
             or is_missing_command
             or is_orchestrator_history
             or is_role_task_path
+            or is_plugin_lifecycle_path
             or request.url.path == "/api/terminal/execute"
             or request.url.path == "/api/ollama/chat/stream"
         )
@@ -351,6 +362,8 @@ class AppState:
         capability_registry: CapabilityRegistry | None = None,
         capability_resolver: CapabilityResolver | None = None,
         capability_target: CompatibilityTarget | None = None,
+        event_bus: EventBus | None = None,
+        plugin_manager: PluginManager | None = None,
     ):
         if role_dispatch is not None:
             dispatch_supervisor = role_dispatch.supervisor
@@ -411,6 +424,15 @@ class AppState:
                 jarvis_api=PLUGIN_API_VERSION,
             )
         )
+        self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.plugin_manager = (
+            plugin_manager
+            if plugin_manager is not None
+            else PluginManager(
+                event_bus=self.event_bus,
+                grants=FIRST_PARTY_EVENT_GRANTS,
+            )
+        )
         if run_lifecycle is None:
             repository = FileRunStateRepository(
                 Path(memory_dir),
@@ -448,6 +470,8 @@ class AppState:
                 ("orchestrator", self.orchestrator.shutdown),
                 ("agent_factory", self.agent_factory.shutdown),
                 ("terminal", self.terminal.close),
+                ("plugin_manager", self.plugin_manager.close),
+                ("event_bus", self.event_bus.destroy),
             ):
                 if resource in self._shutdown_completed:
                     continue
@@ -529,6 +553,7 @@ class ProbeCleanupRequest(BaseModel):
     cleanup_token: str
 
 class PluginLoadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     plugin_id: str
 
 class RoleDispatchRequest(BaseModel):
@@ -756,7 +781,7 @@ async def terminal_execute(
 @app.get("/api/plugins")
 async def plugins_list():
     """Plugin list"""
-    plugins = global_plugin_manager.get_all_plugins()
+    plugins = state.plugin_manager.get_all_plugins()
     return {
         "plugins": [
             {
@@ -817,7 +842,7 @@ async def plugin_load(request: PluginLoadRequest):
                 "message": "Missing plugin_id parameter",
             },
         )
-    manifests = global_plugin_manager.discover()
+    manifests = state.plugin_manager.discover()
     manifest = next((m for m in manifests if m.plugin_id == request.plugin_id), None)
     if not manifest:
         raise HTTPException(
@@ -827,7 +852,7 @@ async def plugin_load(request: PluginLoadRequest):
                 "message": f"Plugin {request.plugin_id} not found",
             },
         )
-    instance = global_plugin_manager.load(manifest)
+    instance = state.plugin_manager.load(manifest)
     return {
         "plugin_id": instance.manifest.plugin_id,
         "name": instance.manifest.name,
@@ -837,13 +862,13 @@ async def plugin_load(request: PluginLoadRequest):
 @app.post("/api/plugins/enable")
 async def plugin_enable(request: PluginLoadRequest):
     """Enable plugin"""
-    result = global_plugin_manager.enable(request.plugin_id)
+    result = state.plugin_manager.enable(request.plugin_id)
     return {"success": result, "plugin_id": request.plugin_id}
 
 @app.post("/api/plugins/disable")
 async def plugin_disable(request: PluginLoadRequest):
     """Disable plugin"""
-    result = global_plugin_manager.disable(request.plugin_id)
+    result = state.plugin_manager.disable(request.plugin_id)
     return {"success": result, "plugin_id": request.plugin_id}
 
 # ============================================================
@@ -928,11 +953,7 @@ async def memory_probe_delete(
 @app.get("/api/events")
 async def events(limit: int = 100):
     """Event history (event_bus integration)"""
-    try:
-        from core.kernel.event_bus import global_event_bus
-        history = global_event_bus.get_history(limit=limit)
-    except (ImportError, AttributeError):
-        history = []
+    history = state.event_bus.get_history(limit=limit)
     return {
         "events": [
             {

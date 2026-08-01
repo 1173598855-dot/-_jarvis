@@ -89,9 +89,11 @@ from core.kernel.capability_resolver import (  # noqa: E402
     CapabilityResolver,
     CompatibilityTarget,
 )
+from core.kernel.event_bus import EventBus  # noqa: E402
 from core.kernel.plugin_sdk import (  # noqa: E402
+    FIRST_PARTY_EVENT_GRANTS,
     PLUGIN_API_VERSION,
-    global_plugin_manager,
+    PluginManager,
 )
 from core.kernel.runtime_security import (  # noqa: E402
     configured_allowed_origins,
@@ -168,6 +170,8 @@ class AppState:
         capability_registry: CapabilityRegistry | None = None,
         capability_resolver: CapabilityResolver | None = None,
         capability_target: CompatibilityTarget | None = None,
+        event_bus: EventBus | None = None,
+        plugin_manager: PluginManager | None = None,
     ):
         if role_dispatch is not None:
             dispatch_supervisor = role_dispatch.supervisor
@@ -228,6 +232,15 @@ class AppState:
                 jarvis_api=PLUGIN_API_VERSION,
             )
         )
+        self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.plugin_manager = (
+            plugin_manager
+            if plugin_manager is not None
+            else PluginManager(
+                event_bus=self.event_bus,
+                grants=FIRST_PARTY_EVENT_GRANTS,
+            )
+        )
         self.start_time = time.time()
         self.request_count = 0
         self._lock = threading.Lock()
@@ -246,6 +259,8 @@ class AppState:
                 ("orchestrator", self.orchestrator.shutdown),
                 ("agent_factory", self.agent_factory.shutdown),
                 ("terminal", self.terminal.close),
+                ("plugin_manager", self.plugin_manager.close),
+                ("event_bus", self.event_bus.destroy),
             ):
                 if resource in self._shutdown_completed:
                     continue
@@ -723,7 +738,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_plugins_list(self):
         """插件列表"""
-        plugins = global_plugin_manager.get_all_plugins()
+        plugins = self.app_state.plugin_manager.get_all_plugins()
         self._send_json({
             "plugins": [
                 {
@@ -774,8 +789,9 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_plugin_load(self):
         """加载插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
+        valid, plugin_id = self._read_plugin_id()
+        if not valid:
+            return
         if not plugin_id:
             self._send_error(
                 "Missing plugin_id parameter",
@@ -784,7 +800,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             return
 
         # 查找 manifest
-        manifests = global_plugin_manager.discover()
+        manifests = self.app_state.plugin_manager.discover()
         manifest = next((m for m in manifests if m.plugin_id == plugin_id), None)
         if not manifest:
             self._send_error(
@@ -794,7 +810,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             )
             return
 
-        instance = global_plugin_manager.load(manifest)
+        instance = self.app_state.plugin_manager.load(manifest)
         self._send_json({
             "plugin_id": instance.manifest.plugin_id,
             "name": instance.manifest.name,
@@ -803,25 +819,39 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_plugin_enable(self):
         """启用插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
+        valid, plugin_id = self._read_plugin_id()
+        if not valid:
+            return
         if not plugin_id:
             self._send_error("Missing plugin_id parameter")
             return
 
-        result = global_plugin_manager.enable(plugin_id)
+        result = self.app_state.plugin_manager.enable(plugin_id)
         self._send_json({"success": result, "plugin_id": plugin_id})
 
     def handle_plugin_disable(self):
         """禁用插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
+        valid, plugin_id = self._read_plugin_id()
+        if not valid:
+            return
         if not plugin_id:
             self._send_error("Missing plugin_id parameter")
             return
 
-        result = global_plugin_manager.disable(plugin_id)
+        result = self.app_state.plugin_manager.disable(plugin_id)
         self._send_json({"success": result, "plugin_id": plugin_id})
+
+    def _read_plugin_id(self):
+        """Read the fixed plugin lifecycle request shape without Worker controls."""
+        data = self._read_body()
+        if set(data) - {"plugin_id"}:
+            self._send_error(
+                "Plugin request accepts only plugin_id",
+                400,
+                "INVALID_REQUEST",
+            )
+            return False, None
+        return True, data.get("plugin_id")
 
     def handle_memory_entries(self):
         """记忆列表"""
@@ -895,8 +925,19 @@ class JARVISHandler(BaseHTTPRequestHandler):
         self._send_json({"success": True, "id": entry_id})
 
     def handle_events(self):
-        """Event history (event_bus module removed, returns empty list for now)"""
-        self._send_json({"events": []})
+        """Event history for this service instance."""
+        history = self.app_state.event_bus.get_history(limit=100)
+        self._send_json({
+            "events": [
+                {
+                    "type": str(event.type),
+                    "payload": str(event.payload)[:200],
+                    "timestamp": event.timestamp,
+                    "source": event.source,
+                }
+                for event in history
+            ]
+        })
 
     # ============================================================
     # Orchestrator endpoints

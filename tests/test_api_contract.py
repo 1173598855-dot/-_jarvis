@@ -409,7 +409,17 @@ class TestSharedApiContract(unittest.TestCase):
 
     def test_contract_is_openapi_31_document(self):
         _assert_contract_document(self, self.contract)
-        self.assertEqual(self.spec["info"]["version"], "1.15.0")
+        self.assertEqual(self.spec["info"]["version"], "1.16.0")
+
+    def test_plugin_lifecycle_is_worker_isolated_and_accepts_only_plugin_id(self):
+        for path in ("/api/plugins/load", "/api/plugins/enable", "/api/plugins/disable"):
+            operation = self.spec["paths"][path]["post"]
+            self.assertIn("Worker-isolated", operation["description"])
+            schema = operation["requestBody"]["content"]["application/json"]["schema"]
+            self.assertEqual(set(schema["properties"]), {"plugin_id"})
+            self.assertFalse(schema["additionalProperties"])
+            self.assertNotIn("worker_pid", schema["properties"])
+            self.assertNotIn("runtime", schema["properties"])
 
     def test_capability_registry_path_is_read_only_and_schema_bound(self):
         path = self.spec["paths"]["/api/capabilities/registry"]
