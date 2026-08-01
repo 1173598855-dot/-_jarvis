@@ -110,6 +110,15 @@ class TestPluginWorkerProtocol(unittest.TestCase):
                 with self.assertRaises(PluginWorkerProtocolError):
                     decode_message(line)
 
+    def test_decoder_requires_one_trailing_line_terminator(self):
+        payload = stable_json_bytes(self.messages[0].to_dict())
+
+        with self.assertRaises(PluginWorkerProtocolError):
+            decode_message(payload)
+        with self.assertRaises(PluginWorkerProtocolError):
+            decode_message(payload + b"\n\n")
+        self.assertEqual(decode_message(payload + b"\n"), self.messages[0])
+
     def test_integer_fields_reject_booleans_and_invalid_worker_pid(self):
         for pid in (True, 0, -1):
             with self.subTest(pid=pid):

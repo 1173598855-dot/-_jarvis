@@ -497,10 +497,13 @@ def decode_message(line: bytes) -> ProtocolMessage:
     """Decode exactly one bounded, validated plugin worker JSON message."""
     if not isinstance(line, bytes):
         raise PluginWorkerProtocolError("protocol line must be bytes")
-    if not line or len(line) > MAX_PLUGIN_WORKER_LINE_BYTES:
+    if (
+        not line
+        or len(line) > MAX_PLUGIN_WORKER_LINE_BYTES
+        or not line.endswith(b"\n")
+    ):
         raise PluginWorkerProtocolError("protocol line has an invalid byte length")
-    if line.endswith(b"\n"):
-        line = line[:-1]
+    line = line[:-1]
     if not line or b"\n" in line or b"\r" in line:
         raise PluginWorkerProtocolError("protocol line must contain one JSON value")
     try:
