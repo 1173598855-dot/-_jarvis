@@ -105,10 +105,18 @@ class XiaoYiPluginAPI:
     - 系统环境变量（os.environ、process.env）
     """
 
-    def __init__(self, plugin_id: str, permissions: List[str]):
+    def __init__(
+        self,
+        plugin_id: str,
+        permissions: List[str],
+        broker_call: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        audit_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         self.plugin_id = plugin_id
         self._permissions = set(permissions)
         self._audit_log: List[Dict[str, Any]] = []
+        self._broker_call = broker_call
+        self._audit_sink = audit_sink
 
     def check_permission(self, permission: str) -> bool:
         """检查权限"""
@@ -116,26 +124,38 @@ class XiaoYiPluginAPI:
 
     def log_access(self, api_name: str, args: Dict[str, Any]) -> None:
         """记录 API 访问日志"""
-        self._audit_log.append({
+        entry = {
             "plugin_id": self.plugin_id,
             "api": api_name,
             "args": str(args)[:200],
             "timestamp": datetime.now().isoformat(),
-        })
+        }
+        self._audit_log.append(entry)
+        if self._audit_sink is not None:
+            try:
+                self._audit_sink(dict(entry))
+            except Exception:
+                pass
 
     # ============================================================
     # 受限 API 实现
     # ============================================================
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        """获取配置（仅允许读取系统配置）"""
+        """Get configuration through the active Broker when available."""
+        if self._broker_call is not None:
+            self.log_access("get_config", {"key": key})
+            return self._broker_call("config.get", {"key": key, "default": default})
         if not self.check_permission("system_config"):
             raise PermissionError(f"插件 {self.plugin_id} 无 system_config 权限")
         self.log_access("get_config", {"key": key})
         return default
 
-    def read_file(self, path: str) -> str:
-        """读取文件（仅允许读取，不允许写入）"""
+    def read_file(self, path: str) -> Any:
+        """Read through the active Broker when available."""
+        if self._broker_call is not None:
+            self.log_access("read_file", {"path": path})
+            return self._broker_call("file.read", {"path": path})
         if not self.check_permission("file_read"):
             raise PermissionError(f"插件 {self.plugin_id} 无 file_read 权限")
         self.log_access("read_file", {"path": path})
@@ -145,23 +165,35 @@ class XiaoYiPluginAPI:
         except Exception as e:
             return f"ERROR: {e}"
 
-    def emit_event(self, event_type: str, payload: Any) -> None:
-        """发送事件到事件总线"""
+    def emit_event(self, event_type: str, payload: Any) -> Any:
+        """Emit through the active Broker when available."""
+        if self._broker_call is not None:
+            self.log_access("emit_event", {"type": event_type})
+            return self._broker_call(
+                "event.emit",
+                {"event_type": event_type, "payload": payload},
+            )
         if not self.check_permission("event_bus"):
             raise PermissionError(f"插件 {self.plugin_id} 无 event_bus 权限")
         self.log_access("emit_event", {"type": event_type})
         # 实际中会调用事件总线
         logger.info(f"[Plugin {self.plugin_id}] Event: {event_type}")
 
-    def call_llm(self, prompt: str, model: str = "default") -> str:
-        """调用 LLM（受限）"""
+    def call_llm(self, prompt: str, model: str = "default") -> Any:
+        """Call through the active Broker when available."""
+        if self._broker_call is not None:
+            self.log_access("call_llm", {"model": model, "prompt_len": len(prompt)})
+            return self._broker_call("llm.call", {"prompt": prompt, "model": model})
         if not self.check_permission("llm_access"):
             raise PermissionError(f"插件 {self.plugin_id} 无 llm_access 权限")
         self.log_access("call_llm", {"model": model, "prompt_len": len(prompt)})
         return f"[LLM Response to: {prompt[:50]}...]"
 
-    def get_system_stats(self) -> Dict[str, Any]:
-        """获取系统统计（受限）"""
+    def get_system_stats(self) -> Any:
+        """Get statistics through the active Broker when available."""
+        if self._broker_call is not None:
+            self.log_access("get_system_stats", {})
+            return self._broker_call("system.stats", {})
         if not self.check_permission("system_monitor"):
             raise PermissionError(f"插件 {self.plugin_id} 无 system_monitor 权限")
         self.log_access("get_system_stats", {})
@@ -483,4 +515,22 @@ class PluginManager:
 
 
 # 全局单例
-global_plugin_manager = PluginManager()
+class _LazyPluginManager:
+    """Preserve the legacy global import without constructing it in a Worker."""
+
+    def __init__(self):
+        self._manager: Optional[PluginManager] = None
+        self._lock = threading.Lock()
+
+    def _resolve(self) -> PluginManager:
+        with self._lock:
+            if self._manager is None:
+                self._manager = PluginManager()
+            return self._manager
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+# Compatibility object. Service composition moves to owned managers in Task 6.
+global_plugin_manager = _LazyPluginManager()
