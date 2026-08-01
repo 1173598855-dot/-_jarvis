@@ -218,22 +218,29 @@ class PluginLoader:
             snapshot = runtime.start()
             result = runtime.invoke(LifecycleAction.LOAD)
             if not result.success or result.status != PluginStatus.LOADED.value:
-                runtime.close()
-                return self._error_instance(manifest, PLUGIN_WORKER_LIFECYCLE_FAILED, identity, generation)
+                return self._failed_load_instance(
+                    manifest,
+                    identity,
+                    generation,
+                    runtime,
+                    PLUGIN_WORKER_LIFECYCLE_FAILED,
+                )
         except PluginRuntimeError as exc:
-            if runtime is not None:
-                try:
-                    runtime.close()
-                except Exception:
-                    pass
-            return self._error_instance(manifest, exc.code, identity, self._next_generation.get(manifest.plugin_id, 0))
+            return self._failed_load_instance(
+                manifest,
+                identity,
+                self._next_generation.get(manifest.plugin_id, 0) + 1,
+                runtime,
+                exc.code,
+            )
         except Exception:
-            if runtime is not None:
-                try:
-                    runtime.close()
-                except Exception:
-                    pass
-            return self._error_instance(manifest, "PLUGIN_WORKER_START_FAILED", identity, self._next_generation.get(manifest.plugin_id, 0))
+            return self._failed_load_instance(
+                manifest,
+                identity,
+                self._next_generation.get(manifest.plugin_id, 0) + 1,
+                runtime,
+                "PLUGIN_WORKER_START_FAILED",
+            )
 
         instance = PluginInstance(
             manifest=manifest,
@@ -253,6 +260,8 @@ class PluginLoader:
     def enable_plugin(self, plugin_id: str) -> bool:
         instance = self._plugins.get(plugin_id)
         if instance is None:
+            return False
+        if instance.status is PluginStatus.ERROR and not instance.termination_confirmed:
             return False
         if instance.status is PluginStatus.ENABLED:
             return True
@@ -349,6 +358,41 @@ class PluginLoader:
             generation=generation,
             _identity=identity,
         )
+
+    def _failed_load_instance(
+        self,
+        manifest: PluginManifest,
+        identity: tuple[str, str],
+        generation: int,
+        runtime: Any,
+        code: str,
+    ) -> PluginInstance:
+        if runtime is None:
+            return self._error_instance(manifest, code, identity, generation)
+
+        try:
+            runtime.close()
+        except Exception:
+            pass
+
+        snapshot = getattr(runtime, "snapshot", None)
+        termination_confirmed = bool(
+            snapshot is not None and getattr(snapshot, "termination_confirmed", False)
+        )
+        instance = self._error_instance(
+            manifest,
+            code if termination_confirmed else "PLUGIN_WORKER_TERMINATION_UNCONFIRMED",
+            identity,
+            getattr(snapshot, "generation", generation),
+        )
+        if snapshot is not None:
+            instance.worker_pid = getattr(snapshot, "pid", None)
+            instance.termination_confirmed = termination_confirmed
+        if not termination_confirmed:
+            instance._runtime = runtime
+            self._plugins[manifest.plugin_id] = instance
+            self._next_generation[manifest.plugin_id] = instance.generation
+        return instance
 
     def _plugin_root(self, plugin_id: str) -> Path:
         candidate = self.plugins_dir / plugin_id

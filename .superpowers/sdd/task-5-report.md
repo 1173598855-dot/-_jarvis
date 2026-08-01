@@ -25,6 +25,15 @@ Result: 152 tests passed; `git diff --check` completed without whitespace errors
 
 `feat(plugins): run first-party plugins in workers` (the single Task 5 commit containing this report).
 
+## Review Follow-up
+
+- Added a regression for a Worker that fails during `load` and cannot confirm
+  termination. Its error instance retains the runtime, PID, generation, and
+  identity so neither reactivation nor a second load can replace it.
+- Updated SDK test fixtures to close every real Worker before their temporary
+  Plugin root is removed.
+- Re-ran the focused Task 5 command after the fix: 153 tests passed.
+
 ## Residual Concerns
 
 - `tests.test_run_all_coverage` registers the new aggregate guards, but its smoke test currently fails only because the Iteration 140 changelog/report still records 513 aggregate tests while the current aggregate suite is 552. Task 5 does not modify user documentation or historical audit metrics.

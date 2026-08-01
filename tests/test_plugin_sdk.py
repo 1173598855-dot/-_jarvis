@@ -316,7 +316,10 @@ class TestPluginLoader(unittest.TestCase):
 
     def tearDown(self):
         import shutil
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.loader.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_discover_empty_dir(self):
         manifests = self.loader.discover_plugins()
@@ -433,8 +436,11 @@ class TestGlobalPluginManager(unittest.TestCase):
         import shutil
 
         import core.kernel.plugin_sdk as ps
-        ps.global_plugin_manager = self.original
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.gpm.close()
+        finally:
+            ps.global_plugin_manager = self.original
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_global_manager_discover_empty(self):
         plugins = self.gpm.get_all_plugins()
@@ -564,7 +570,10 @@ class TestPluginLoaderInternals(unittest.TestCase):
         self.loader = PluginLoader(plugins_dir=self.tmp)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.loader.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_validate_manifest_empty_name_raises(self):
         """_validate_manifest raises ValueError for empty name"""
@@ -690,7 +699,10 @@ class TestPluginLoaderLifecycle(unittest.TestCase):
         self.loader = PluginLoader(plugins_dir=self.tmp)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.loader.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_enable_already_enabled_returns_true(self):
         """enable_plugin returns True when already enabled"""
@@ -767,9 +779,12 @@ class TestPluginManager(unittest.TestCase):
 
     def tearDown(self):
         import core.kernel.plugin_sdk as ps
-        PluginManager._instance = None
-        ps.global_plugin_manager = self.original_gpm
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.mgr.close()
+        finally:
+            PluginManager._instance = None
+            ps.global_plugin_manager = self.original_gpm
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_managers_are_per_service_owners(self):
         """PluginManager construction creates independent service owners."""
@@ -911,7 +926,10 @@ class TestPluginSandboxPolicy(unittest.TestCase):
 
     def tearDown(self):
         import shutil
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            self.loader.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_sandbox_true_requires_denied_apis(self):
         manifest = PluginManifest(

@@ -219,6 +219,60 @@ class TestWorkerCoordinatorGuards(unittest.TestCase):
             finally:
                 manager.close()
 
+    def test_failed_load_with_unconfirmed_worker_stays_registered(self):
+        runtimes = []
+        actions = []
+
+        class Runtime:
+            def __init__(self, root, spec, broker):
+                self.snapshot = SimpleNamespace(
+                    pid=321,
+                    generation=spec.generation,
+                    termination_confirmed=False,
+                )
+                runtimes.append(self)
+
+            def start(self):
+                return self.snapshot
+
+            def invoke(self, action):
+                actions.append(action)
+                return PluginLifecycleResult(
+                    request_id="request-1",
+                    plugin_id="stuck-load",
+                    success=False,
+                    status="error",
+                    error="PLUGIN_LIFECYCLE_FAILED",
+                    audit=(),
+                )
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "stuck-load"
+            root.mkdir()
+            (root / "plugin.py").write_text("", encoding="utf-8")
+            manifest = PluginManifest(
+                name="stuck-load",
+                version="1",
+                description="",
+                plugin_id="stuck-load",
+                runtime="python_worker",
+                entry_point="plugin.py",
+            )
+            loader = PluginLoader(tmp, runtime_factory=Runtime)
+
+            instance = loader.load_plugin(manifest)
+
+            self.assertEqual(instance.status.value, "error")
+            self.assertFalse(instance.termination_confirmed)
+            self.assertIs(loader.get_plugin("stuck-load"), instance)
+            self.assertFalse(loader.enable_plugin("stuck-load"))
+            self.assertIs(loader.load_plugin(manifest), instance)
+            self.assertEqual(len(runtimes), 1)
+            self.assertEqual(actions, [LifecycleAction.LOAD])
+
 
 def run_all_tests():
     print("=" * 60)
