@@ -49,6 +49,14 @@ class TestPluginBroker(unittest.TestCase):
             generation=1,
         )
 
+    def _session_for(self, broker, plugin_id, request_id, generation):
+        return broker.begin_lifecycle(
+            plugin_id,
+            request_id,
+            ("event_bus",),
+            generation=generation,
+        )
+
     def test_capability_permission_map_is_immutable(self):
         with self.assertRaises(TypeError):
             MANIFEST_PERMISSION_BY_CAPABILITY["test.capability"] = "test_permission"
@@ -195,6 +203,28 @@ class TestPluginBroker(unittest.TestCase):
         self.assertEqual(result.error, PLUGIN_BROKER_HANDLER_FAILED)
         self.assertNotIn("secret-value", str(broker.audit_log()))
 
+    def test_validator_exception_is_fail_closed_before_handler(self):
+        broker = PluginBroker(
+            self.bus,
+            grants={"event-logger": {"event.emit"}},
+        )
+        handler_calls = []
+
+        def exploding_validator(_arguments):
+            raise RuntimeError("validator failure")
+
+        broker.register_handler(
+            "event.emit",
+            lambda request: handler_calls.append(request) or {"emitted": True},
+            validator=exploding_validator,
+        )
+
+        result = self._session(broker).handle(event_request())
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.error, PLUGIN_BROKER_HANDLER_FAILED)
+        self.assertEqual(handler_calls, [])
+
     def test_session_rejects_wrong_correlation_and_duplicate_calls(self):
         broker = PluginBroker(
             self.bus,
@@ -204,12 +234,32 @@ class TestPluginBroker(unittest.TestCase):
         session = self._session(broker)
 
         wrong_request = session.handle(event_request(request_id="request-2"))
+        wrong_plugin = session.handle(
+            event_request(plugin_id="plugin-template", call_id="call-wrong-plugin")
+        )
         first = session.handle(event_request())
         duplicate = session.handle(event_request())
 
         self.assertFalse(wrong_request.allowed)
+        self.assertFalse(wrong_plugin.allowed)
         self.assertTrue(first.allowed)
         self.assertFalse(duplicate.allowed)
+
+    def test_stale_generation_session_is_denied_before_event_publish(self):
+        broker = PluginBroker(
+            self.bus,
+            grants={"event-logger": {"event.emit"}},
+        )
+        broker.register_event_emit_handler()
+        stale = self._session_for(broker, "event-logger", "request-1", generation=1)
+        current = self._session_for(broker, "event-logger", "request-1", generation=2)
+
+        stale_result = stale.handle(event_request(call_id="call-stale"))
+        current_result = current.handle(event_request(call_id="call-current"))
+
+        self.assertFalse(stale_result.allowed)
+        self.assertTrue(current_result.allowed)
+        self.assertEqual(len(self.bus.get_history()), 1)
 
     def test_session_limits_calls_and_returns_copied_bounded_audit_history(self):
         broker = PluginBroker(
@@ -242,6 +292,29 @@ class TestPluginBroker(unittest.TestCase):
 
         result = self._session(broker).handle(
             event_request(payload={"token": "secret-value"})
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertNotIn("secret-value", str(broker.audit_log()))
+
+    def test_audit_redacts_sensitive_request_identifiers(self):
+        broker = PluginBroker(
+            self.bus,
+            grants={"event-logger": {"event.emit"}},
+        )
+        broker.register_event_emit_handler()
+        session = self._session_for(
+            broker,
+            "event-logger",
+            "token:secret-value",
+            generation=1,
+        )
+
+        result = session.handle(
+            event_request(
+                request_id="token:secret-value",
+                call_id="credential:secret-value",
+            )
         )
 
         self.assertTrue(result.allowed)

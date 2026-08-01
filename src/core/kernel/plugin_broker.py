@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 import json
 import re
+import threading
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
@@ -12,6 +13,7 @@ from core.contracts.plugin_worker_protocol import (
     PluginBrokerRequest,
     PluginBrokerResult,
     PluginWorkerProtocolError,
+    redact_protocol_error,
     stable_json_bytes,
 )
 from core.kernel.event_bus import Event, EventBus
@@ -56,6 +58,8 @@ class PluginBroker:
         }
         self._handlers: dict[str, tuple[BrokerHandler, BrokerArgumentValidator | None]] = {}
         self._audit: deque[dict[str, object]] = deque(maxlen=MAX_BROKER_AUDIT_ENTRIES)
+        self._active_generations: dict[str, int] = {}
+        self._generation_lock = threading.Lock()
 
     def register_handler(
         self,
@@ -86,13 +90,18 @@ class PluginBroker:
         declared_permissions: Iterable[str],
         generation: int,
     ) -> "PluginBrokerSession":
-        return PluginBrokerSession(
+        session = PluginBrokerSession(
             self,
             plugin_id,
             request_id,
             frozenset(declared_permissions),
             generation,
         )
+        with self._generation_lock:
+            current = self._active_generations.get(plugin_id)
+            if current is None or generation > current:
+                self._active_generations[plugin_id] = generation
+        return session
 
     def audit_log(self) -> list[dict[str, object]]:
         """Return a bounded detached copy of stable, redacted audit entries."""
@@ -110,14 +119,18 @@ class PluginBroker:
     ) -> None:
         self._audit.append(
             {
-                "plugin_id": request.plugin_id,
-                "request_id": request.request_id,
-                "call_id": request.call_id,
-                "capability": request.capability,
+                "plugin_id": redact_protocol_error(request.plugin_id),
+                "request_id": redact_protocol_error(request.request_id),
+                "call_id": redact_protocol_error(request.call_id),
+                "capability": redact_protocol_error(request.capability),
                 "allowed": allowed,
                 "code": code,
             }
         )
+
+    def _is_current_generation(self, plugin_id: str, generation: int) -> bool:
+        with self._generation_lock:
+            return self._active_generations.get(plugin_id) == generation
 
     @staticmethod
     def _validate_event_emit_arguments(arguments: Mapping[str, Any]) -> bool:
@@ -171,6 +184,8 @@ class PluginBrokerSession:
         self._exchange_bytes = 0
 
     def handle(self, request: PluginBrokerRequest) -> PluginBrokerResult:
+        if not self._broker._is_current_generation(self._plugin_id, self.generation):
+            return self._deny(request)
         if (
             request.plugin_id != self._plugin_id
             or request.request_id != self._request_id
@@ -201,8 +216,12 @@ class PluginBrokerSession:
         if registration is None:
             return self._deny(request)
         handler, validator = registration
-        if validator is not None and not validator(request.arguments):
-            return self._deny(request)
+        if validator is not None:
+            try:
+                if not validator(request.arguments):
+                    return self._deny(request)
+            except Exception:
+                return self._handler_failed(request)
 
         try:
             value = handler(request)
