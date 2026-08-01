@@ -209,12 +209,15 @@ class PluginWorkerServer:
         relative = Path(entry_point)
         if relative.is_absolute():
             raise ValueError("plugin entrypoint must be relative")
-        candidate = (self._plugin_root / relative).resolve()
+        candidate = self._plugin_root / relative
+        if candidate.is_symlink():
+            raise ValueError("plugin entrypoint must not be a symbolic link")
+        candidate = candidate.resolve()
         try:
             candidate.relative_to(self._plugin_root)
         except ValueError as exc:
             raise ValueError("plugin entrypoint escapes plugin root") from exc
-        if not candidate.is_file() or candidate.is_symlink():
+        if not candidate.is_file():
             raise ValueError("plugin entrypoint must be a regular file")
         return candidate
 
