@@ -143,6 +143,7 @@ class PluginWorkerServer:
             list(self._permissions),
             broker_call=self._broker_call,
             audit_sink=self._record_audit,
+            enforce_permissions=False,
         )
         try:
             activate(api)

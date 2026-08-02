@@ -15,7 +15,7 @@ The project is evolving through the protocol in [docs/protocols](docs/protocols)
 | Core kernel | Ollama manager, terminal executor, plugin SDK, event bus |
 | Brain layer | Context compressor, orchestrator, role registry, agent factory |
 | Tests | Python unittest suites, Vitest component tests, and Playwright browser QA |
-| Plugins | Plugin SDK with `plugins/` directory for installable components |
+| Plugins | `python_worker` Plugin SDK with parent-owned Broker authority |
 
 ## Repository Map
 
@@ -173,7 +173,13 @@ node server.js
 
 ## Plugin Setup
 
-Plugins live under `plugins/`. Each plugin needs a `manifest.json` and an `activate(api)` entry point. The project ships `plugin-template` as a starting point.
+Plugins live under `plugins/`. V1 executes only `python_worker` manifests in a
+same-user subprocess; Plugin source is not imported by the parent service. Each
+plugin needs a `manifest.json` and an `activate(api)` entry point. The V1 Broker
+is default-deny and exposes only the explicitly granted `event.emit` capability.
+There is no OS-level filesystem or network isolation yet, so this process
+boundary is not a complete sandbox. The project ships `plugin-template` as a
+starting point.
 
 ```powershell
 # discover plugins from plugins/

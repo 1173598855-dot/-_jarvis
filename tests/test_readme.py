@@ -29,6 +29,12 @@ class TestReadme(unittest.TestCase):
         self.assertIn("Express", self.text)
         self.assertIn("Solid.js", self.text)
 
+    def test_readme_documents_worker_isolated_plugin_runtime(self):
+        self.assertIn("python_worker", self.text)
+        self.assertIn("event.emit", self.text)
+        self.assertIn("same-user", self.text)
+        self.assertNotIn("native plugin import", self.text.lower())
+
     def test_readme_has_no_mojibake_markers(self):
         markers = ["鈹", "鐢", "绔", "鍚", "馃", "�", "鏍", "璐", "淮"]
         found = [marker for marker in markers if marker in self.text]

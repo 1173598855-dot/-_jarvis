@@ -97,12 +97,14 @@ class XiaoYiPluginAPI:
         permissions: List[str],
         broker_call: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         audit_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+        enforce_permissions: bool = True,
     ) -> None:
         self.plugin_id = plugin_id
         self._permissions = set(permissions)
         self._audit_log: List[Dict[str, Any]] = []
         self._broker_call = broker_call
         self._audit_sink = audit_sink
+        self._enforce_permissions = enforce_permissions
 
     def check_permission(self, permission: str) -> bool:
         return permission in self._permissions
@@ -122,7 +124,7 @@ class XiaoYiPluginAPI:
                 pass
 
     def _call(self, permission: str, capability: str, arguments: Dict[str, Any]) -> Any:
-        if not self.check_permission(permission):
+        if self._enforce_permissions and not self.check_permission(permission):
             raise PermissionError(f"Plugin {self.plugin_id} lacks {permission} permission")
         self.log_access(capability, arguments)
         if self._broker_call is None:

@@ -36,6 +36,22 @@ class TestSetupDocs(unittest.TestCase):
         self.assertIn("scripts/ci_local_integration.py", self.text)
         self.assertIn("local Ollama fixture", self.text)
 
+    def test_development_guide_documents_worker_plugin_runtime(self):
+        guide = (ROOT / "docs" / "DEVELOPMENT_GUIDE.md").read_text(encoding="utf-8")
+        self.assertIn("python_worker", guide)
+        self.assertIn("event.emit", guide)
+        self.assertIn("same-user", guide)
+
+    def test_development_guide_names_worker_runtime_boundaries(self):
+        guide = (ROOT / "docs" / "DEVELOPMENT_GUIDE.md").read_text(encoding="utf-8")
+        for module_path in (
+            "src/core/contracts/plugin_worker_protocol.py",
+            "src/core/kernel/plugin_broker.py",
+            "src/runtime/plugin_worker.py",
+            "src/adapters/subprocess_plugin_runtime.py",
+        ):
+            self.assertIn(module_path, guide)
+
 
 def run_all_tests():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestSetupDocs)

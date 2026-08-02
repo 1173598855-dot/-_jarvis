@@ -185,6 +185,13 @@ class TestIterationLedger(unittest.TestCase):
     def test_latest_changelog_iteration_matches_latest_audit_report(self):
         self.assertEqual(latest_changelog_iteration(), latest_audit_report_iteration())
 
+    def test_iteration_141_retains_the_latest_ten_audit_reports(self):
+        self.assertEqual(latest_changelog_iteration(), 141)
+        self.assertEqual(
+            sorted(audit_report_iterations()),
+            list(range(132, 142)),
+        )
+
     def test_latest_audit_report_metadata_matches_filename(self):
         latest_report = latest_audit_report_iteration()
         metadata = audit_report_metadata(latest_report)

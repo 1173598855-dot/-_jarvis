@@ -2,8 +2,8 @@
 
 > **文档版本**：1.1.0
 > **状态**：生效
-> **基线**：Iteration 140
-> **更新日期**：2026-07-31
+> **基线**：Iteration 141
+> **更新日期**：2026-08-02
 > **适用对象**：项目维护者、主协调 Agent、子代理、Skill/Plugin 作者与前端贡献者
 
 ## 1. 文档目标
@@ -42,13 +42,13 @@
 4. 历史报告只证明过去发生过什么，不能覆盖当前事实。
 5. 发现冲突后更新单一来源，不在多个文档中长期保留不同说法。
 
-## 3. Iteration 140 基线
+## 3. Iteration 141 基线
 
 当前项目已经具备：
 
 - Solid.js 六视图指挥中心、共享轮询资源和响应式应用壳。
 - Express BFF、Python HTTPServer 与 FastAPI 三套服务入口。
-- OpenAPI 1.15.0、统一错误 envelope 和三服务真实契约验证。
+- OpenAPI 1.16.0、统一错误 envelope 和三服务真实契约验证。
 - Express-only Git status/log/branches 契约以 `x-jarvis-implementations` 明确边界。
 - Ollama 非流式对话、规范 SSE 与 Token 遥测。
 - 角色注册、任务编排、生产 Ollama 执行和普通错误恢复。
@@ -62,7 +62,9 @@
 - 文件式 MemoryStore、语义压缩和 LLM 压缩入口。
 - Python、Vitest、Playwright、类型检查和构建门禁。
 
-Iteration 140 的验证快照为：Python 聚合 513 项（511 通过、2 跳过）、完整 discovery 1384 项（1382 通过、2 跳过）、Vitest 136、Playwright 7 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
+Iteration 141 moves first-party executable Plugins to `python_worker` same-user subprocesses. The parent never imports Plugin source. The boundary is split across `src/core/contracts/plugin_worker_protocol.py` (strict JSON Lines contract), `src/core/kernel/plugin_broker.py` (parent authorization), `src/runtime/plugin_worker.py` (child lifecycle), and `src/adapters/subprocess_plugin_runtime.py` (owned `Popen` transport). The parent-owned Broker is default-deny and V1 grants only `event.emit`; lifecycle load/enable/disable responses remain compatible and no new HTTP authority exists. This is not OS-level filesystem or network isolation yet, so Stage E remains in progress.
+
+Iteration 141 的验证快照为：Python 聚合 565 项（563 通过、2 跳过）、完整 discovery 1471 项（1469 通过、2 跳过）、Vitest 142、Playwright 7 项通过且 1 项按条件跳过。该数字仅用于定位基线；每次交付必须重新运行并记录实际结果。
 
 当前主要缺口：
 
@@ -70,7 +72,7 @@ Iteration 140 的验证快照为：Python 聚合 513 项（511 通过、2 跳过
 |---|---|---|
 | P1 | 通用 orchestrator dispatch 仍未迁移到 Worker | 必须先定义独立的兼容性与生命周期契约 |
 | P1 | 固定角色工具目录尚未与通用能力注册表装配 | 保持 Worker 内固定只读目录，先定义可信装配契约再扩展 |
-| P1 | Plugin 沙箱仍以策略声明为主 | 未验证 native Plugin 不得默认进入核心进程 |
+| P1 | Plugin Worker 尚无 OS 级文件系统/网络隔离 | `python_worker` 已阻止 Plugin source 进入核心进程；在补齐隔离前仅视为 same-user 进程边界 |
 | P1 | Python 依赖没有精确锁文件 | 自动下载前必须补齐可复现锁定 |
 | P1 | 记忆尚未成为可追溯、可迁移的检索系统 | 压缩不能替代持久化状态 |
 | P2 | Chat/Runtime 仍是相对重型的前端 chunk | 先测量再优化 |
@@ -476,7 +478,7 @@ Worker、测试、构建工具和第三方子进程使用 deny-by-default 的净
 
 **Skill** 是方法、规范和工具说明。Skill 可以指导工作，但其中的 Shell、联网、下载和写入仍受权限策略控制。
 
-**Plugin** 是可执行扩展。当前 `native` Plugin 会进入核心 Python 进程，因此未完成 Worker 沙箱前，来源不明的 Plugin 只能发现、扫描和安装为 disabled。
+**Plugin** 是可执行扩展。V1 只执行 `python_worker`，并在 same-user 子进程内运行；父进程不导入 Plugin source。父进程的默认拒绝 Broker 只向已授权一方提供 `event.emit`，且尚未提供 OS 级 filesystem/network isolation。因此其它 Plugin 内容仍只能发现、扫描和安装为 disabled。
 
 **前端组件** 按以下顺序复用：
 
@@ -1123,7 +1125,7 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 
 ### 阶段 E：Plugin/Skill 安全运行时
 
-状态：待启动。Stage D 的已验证禁用包和只读注册表是本阶段输入；任何 native Plugin 进入核心进程前仍需独立 Worker 与 Broker 边界。
+状态：进行中。Iteration 141 已将第一方 Plugin 迁移至 `python_worker` same-user 子进程，并以默认拒绝 Broker 限制 V1 为 `event.emit`；load/enable/disable 保持响应兼容，未新增 HTTP authority。OS 级文件系统、网络和独立依赖环境隔离仍未交付。
 
 - 阻止未验证 Plugin 以 native 方式进入核心进程。
 - 实现 Python Plugin Worker 和消息协议。

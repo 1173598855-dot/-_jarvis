@@ -1,12 +1,26 @@
 # 小奕 J.A.R.V.I.S. 项目分析
 
-**扫描时间**：2026-07-31
+**扫描时间**：2026-08-02
 
 **扫描范围**：`C:\GitHub\贾维斯\`
 
-**依据**：实际文件树、服务入口、配置与 Iteration 140 本轮测试结果
+**依据**：实际文件树、服务入口、配置与 Iteration 141 本轮测试结果
 
 ## 结论
+
+### Iteration 141 Runtime Update
+
+First-party executable Plugins now run only as `python_worker` same-user
+subprocesses. Plugin source stays outside the parent process. The V1
+parent-owned Broker is default-deny and provides only explicitly granted
+`event.emit`; existing load/enable/disable responses remain compatible and no
+new HTTP authority exists. The shared OpenAPI contract is `1.16.0`. This is not
+OS-level filesystem or network isolation, which remains Stage E work.
+
+The worker boundary is implemented by `src/core/contracts/plugin_worker_protocol.py`,
+`src/core/kernel/plugin_broker.py`, `src/runtime/plugin_worker.py`,
+`src/adapters/subprocess_plugin_runtime.py`, and the parent coordinator in
+`src/core/kernel/plugin_sdk.py`.
 
 项目已从 Widget 聚合页重构为本地优先的六视图指挥中心。Solid.js 前端通过统一 API 客户端、SSE 客户端和共享轮询资源消费 Express；Express 提供真实系统/Git/Ollama 数据，并通过可选 Core API 桥接记忆、插件和事件能力。Python HTTPServer 与 FastAPI 继续作为可替换的核心服务入口。
 
@@ -16,17 +30,17 @@
 
 | 范围 | 盘点结果 |
 |---|---:|
-| `src/` Python | 38 个文件，12,429 行非空代码/文档行 |
+| `src/` Python | 43 个文件，13,920 行非空代码/文档行 |
 | `src/` TypeScript | 0 个文件 |
 | `frontend/src/` | 38 个 TS/TSX 文件，约 5,033 行 |
-| `tests/` Python | 58 个 `test_*.py` 文件 |
-| 规范 Python 聚合套件 | 513 个用例（511 通过、2 跳过） |
-| 完整 Python discovery | 1384 个用例（1382 通过、2 跳过） |
-| 前端 Vitest | 136 个用例通过 |
+| `tests/` Python | 62 个 `test_*.py` 文件 |
+| 规范 Python 聚合套件 | 565 个用例（563 通过、2 跳过） |
+| 完整 Python discovery | 1471 个用例（1469 通过、2 跳过） |
+| 前端 Vitest | 142 个用例通过 |
 | Playwright | 7 项通过，1 项按桌面条件跳过 |
 | 本地 Skill | 19 个 |
 | Plugin | 2 个 |
-| 滚动审计报告 | 10 份（Iteration 131-140） |
+| 滚动审计报告 | 10 份（Iteration 132-141） |
 
 ## 运行架构
 

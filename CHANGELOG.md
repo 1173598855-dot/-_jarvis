@@ -1,3 +1,86 @@
+## Iteration #141 - 2026-08-02
+
+**Protocol**: Python Plugin Worker runtime and default-deny Broker V1
+**Status**: Complete
+
+### Achievements
+
+- Migrated first-party executable Plugin manifests to `python_worker` and runs
+  their lifecycle in service-owned same-user subprocesses without importing
+  Plugin source into the parent process.
+- Added a parent-owned, default-deny Broker. V1 grants only `event.emit` to
+  explicitly authorized first-party Plugins; no filesystem, network, model, or
+  terminal authority is added.
+- Updated the shared OpenAPI contract to `1.16.0` while preserving existing
+  Plugin response envelopes and accepting only `plugin_id` on lifecycle routes.
+- Preserved load, enable, and disable response compatibility and introduced no
+  new HTTP authority. OS-level filesystem and network isolation remain Stage E
+  work rather than an implied property of the subprocess boundary.
+- Recorded the complete Iteration 141 verification evidence and rolled the
+  audit window forward from reports 131-140 to 132-141.
+
+### Verification
+
+- `python tests/run_all.py`: 565 total (563 passed, 2 skipped)
+- `python -m unittest discover -s tests -p "test_*.py"`: 1471 total (1469 passed, 2 skipped)
+- `python -m compileall -q src tests scripts`: passed
+- `cd frontend; npm test -- --run`: 142/142 passed
+- `cd frontend; JARVIS_E2E_PORT=5189; npm run test:e2e`: 7 passed, 1 skipped by project condition
+- `cd frontend; npm run typecheck`: passed
+- `cd frontend; npm run build`: passed
+- `python scripts/ci_local_integration.py --require-services`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `.superpowers/sdd/task-5-report.md`
+- `contracts/core-api.openapi.json`
+- `frontend/server.test.js`
+- `plugins/event-logger/manifest.json`
+- `plugins/event-logger/plugin.py`
+- `plugins/plugin-template/manifest.json`
+- `plugins/plugin-template/plugin.py`
+- `src/adapters/__init__.py`
+- `src/adapters/subprocess_plugin_runtime.py`
+- `src/core/contracts/plugin_worker_protocol.py`
+- `src/core/kernel/event_bus.py`
+- `src/core/kernel/plugin_broker.py`
+- `src/core/kernel/plugin_sdk.py`
+- `src/runtime/__init__.py`
+- `src/runtime/plugin_worker.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `tests/run_all.py`
+- `tests/test_plugin_worker_protocol.py`
+- `tests/test_plugin_broker.py`
+- `tests/test_plugin_worker_entrypoint.py`
+- `tests/test_subprocess_plugin_runtime.py`
+- `tests/test_plugin_sdk.py`
+- `tests/test_plugin_sdk_extended.py`
+- `tests/test_plugin_sdk_extended_v2.py`
+- `tests/test_plugin_installation.py`
+- `tests/test_event_bus_extended.py`
+- `tests/test_main.py`
+- `tests/test_main_extended.py`
+- `tests/test_main_fastapi.py`
+- `tests/test_api_contract.py`
+- `tests/test_readme.py`
+- `tests/test_docs_setup.py`
+- `tests/test_iteration_ledger.py`
+- `tests/test_run_all_coverage.py`
+- `README.md`
+- `AGENTS.md`
+- `CHANGELOG.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `docs/reports/PROJECT_ANALYSIS.md`
+- `docs/reports/README.md`
+- `docs/reports/AUDIT_REPORT_141.md`
+- `docs/reports/AUDIT_REPORT_131.md`
+- `docs/superpowers/specs/2026-08-02-plugin-worker-runtime-design.md`
+- `docs/superpowers/plans/2026-08-02-plugin-worker-runtime.md`
+
+---
+
 ## Iteration #140 - 2026-07-31
 
 **Protocol**: Express-only Git API contract and OpenAPI boundary

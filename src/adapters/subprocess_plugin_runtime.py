@@ -250,7 +250,7 @@ class SubprocessPluginRuntime:
     def close(self) -> None:
         """Best-effort graceful shutdown followed by confirmed process reaping."""
         if self._process is None:
-            self._cleanup_worker_temp_dir()
+            self._confirm_termination()
             return
         if self._is_usable and self.process_is_alive():
             try:

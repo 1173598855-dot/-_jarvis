@@ -13,6 +13,7 @@ from core.kernel.plugin_sdk import (
     PluginManifest,
     XiaoYiPluginAPI,
 )
+from adapters.subprocess_plugin_runtime import SubprocessPluginRuntime
 from core.kernel.event_bus import EventBus
 from core.contracts.plugin_worker_protocol import LifecycleAction, PluginLifecycleResult
 
@@ -272,6 +273,45 @@ class TestWorkerCoordinatorGuards(unittest.TestCase):
             self.assertIs(loader.load_plugin(manifest), instance)
             self.assertEqual(len(runtimes), 1)
             self.assertEqual(actions, [LifecycleAction.LOAD])
+
+    def test_failed_worker_start_does_not_block_a_retry(self):
+        runtimes = []
+
+        def failing_popen(*_args, **_kwargs):
+            raise OSError("worker launch failed")
+
+        def runtime_factory(root, spec, broker):
+            runtime = SubprocessPluginRuntime(
+                root,
+                spec,
+                broker,
+                popen_factory=failing_popen,
+            )
+            runtimes.append(runtime)
+            return runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "start-failure"
+            root.mkdir()
+            (root / "plugin.py").write_text("", encoding="utf-8")
+            manifest = PluginManifest(
+                name="start-failure",
+                version="1",
+                description="",
+                plugin_id="start-failure",
+                runtime="python_worker",
+                entry_point="plugin.py",
+            )
+            loader = PluginLoader(tmp, runtime_factory=runtime_factory)
+
+            first = loader.load_plugin(manifest)
+            second = loader.load_plugin(manifest)
+
+        self.assertEqual(first.error_message, "PLUGIN_WORKER_START_FAILED")
+        self.assertEqual(second.error_message, "PLUGIN_WORKER_START_FAILED")
+        self.assertIsNone(loader.get_plugin("start-failure"))
+        self.assertEqual(len(runtimes), 2)
+        self.assertTrue(all(runtime.snapshot.termination_confirmed for runtime in runtimes))
 
 
 def run_all_tests():
