@@ -1,26 +1,176 @@
 """
-J.A.R.V.I.S. test suite - Iteration 84
+J.A.R.V.I.S. test suite - Iteration 141
 Run: python tests/run_all.py
 """
+
+# Aggregate-runner path bootstrap must precede project and test imports.
+# ruff: noqa: E402
+
+import argparse
+import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
+from test_agent_factory import TestOllamaRoleExecution
+from test_api_contract import TestSharedApiContract
+from test_bounded_cli_inputs import TestBoundedJsonReader, TestCliJsonLimits
+from test_capability_registry import TestCapabilityRecord, TestCapabilityRegistry
+from test_capability_resolver import (
+    TestCapabilityQuery,
+    TestCapabilityResolver,
+    TestCompatibilityEvaluation,
+)
+from test_ci_integration_bounds import (
+    TestHealthWaitFailsFast,
+    TestOverallDeadlineAccounting,
+    TestParserBounds,
+    TestProfileRunsUnderItsBudget,
+    TestRunIntegrationBoundsTheWholeRun,
+    TestServiceLogTails,
+    TestTreeReclamation,
+)
+from test_ci_integration_output_encoding import (
+    TestChildEnvironmentForcesUtf8,
+    TestFailureTailSurfacesRealErrors,
+    TestServiceOutputDecoding,
+)
+from test_ci_integration_resource_ownership import (
+    TestLogDirectoryCleanupNeverMasksTheResult,
+    TestPortReservationHoldsThePort,
+    TestReservedPortsAreDistinct,
+    TestRunnerReleasesBeforeEachChild,
+)
+from test_context_budget import TestContextBudgetMonitor
+from test_context_compressor import TestMemoryStore as TestContextMemoryStore
+from test_context_compressor import (
+    TestMemoryStoreConsolidateRemoval,
+    TestMemoryStoreJournal,
+    TestMemoryStoreLosslessMerge,
+    TestSemanticCompressorBoundedTransforms,
+)
+from test_context_compressor_llm import TestLLMCompressorHistory
+from test_discover_tests_runner import (
+    TestDiscoveryCommand,
+    TestDiscoveryProgress,
+    TestDiscoveryRunnerEndToEnd,
+    TestRunDiscoveryInProcess,
+    TestTerminateProcessTree,
+)
+from test_docs_setup import TestSetupDocs
+from test_durable_directory import TestFsyncDirectory, TestSupportsDirectoryFsync
+from test_event_bus_extended import TestEventBusStateBoundaries
+from test_file_capability_store import (
+    TestCapabilityPackageLimits,
+    TestCapabilityPackageRejection,
+    TestFileCapabilityStore,
+)
+from test_file_run_state_repository import TestFileRunStateRepository
+from test_iteration_ledger import TestIterationLedger
+from test_linux_plugin_runtime_enforcement import (
+    TestLinuxPluginRuntimeEnforcement,
+    TestLinuxPluginRuntimeProbeHarness,
+)
+from test_linux_terminal_worker_enforcement import TestLinuxTerminalWorkerEnforcement
+from test_linux_worker_isolation_enforcement import TestLinuxWorkerIsolationEnforcement
+from test_local_integration_profile import TestLocalIntegrationProfile
+from test_local_integration_runner import TestLocalIntegrationRunner
+from test_main import (
+    TestMainHTTPEdgeCases,
+    TestMainHTTPGETRouting,
+    TestMainHTTPHandleMethodsRouting,
+    TestMainHTTPHelpers,
+    TestMainHTTPPOSTRouting,
+    TestMainHTTPRoleDispatchWorkerAdapter,
+    TestMainHTTPStateLifecycle,
+)
+from test_main_fastapi import (
+    TestMainFastapiIntegration,
+    TestRequestBodyLimitMiddleware,
+    TestRoleDispatchEndpoints,
+    TestRoleTaskLifecycleEndpoints,
+    TestRunRecoveryLifespan,
+)
+from test_ollama_manager import TestBoundedOllamaResponses, TestTokenUsage
+from test_ollama_manager import TestChat as TestOllamaChat
+from test_ollama_manager_extended import TestOllamaManagerChat
+from test_orchestrator_extended_v2 import (
+    TestOrchestratorDeclaredWorker,
+    TestOrchestratorHistoryOwnership,
+    TestOrchestratorImportableWorker,
+    TestOrchestratorTimeoutQuarantine,
+)
+from test_phase_a_recovery import TestPhaseARecoveryGate
+from test_plugin_broker import (
+    TestPluginBroker,
+    TestPluginBrokerFileList,
+    TestPluginBrokerNetworkGet,
+)
+from test_plugin_installation import TestPluginInstallation
+from test_plugin_sdk import (
+    TestPluginManagerBrokerRegistration,
+    TestPluginWorkerCoordinator,
+    TestXiaoYiPluginAPI,
+)
+from test_plugin_worker_entrypoint import TestPluginWorkerEntrypoint
+from test_plugin_worker_protocol import TestPluginWorkerProtocol
+from test_process_containment import TestProcessTreeContainment
+from test_project_config import TestPythonDependencies
+from test_python_dependency_lock import TestPythonDependencyLock
+from test_read_only_role_tools import TestReadOnlyRoleTools
+from test_readme import TestReadme
+from test_resume_document import TestResumeDocument
+from test_role_dispatch_service import (
+    TestRoleDispatchServiceBatch,
+    TestRoleDispatchServiceLeases,
+    TestRoleDispatchServiceLockOrder,
+    TestRoleDispatchServiceSelectionAndMapping,
+)
+from test_role_registry_extended_v2 import (
+    TestRoleRegistryCLI,
+    TestRoleRegistryDeepInheritance,
+    TestRoleRegistryInheritanceCycles,
+    TestRoleRegistrySnapshotOwnership,
+)
+from test_role_tool_catalog import TestRoleToolCatalog
+from test_role_tool_loop import TestRoleToolLoop
+from test_role_tool_protocol import TestRoleToolProtocol
+from test_role_tools import TestRoleToolBroker
+from test_role_worker import TestRoleWorkerSupervisor
+from test_ruff_check import TestRuffCheckOutputLimits
+from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordinator
+from test_run_state import TestRunState
+from test_secret_redaction import TestSecretRedaction
+from test_terminal_executor_extended_v2 import (
+    TestTerminalExecutorAuditLog,
+    TestTerminalExecutorDeniedCommands,
+    TestTerminalExecutorExecuteShell,
+    TestTerminalExecutorLifecycle,
+    TestTerminalExecutorProcessOutput,
+)
+from test_terminal_worker import TestTerminalWorker
+from test_worker_filesystem_isolation import TestWorkerFilesystemIsolation
+from test_worker_macos_sandbox import TestMacOSSandboxContract
+from test_worker_network_isolation import TestWorkerNetworkIsolation
+from test_worker_protocol import TestWorkerProtocol
+from test_worker_resource_limits import TestWorkerResourceLimits
+from test_worker_windows_container import TestWindowsContainerContract
+from test_worker_windows_isolation import (
+    TestWindowsIsolationContract,
+    TestWindowsIsolationRealEnforcement,
+)
+
 from core.brain.context_compressor import ContextCompressor, MemoryEntry, MemoryStore, MemoryType
 from core.brain.role_registry import AgentProfile, RoleRegistry, create_default_registry
 from core.kernel.ollama_manager import OllamaModel
 from core.kernel.terminal_executor import CommandRisk, TerminalCommand, TerminalExecutor
-from test_docs_setup import TestSetupDocs
-from test_iteration_ledger import TestIterationLedger
-from test_main import TestMainHTTPHelpers, TestMainHTTPGETRouting, TestMainHTTPPOSTRouting, TestMainHTTPHandleMethodsRouting, TestMainHTTPEdgeCases
-from test_main_fastapi import TestMainFastapiIntegration
-from test_project_config import TestPythonDependencies
-from test_readme import TestReadme
-from test_plugin_installation import TestPluginInstallation
 
 
 class TestContextCompressor(unittest.TestCase):
@@ -175,17 +325,14 @@ class TestPerformance(unittest.TestCase):
         print(f"compress: {ms:.1f}ms")
 
     def test_store_speed(self):
-        s = MemoryStore(memory_dir=".test-perf")
-        if s.memory_dir.exists():
-            import shutil
-            shutil.rmtree(s.memory_dir)
-        s.memory_dir.mkdir(exist_ok=True)
-        t0 = time.time()
-        for i in range(10):
-            s.store(MemoryEntry.create(MemoryType.USER, f"t{i}", f"c{i}"))
-        ms = (time.time() - t0) * 1000
-        self.assertLess(ms, 500)
-        print(f"store: {ms:.1f}ms")
+        with tempfile.TemporaryDirectory(prefix=".test-perf-") as memory_dir:
+            s = MemoryStore(memory_dir=memory_dir)
+            t0 = time.time()
+            for i in range(10):
+                s.store(MemoryEntry.create(MemoryType.USER, f"t{i}", f"c{i}"))
+            ms = (time.time() - t0) * 1000
+            self.assertLess(ms, 500)
+            print(f"store: {ms:.1f}ms")
 
 
 class TestTerminalExecutor(unittest.TestCase):
@@ -224,24 +371,131 @@ class TestTerminalExecutor(unittest.TestCase):
 
 AGGREGATE_TEST_CASES = [
     TestContextCompressor,
+    TestLLMCompressorHistory,
     TestMemoryStore,
+    TestEventBusStateBoundaries,
     TestOllamaManager,
     TestAgentProfile,
     TestRoleRegistry,
+    TestRoleRegistryCLI,
+    TestRoleRegistryDeepInheritance,
+    TestRoleRegistryInheritanceCycles,
+    TestRoleRegistrySnapshotOwnership,
     TestIntegration,
     TestPerformance,
     TestTerminalExecutor,
+    TestTerminalExecutorExecuteShell,
+    TestTerminalExecutorDeniedCommands,
+    TestTerminalExecutorLifecycle,
+    TestTerminalExecutorProcessOutput,
+    TestTerminalExecutorAuditLog,
+    TestTerminalWorker,
+    TestSharedApiContract,
     TestReadme,
     TestSetupDocs,
     TestPythonDependencies,
+    TestPythonDependencyLock,
     TestIterationLedger,
     TestMainHTTPHelpers,
     TestMainHTTPGETRouting,
     TestMainHTTPPOSTRouting,
     TestMainHTTPHandleMethodsRouting,
+    TestMainHTTPRoleDispatchWorkerAdapter,
+    TestMainHTTPStateLifecycle,
     TestMainHTTPEdgeCases,
+    TestOrchestratorTimeoutQuarantine,
+    TestOrchestratorDeclaredWorker,
+    TestOrchestratorImportableWorker,
+    TestOrchestratorHistoryOwnership,
     TestMainFastapiIntegration,
+    TestRequestBodyLimitMiddleware,
+    TestRoleTaskLifecycleEndpoints,
+    TestRoleDispatchEndpoints,
+    TestRunRecoveryLifespan,
+    TestLocalIntegrationProfile,
+    TestLocalIntegrationRunner,
+    TestOverallDeadlineAccounting,
+    TestHealthWaitFailsFast,
+    TestProfileRunsUnderItsBudget,
+    TestRunIntegrationBoundsTheWholeRun,
+    TestParserBounds,
+    TestTreeReclamation,
+    TestServiceOutputDecoding,
+    TestFailureTailSurfacesRealErrors,
+    TestChildEnvironmentForcesUtf8,
+    TestLogDirectoryCleanupNeverMasksTheResult,
+    TestPortReservationHoldsThePort,
+    TestReservedPortsAreDistinct,
+    TestRunnerReleasesBeforeEachChild,
+    TestServiceLogTails,
+    TestOllamaChat,
+    TestBoundedOllamaResponses,
+    TestTokenUsage,
+    TestOllamaManagerChat,
     TestPluginInstallation,
+    TestPluginBroker,
+    TestPluginBrokerFileList,
+    TestPluginBrokerNetworkGet,
+    TestPluginManagerBrokerRegistration,
+    TestXiaoYiPluginAPI,
+    TestPluginWorkerCoordinator,
+    TestPluginWorkerEntrypoint,
+    TestPluginWorkerProtocol,
+    TestProcessTreeContainment,
+    TestRunState,
+    TestRuffCheckOutputLimits,
+    TestDiscoveryProgress,
+    TestDiscoveryCommand,
+    TestTerminateProcessTree,
+    TestRunDiscoveryInProcess,
+    TestDiscoveryRunnerEndToEnd,
+    TestContextBudgetMonitor,
+    TestResumeDocument,
+    TestFileRunStateRepository,
+    TestRunLifecycleCoordinator,
+    TestGitWorkspaceInspector,
+    TestPhaseARecoveryGate,
+    TestWorkerProtocol,
+    TestWorkerResourceLimits,
+    TestWorkerNetworkIsolation,
+    TestWorkerFilesystemIsolation,
+    TestLinuxPluginRuntimeProbeHarness,
+    TestLinuxPluginRuntimeEnforcement,
+    TestLinuxTerminalWorkerEnforcement,
+    TestLinuxWorkerIsolationEnforcement,
+    TestMacOSSandboxContract,
+    TestWindowsIsolationContract,
+    TestWindowsIsolationRealEnforcement,
+    TestWindowsContainerContract,
+    TestRoleWorkerSupervisor,
+    TestBoundedJsonReader,
+    TestCliJsonLimits,
+    TestRoleDispatchServiceSelectionAndMapping,
+    TestRoleDispatchServiceLeases,
+    TestRoleDispatchServiceLockOrder,
+    TestRoleDispatchServiceBatch,
+    TestOllamaRoleExecution,
+    TestContextMemoryStore,
+    TestMemoryStoreJournal,
+    TestMemoryStoreConsolidateRemoval,
+    TestMemoryStoreLosslessMerge,
+    TestSemanticCompressorBoundedTransforms,
+    TestSupportsDirectoryFsync,
+    TestFsyncDirectory,
+    TestRoleToolCatalog,
+    TestRoleToolProtocol,
+    TestRoleToolBroker,
+    TestRoleToolLoop,
+    TestReadOnlyRoleTools,
+    TestSecretRedaction,
+    TestCapabilityRecord,
+    TestCapabilityRegistry,
+    TestCompatibilityEvaluation,
+    TestCapabilityQuery,
+    TestCapabilityResolver,
+    TestCapabilityPackageLimits,
+    TestCapabilityPackageRejection,
+    TestFileCapabilityStore,
 ]
 
 
@@ -253,8 +507,21 @@ def canonical_test_count():
     )
 
 
+def _suite_title(label: str, cases: list) -> str:
+    loader = unittest.TestLoader()
+    tests = sum(loader.loadTestsFromTestCase(tc).countTestCases() for tc in cases)
+    return (
+        f"J.A.R.V.I.S. test suite - {label} "
+        f"({len(cases)} classes, {tests} tests)"
+    )
+
+
 def aggregate_suite_title():
-    return f"J.A.R.V.I.S. test suite - Iteration 84 ({len(AGGREGATE_TEST_CASES)} classes)"
+    return _suite_title("aggregate", AGGREGATE_TEST_CASES)
+
+
+def smoke_suite_title():
+    return _suite_title("smoke", SMOKE_TEST_CASES)
 
 
 SMOKE_TEST_CASES = [
@@ -287,66 +554,153 @@ def build_smoke_suite():
 
 
 def run_all_tests(timeout: int = 0, json_report: str = ""):
-    return _run_suite(build_aggregate_suite(), timeout=timeout, json_report=json_report)
+    return _run_suite(
+        build_aggregate_suite(),
+        timeout=timeout,
+        json_report=json_report,
+        title=aggregate_suite_title(),
+    )
 
 
 def run_smoke_tests(timeout: int = 0, json_report: str = ""):
-    return _run_suite(build_smoke_suite(), timeout=timeout, json_report=json_report)
+    return _run_suite(
+        build_smoke_suite(),
+        timeout=timeout,
+        json_report=json_report,
+        title=smoke_suite_title(),
+    )
 
 
-def _run_suite(suite, timeout: int = 0, json_report: str = ""):
+def _write_report(json_report: str, payload: dict) -> None:
+    if not json_report:
+        return
+    Path(json_report).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _run_suite(
+    suite,
+    timeout: int = 0,
+    json_report: str = "",
+    title: str = "",
+    abandon_on_timeout: bool = False,
+):
     timeout_expired = threading.Event()
     result_holder = {}
     print("=" * 60)
-    title = f"J.A.R.V.I.S. test suite - {suite.__class__.__name__} ({suite.countTestCases()} tests)"
+    if not title:
+        title = f"J.A.R.V.I.S. test suite - {suite.countTestCases()} tests"
     print(title)
     print("=" * 60)
 
     def run_suite():
         result_holder["result"] = unittest.TextTestRunner(verbosity=2).run(suite)
 
-    thread = threading.Thread(target=run_suite)
+    # The worker is a daemon so a wedged test cannot keep the interpreter alive
+    # after the deadline. Without this, a timeout returned an exit code the
+    # process could not act on until the hung test finally finished.
+    thread = threading.Thread(target=run_suite, daemon=True)
     thread.start()
     thread.join(timeout=timeout if timeout > 0 else None)
 
     if thread.is_alive():
         timeout_expired.set()
-        print("\nTimeout: {timeout}s exceeded".format(timeout=timeout))
-        payload = {
+        print(f"\nTimeout: {timeout}s exceeded")
+        _write_report(json_report, {
             "title": title,
             "tests": 0,
             "passed": 0,
+            "skipped": 0,
             "failures": 0,
             "errors": 0,
             "success": False,
             "timeout_seconds": timeout,
             "timeout_expired": True,
-        }
-        if json_report:
-            Path(json_report).write_text(__import__("json").dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        })
+        if abandon_on_timeout:
+            # A daemon thread stuck in a C call or holding a lock can still
+            # block interpreter shutdown, so the CLI leaves immediately with
+            # the report already flushed.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
         return 1
 
     result = result_holder.get("result", unittest.TestResult())
     print()
     print("=" * 60)
     total = result.testsRun
-    passed = total - len(result.failures) - len(result.errors)
-    print(f"Results: {total} tests, {passed} passed, {len(result.failures)} failed, {len(result.errors)} errors")
+    skipped = len(result.skipped)
+    passed = total - len(result.failures) - len(result.errors) - skipped
+    print(
+        f"Results: {total} tests, {passed} passed, {skipped} skipped, "
+        f"{len(result.failures)} failed, {len(result.errors)} errors"
+    )
     print("=" * 60)
-    payload = {
+    _write_report(json_report, {
         "title": title,
         "tests": total,
         "passed": passed,
+        "skipped": skipped,
         "failures": len(result.failures),
         "errors": len(result.errors),
         "success": result.wasSuccessful(),
         "timeout_seconds": timeout,
         "timeout_expired": timeout_expired.is_set(),
-    }
-    if json_report:
-        Path(json_report).write_text(__import__("json").dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
     return 0 if result.wasSuccessful() else 1
 
 
+def _non_negative_seconds(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("timeout must be an integer") from None
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("timeout must not be negative")
+    return seconds
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="run_all.py",
+        description="Run the canonical aggregate suite or the smoke subset.",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="run the documentation and ledger smoke subset instead of the aggregate suite",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_non_negative_seconds,
+        default=0,
+        metavar="SECONDS",
+        help="fail the run after SECONDS instead of waiting forever (0 disables)",
+    )
+    parser.add_argument(
+        "--json-report",
+        default="",
+        metavar="PATH",
+        help="write the run summary to PATH as JSON",
+    )
+    return parser
+
+
+def main(argv=None) -> int:
+    arguments = build_argument_parser().parse_args(argv)
+    suite = build_smoke_suite() if arguments.smoke else build_aggregate_suite()
+    title = smoke_suite_title() if arguments.smoke else aggregate_suite_title()
+    return _run_suite(
+        suite,
+        timeout=arguments.timeout,
+        json_report=arguments.json_report,
+        title=title,
+        abandon_on_timeout=True,
+    )
+
+
 if __name__ == "__main__":
-    sys.exit(run_all_tests())
+    sys.exit(main())

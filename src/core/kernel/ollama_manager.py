@@ -13,13 +13,25 @@ Ollama Manager ? ?? J.A.R.V.I.S. ?? LLM ???
 ???python ollama_manager.py [command]
 """
 
-import os
-import requests
 import json
+import os
 import sys
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+import threading
+import time
+from collections import deque
+from dataclasses import asdict, dataclass
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from core.contracts.role_tool_protocol import RoleToolCall, RoleToolProtocolError
+
+TOKEN_USAGE_SAMPLE_LIMIT = 60
+MAX_OLLAMA_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_OLLAMA_STREAM_LINE_BYTES = 64 * 1024
+MAX_OLLAMA_STREAM_BYTES = 8 * 1024 * 1024
+OLLAMA_RESPONSE_CHUNK_BYTES = 8 * 1024
 
 
 class Command(Enum):
@@ -72,27 +84,192 @@ class TokenUsage:
         return asdict(self)
 
 
+def _content_length(response: requests.Response) -> Optional[int]:
+    headers = getattr(response, "headers", {})
+    try:
+        value = headers.get("Content-Length")
+    except Exception:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdigit():
+            return None
+        value = int(value)
+    elif not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _response_chunk(chunk: object) -> bytes:
+    if isinstance(chunk, str):
+        return chunk.encode("utf-8")
+    if isinstance(chunk, (bytes, bytearray, memoryview)):
+        return bytes(chunk)
+    raise ValueError("Ollama response contained a non-byte chunk")
+
+
+def _read_bounded_response(response: requests.Response) -> bytes:
+    content_length = _content_length(response)
+    if content_length is not None and content_length > MAX_OLLAMA_RESPONSE_BYTES:
+        raise ValueError(
+            f"Ollama response exceeds {MAX_OLLAMA_RESPONSE_BYTES} bytes"
+        )
+
+    body = bytearray()
+    for chunk in response.iter_content(
+        chunk_size=OLLAMA_RESPONSE_CHUNK_BYTES,
+        decode_unicode=False,
+    ):
+        body.extend(_response_chunk(chunk))
+        if len(body) > MAX_OLLAMA_RESPONSE_BYTES:
+            raise ValueError(
+                f"Ollama response exceeds {MAX_OLLAMA_RESPONSE_BYTES} bytes"
+            )
+    return bytes(body)
+
+
+def _iter_bounded_response_lines(response: requests.Response):
+    total = 0
+    pending = bytearray()
+    for chunk in response.iter_content(
+        chunk_size=OLLAMA_RESPONSE_CHUNK_BYTES,
+        decode_unicode=False,
+    ):
+        data = _response_chunk(chunk)
+        total += len(data)
+        if total > MAX_OLLAMA_STREAM_BYTES:
+            raise ValueError(
+                f"Ollama stream exceeds {MAX_OLLAMA_STREAM_BYTES} bytes"
+            )
+        pending.extend(data)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                break
+            line = bytes(pending[:newline])
+            del pending[: newline + 1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            if len(line) > MAX_OLLAMA_STREAM_LINE_BYTES:
+                raise ValueError(
+                    "Ollama stream line exceeds "
+                    f"{MAX_OLLAMA_STREAM_LINE_BYTES} bytes"
+                )
+            yield line
+        if len(pending) > MAX_OLLAMA_STREAM_LINE_BYTES:
+            raise ValueError(
+                "Ollama stream line exceeds "
+                f"{MAX_OLLAMA_STREAM_LINE_BYTES} bytes"
+            )
+    if pending:
+        if len(pending) > MAX_OLLAMA_STREAM_LINE_BYTES:
+            raise ValueError(
+                "Ollama stream line exceeds "
+                f"{MAX_OLLAMA_STREAM_LINE_BYTES} bytes"
+            )
+        yield bytes(pending)
+
+
+def _response_json(response: requests.Response) -> Dict[str, Any]:
+    body = _read_bounded_response(response)
+    return json.loads(body.decode("utf-8"))
+
+
 class OllamaManager:
     """???? LLM ??? ? ??? AnythingLLM ??"""
 
-    def __init__(self, base_url: Optional[str] = None, timeout: int = 30):
+    def __init__(self, base_url: Optional[str] = None, timeout: Optional[int] = 30):
         # ????????????? Ollama ??
         if base_url is None:
             base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._session = requests.Session()
+        self._token_usage_lock = threading.Lock()
         self._token_usage = TokenUsage()
+        self._latest_token_usage: Optional[Dict[str, Any]] = None
+        self._token_usage_samples: deque[Dict[str, Any]] = deque(
+            maxlen=TOKEN_USAGE_SAMPLE_LIMIT
+        )
+        self._token_usage_session_started_at = int(time.time() * 1000)
 
     def record_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
-        self._token_usage.prompt_tokens += max(prompt_tokens, 0)
-        self._token_usage.completion_tokens += max(completion_tokens, 0)
-        self._token_usage.total_tokens = (
-            self._token_usage.prompt_tokens + self._token_usage.completion_tokens
+        prompt_tokens = max(prompt_tokens, 0)
+        completion_tokens = max(completion_tokens, 0)
+        sample = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "timestamp": int(time.time() * 1000),
+        }
+        with self._token_usage_lock:
+            self._token_usage.prompt_tokens += prompt_tokens
+            self._token_usage.completion_tokens += completion_tokens
+            self._token_usage.total_tokens = (
+                self._token_usage.prompt_tokens
+                + self._token_usage.completion_tokens
+            )
+            self._latest_token_usage = sample
+            self._token_usage_samples.append(sample)
+
+    def record_token_usage_from_response(self, response: Dict[str, Any]) -> bool:
+        """Record token counts from an Ollama response when count fields exist."""
+        if not isinstance(response, dict):
+            return False
+
+        prompt_tokens = response.get("prompt_eval_count")
+        completion_tokens = response.get("eval_count")
+        has_native_counts = (
+            "prompt_eval_count" in response or "eval_count" in response
         )
 
+        if not has_native_counts:
+            usage = response.get("usage")
+            if not isinstance(usage, dict):
+                return False
+            if "prompt_tokens" not in usage and "completion_tokens" not in usage:
+                return False
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+
+        try:
+            normalized_prompt = int(prompt_tokens or 0)
+            normalized_completion = int(completion_tokens or 0)
+        except (TypeError, ValueError):
+            return False
+
+        self.record_token_usage(normalized_prompt, normalized_completion)
+        return True
+
     def get_token_usage(self) -> TokenUsage:
-        return self._token_usage
+        with self._token_usage_lock:
+            return TokenUsage(
+                prompt_tokens=self._token_usage.prompt_tokens,
+                completion_tokens=self._token_usage.completion_tokens,
+                total_tokens=self._token_usage.total_tokens,
+            )
+
+    def get_token_usage_snapshot(self) -> Dict[str, Any]:
+        with self._token_usage_lock:
+            return {
+                "latest": (
+                    dict(self._latest_token_usage)
+                    if self._latest_token_usage
+                    else None
+                ),
+                "totals": self._token_usage.to_dict(),
+                "samples": [
+                    dict(sample) for sample in self._token_usage_samples
+                ],
+                "session_started_at": self._token_usage_session_started_at,
+            }
 
     def _get(self, path: str) -> Dict[str, Any]:
         """?? GET ?????????"""
@@ -102,7 +279,7 @@ class OllamaManager:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            return resp.json()
+            return _response_json(resp)
         except requests.ConnectionError:
             return {"error": "Ollama ?????????? ollama serve"}
         except requests.Timeout:
@@ -121,7 +298,7 @@ class OllamaManager:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            return resp.json()
+            return _response_json(resp)
         except requests.ConnectionError:
             return {"error": "Ollama ?????"}
         except requests.Timeout:
@@ -143,7 +320,10 @@ class OllamaManager:
             models = [OllamaModel.from_api(m) for m in models_data["models"]]
 
         gpu_info = self._get("/api/ps")
-        gpu_available = "error" not in gpu_info and gpu_info.get("models", [])
+        gpu_available = (
+            "error" not in gpu_info
+            and bool(gpu_info.get("models", []))
+        )
         gpu_name = None
         if gpu_available and gpu_info.get("models"):
             gpu_name = gpu_info["models"][0].get("name", "Unknown GPU")
@@ -175,7 +355,7 @@ class OllamaManager:
             )
             resp.raise_for_status()
 
-            for line in resp.iter_lines():
+            for line in _iter_bounded_response_lines(resp):
                 if line:
                     progress = json.loads(line)
                     status = progress.get("status", "")
@@ -193,8 +373,9 @@ class OllamaManager:
     def chat(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         stream: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """??????"""
         data = {
@@ -202,9 +383,57 @@ class OllamaManager:
             "messages": messages,
             "stream": stream,
         }
+        if tools is not None:
+            data["tools"] = tools
         if stream:
             return self._stream_chat(data)
-        return self._post("/api/chat", data)
+        result = self._post("/api/chat", data)
+        if "error" not in result and self._is_valid_chat_response(result):
+            self.record_token_usage_from_response(result)
+            return result
+        if "error" not in result:
+            return {"error": "Ollama chat response is invalid"}
+        return result
+
+    @staticmethod
+    def _is_valid_chat_response(response: Dict[str, Any]) -> bool:
+        """Return whether an upstream non-streaming chat response matches the public contract."""
+        if not isinstance(response, dict):
+            return False
+        if not isinstance(response.get("model"), str) or not response["model"]:
+            return False
+        message = response.get("message")
+        if not isinstance(message, dict):
+            return False
+        if not isinstance(message.get("role"), str) or not message["role"]:
+            return False
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        if content is None:
+            if not tool_calls:
+                return False
+        elif not isinstance(content, str):
+            return False
+        if tool_calls is not None and not isinstance(tool_calls, list):
+            return False
+        if tool_calls is not None:
+            for call_index, tool_call in enumerate(tool_calls):
+                try:
+                    RoleToolCall.from_ollama(
+                        tool_call,
+                        round_index=0,
+                        call_index=call_index,
+                    )
+                except RoleToolProtocolError:
+                    return False
+        if type(response.get("done")) is not bool:
+            return False
+        for field in ("prompt_eval_count", "eval_count"):
+            if field in response and (
+                type(response[field]) is not int or response[field] < 0
+            ):
+                return False
+        return True
 
     def _stream_chat(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """??????"""
@@ -218,7 +447,7 @@ class OllamaManager:
             resp.raise_for_status()
 
             full_response = ""
-            for line in resp.iter_lines():
+            for line in _iter_bounded_response_lines(resp):
                 if line:
                     chunk = json.loads(line)
                     if "message" in chunk:
@@ -226,6 +455,7 @@ class OllamaManager:
                         print(content, end="", flush=True)
                         full_response += content
                     if chunk.get("done"):
+                        self.record_token_usage_from_response(chunk)
                         print()
                         return {
                             "model": chunk.get("model", ""),
@@ -257,12 +487,14 @@ class OllamaManager:
             )
             resp.raise_for_status()
 
-            for line in resp.iter_lines():
+            for line in _iter_bounded_response_lines(resp):
                 if not line:
                     continue
                 chunk = json.loads(line)
                 content = chunk.get("message", {}).get("content", "")
                 done = chunk.get("done", False)
+                if done:
+                    self.record_token_usage_from_response(chunk)
                 if content or done:
                     yield content, done
 
@@ -310,7 +542,7 @@ def print_status(status: OllamaStatus):
         print("   ????: ollama serve")
         return
 
-    print(f"? ????: ???")
+    print("? ????: ???")
     print(f"?? ??: {status.version or '??'}")
     print(f"???  GPU: {'? ' + status.gpu_name if status.gpu_available else '? ????'}")
 

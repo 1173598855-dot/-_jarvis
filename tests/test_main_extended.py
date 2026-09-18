@@ -2,8 +2,10 @@
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -18,10 +20,11 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 JARVISHandler = mod.JARVISHandler
 AppState = mod.AppState
+MemoryStore = mod.MemoryStore
 state = mod.state
 
 
-def _make_handler(command="GET", path="/api/health", headers=None):
+def _make_handler(command="GET", path="/api/health", headers=None, app_state=None):
     handler = object.__new__(JARVISHandler)
     handler.command = command
     handler.path = path
@@ -34,44 +37,48 @@ def _make_handler(command="GET", path="/api/health", headers=None):
     handler.close_connection = False
     handler.protocol_version = "HTTP/1.1"
     handler.log_message = MagicMock()
+    if app_state is not None:
+        handler.app_state = app_state
     return handler
 
 
 class TestAppStateExtended(unittest.TestCase):
+    def setUp(self):
+        self.state = AppState()
+        self.addCleanup(self.state.shutdown)
+
+    def test_agent_factory_uses_application_ollama_manager(self):
+        self.assertIs(
+            self.state.agent_factory._ollama_manager,
+            self.state.ollama,
+        )
+
     def test_default_ollama_manager(self):
-        s = AppState()
-        self.assertIsNotNone(s.ollama)
+        self.assertIsNotNone(self.state.ollama)
 
     def test_default_terminal_executor(self):
-        s = AppState()
-        self.assertIsNotNone(s.terminal)
+        self.assertIsNotNone(self.state.terminal)
 
     def test_default_memory_store(self):
-        s = AppState()
-        self.assertIsNotNone(s.memory_store)
+        self.assertIsNotNone(self.state.memory_store)
 
     def test_default_orchestrator(self):
-        s = AppState()
-        self.assertIsNotNone(s.orchestrator)
+        self.assertIsNotNone(self.state.orchestrator)
 
     def test_start_time_is_float(self):
-        s = AppState()
-        self.assertIsInstance(s.start_time, float)
+        self.assertIsInstance(self.state.start_time, float)
 
     def test_increment_requests_positive(self):
-        s = AppState()
-        s.increment_requests()
-        self.assertEqual(s.request_count, 1)
+        self.state.increment_requests()
+        self.assertEqual(self.state.request_count, 1)
 
     def test_increment_requests_multiple(self):
-        s = AppState()
         for _ in range(5):
-            s.increment_requests()
-        self.assertEqual(s.request_count, 5)
+            self.state.increment_requests()
+        self.assertEqual(self.state.request_count, 5)
 
     def test_has_lock_attribute(self):
-        s = AppState()
-        self.assertTrue(hasattr(s, "_lock"))
+        self.assertTrue(hasattr(self.state, "_lock"))
 
 
 class TestHandleSystemStats(unittest.TestCase):
@@ -159,30 +166,42 @@ class TestHandleOllamaChatStream(unittest.TestCase):
 
 class TestHandlePluginEndpointsExtended(unittest.TestCase):
     def test_plugin_enable_returns_success(self):
-        handler = _make_handler(command="POST", path="/api/plugins/enable")
+        manager = MagicMock()
+        manager.enable.return_value = True
+        handler = _make_handler(
+            command="POST",
+            path="/api/plugins/enable",
+            app_state=SimpleNamespace(plugin_manager=manager),
+        )
         handler.headers = {"Content-Length": "0"}
         for attr in ["send_response", "send_header", "end_headers", "wfile"]:
             setattr(handler, attr, MagicMock())
         body_data = json.dumps({"plugin_id": "test_plugin"}).encode()
         handler.headers["Content-Length"] = str(len(body_data))
         handler.rfile = io.BytesIO(body_data)
-        with patch.object(mod.global_plugin_manager, "enable", return_value=True):
-            handler.handle_plugin_enable()
+        handler.handle_plugin_enable()
         handler.send_response.assert_called_once_with(200)
+        manager.enable.assert_called_once_with("test_plugin")
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertTrue(parsed["success"])
 
     def test_plugin_disable_returns_success(self):
-        handler = _make_handler(command="POST", path="/api/plugins/disable")
+        manager = MagicMock()
+        manager.disable.return_value = True
+        handler = _make_handler(
+            command="POST",
+            path="/api/plugins/disable",
+            app_state=SimpleNamespace(plugin_manager=manager),
+        )
         handler.headers = {"Content-Length": "0"}
         for attr in ["send_response", "send_header", "end_headers", "wfile"]:
             setattr(handler, attr, MagicMock())
         body_data = json.dumps({"plugin_id": "test_plugin"}).encode()
         handler.headers["Content-Length"] = str(len(body_data))
         handler.rfile = io.BytesIO(body_data)
-        with patch.object(mod.global_plugin_manager, "disable", return_value=True):
-            handler.handle_plugin_disable()
+        handler.handle_plugin_disable()
         handler.send_response.assert_called_once_with(200)
+        manager.disable.assert_called_once_with("test_plugin")
         parsed = json.loads(handler.wfile.write.call_args[0][0])
         self.assertTrue(parsed["success"])
 
@@ -222,11 +241,26 @@ class TestHandleOrchestratorHistoryExtended(unittest.TestCase):
 
 
 class TestHandleMemoryStoreExtended(unittest.TestCase):
-    def test_memory_store_with_tags(self):
-        handler = _make_handler(command="POST", path="/api/memory/store")
+    def _make_isolated_store_handler(self):
+        """Own an isolated memory directory so tests never write user memory."""
+        memory_directory = tempfile.TemporaryDirectory(
+            prefix=".test-memory-store-extended-"
+        )
+        self.addCleanup(memory_directory.cleanup)
+        handler = _make_handler(
+            command="POST",
+            path="/api/memory/store",
+            app_state=SimpleNamespace(
+                memory_store=MemoryStore(memory_dir=memory_directory.name),
+            ),
+        )
         handler.headers = {"Content-Length": "0"}
         for attr in ["send_response", "send_header", "end_headers", "wfile"]:
             setattr(handler, attr, MagicMock())
+        return handler
+
+    def test_memory_store_with_tags(self):
+        handler = self._make_isolated_store_handler()
         body_data = json.dumps({
             "type": "project", "title": "ext_test",
             "content": "extended test content", "tags": ["a", "b"],
@@ -239,10 +273,7 @@ class TestHandleMemoryStoreExtended(unittest.TestCase):
         self.assertTrue(parsed.get("success"))
 
     def test_memory_store_invalid_type_defaults_user(self):
-        handler = _make_handler(command="POST", path="/api/memory/store")
-        handler.headers = {"Content-Length": "0"}
-        for attr in ["send_response", "send_header", "end_headers", "wfile"]:
-            setattr(handler, attr, MagicMock())
+        handler = self._make_isolated_store_handler()
         body_data = json.dumps({"type": "invalid_type", "title": "t", "content": "c"}).encode()
         handler.headers["Content-Length"] = str(len(body_data))
         handler.rfile = io.BytesIO(body_data)

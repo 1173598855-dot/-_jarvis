@@ -74,7 +74,7 @@ GitHub：[URL]
 
 ## 输出物
 
-1. `GITHUB_LEARNING_REPORT.md` — 学习报告
+1. `docs/reports/GITHUB_LEARNING_REPORT.md` — 学习报告
 2. 实际代码文件（使用 `Write` 创建）
 3. 可复用技能（使用 `save_skill` 持久化）
 

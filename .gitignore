@@ -35,10 +35,18 @@ Thumbs.db
 # Test/runtime scratch
 .test-*/
 .test-*.json
+.test-*.txt
 .test-*.png
+.test-*.md
+.test-*.out
+.test-*.err
+.test-*.log
+.test-*.patch
+.test-*.py
 test_write.tmp
 frontend/test-results/
 frontend/playwright-report/
+frontend/debug.log
 .superpowers/
 .worktrees/
 
@@ -48,6 +56,7 @@ frontend/playwright-report/
 # JARVIS generated state
 .auto-memory/
 artifacts/
+capability-store/
 
 # Machine-local Compound Engineering preferences
 .compound-engineering/*.local.yaml

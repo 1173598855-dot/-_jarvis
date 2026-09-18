@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
+from core.kernel.event_bus import EventBus
+from core.kernel.plugin_broker import PluginBroker
 from core.kernel.plugin_sdk import (
     PluginLoader,
     PluginManager,
@@ -14,41 +16,45 @@ from core.kernel.plugin_sdk import (
 )
 
 
+def _loader(plugins_dir):
+    return PluginLoader(plugins_dir, PluginBroker(EventBus(), grants={}))
+
+
 class TestValidateManifest(unittest.TestCase):
     def test_empty_name_raises(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="", version="1.0", description="d", author="a", entry_point="m")
         with self.assertRaises(ValueError):
             loader._validate_manifest(m)
 
     def test_empty_version_raises(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="", description="d", author="a", entry_point="m")
         with self.assertRaises(ValueError):
             loader._validate_manifest(m)
 
     def test_empty_entry_point_raises(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a", entry_point="")
         with self.assertRaises(ValueError):
             loader._validate_manifest(m)
 
     def test_dangerous_perm_fs_write_raises(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", permissions=["fs_write"])
         with self.assertRaises(ValueError):
             loader._validate_manifest(m)
 
     def test_dangerous_perm_child_process_raises(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", permissions=["child_process"])
         with self.assertRaises(ValueError):
             loader._validate_manifest(m)
 
     def test_safe_permissions_pass(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", permissions=["llm_access", "event_bus"])
         loader._validate_manifest(m)  # no raise
@@ -56,7 +62,7 @@ class TestValidateManifest(unittest.TestCase):
 
 class TestCreateSandbox(unittest.TestCase):
     def test_native_runtime_config(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", runtime="native")
         config = loader._create_sandbox(m)
@@ -64,7 +70,7 @@ class TestCreateSandbox(unittest.TestCase):
         self.assertEqual(config["timeout"], 30)
 
     def test_python_uv_adds_venv_paths(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", runtime="python_uv", plugin_id="pid1")
         config = loader._create_sandbox(m)
@@ -72,7 +78,7 @@ class TestCreateSandbox(unittest.TestCase):
         self.assertIn("python_path", config)
 
     def test_node_worker_adds_worker_type(self):
-        loader = PluginLoader(plugins_dir=tempfile.mkdtemp())
+        loader = _loader(tempfile.mkdtemp())
         m = PluginManifest(name="p", version="1.0", description="d", author="a",
                               entry_point="m", runtime="node_worker")
         config = loader._create_sandbox(m)
@@ -80,42 +86,34 @@ class TestCreateSandbox(unittest.TestCase):
 
 
 class TestPluginManagerSingleton(unittest.TestCase):
-    def setUp(self):
-        PluginManager._instance = None
-
-    def tearDown(self):
-        PluginManager._instance = None
-
-    def test_same_instance_returned(self):
-        m1 = PluginManager()
-        m2 = PluginManager()
-        self.assertIs(m1, m2)
-
-    def test_different_dirs_second_call_keeps_first(self):
-        m1 = PluginManager(plugins_dir="/tmp/test_pm_a")
-        m2 = PluginManager(plugins_dir="/tmp/test_pm_b")
-        self.assertIs(m1, m2)
+    def test_managers_are_independent_service_owners(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            m1 = PluginManager(first, event_bus=EventBus(), grants={})
+            m2 = PluginManager(second, event_bus=EventBus(), grants={})
+            self.addCleanup(m1.close)
+            self.addCleanup(m2.close)
+            self.assertIsNot(m1, m2)
+            self.assertNotEqual(m1.loader.plugins_dir, m2.loader.plugins_dir)
 
 
 class TestPluginManagerCrashRecovery(unittest.TestCase):
     def test_enable_failure_increments_crash_count(self):
-        PluginManager._instance = None
         mgr = PluginManager(plugins_dir=tempfile.mkdtemp())
+        self.addCleanup(mgr.close)
         result = mgr.enable("nonexistent_pid_999")
         self.assertFalse(result)
         self.assertEqual(mgr._crash_count.get("nonexistent_pid_999", 0), 1)
-        PluginManager._instance = None
 
 
 class TestXiaoYiPluginAPIReadFile(unittest.TestCase):
-    def test_read_file_with_permission(self):
+    def test_read_file_never_opens_files_without_a_broker(self):
         api = XiaoYiPluginAPI("p1", ["file_read"])
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("hello plugin")
             fname = f.name
         try:
-            content = api.read_file(fname)
-            self.assertIn("hello plugin", content)
+            with self.assertRaisesRegex(PermissionError, "PLUGIN_BROKER_DENIED"):
+                api.read_file(fname)
         finally:
             import os as _os
             _os.remove(fname)
@@ -128,7 +126,7 @@ class TestPluginLoaderLoadError(unittest.TestCase):
             plugin_dir.mkdir()
             m = PluginManifest(name="p_err", version="1.0", description="d", author="a",
                                   entry_point="")
-            loader = PluginLoader(plugins_dir=tmp)
+            loader = _loader(tmp)
             with self.assertRaises(ValueError):
                 loader.load_plugin(m)
 

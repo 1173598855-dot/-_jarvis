@@ -22,19 +22,28 @@ J.A.R.V.I.S. REST API Server — 小奕核心服务
 - GET  /api/orchestrator/agents — 已注册 agent 列表
 - GET  /api/orchestrator/history — 任务历史
 - POST /api/orchestrator/dispatch — 分发任务
+- GET  /api/roles - roles list
+- GET  /api/roles/{role_name} - role detail
+- POST /api/roles/dispatch - dispatch by role
+- POST /api/roles/dispatch_by_cap - dispatch by capability
+- POST /api/roles/batch_dispatch - batch dispatch
 """
 
+import atexit
 import json
 import logging
 import os
+import platform
 import socket
 import sys
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 # ============================================================
 # IPv4-only HTTP Server（解决 Windows WinError 10013）
@@ -44,6 +53,7 @@ class _IPv4HTTPServer(HTTPServer):
     """强制 IPv4 绑定的 HTTP 服务器"""
 
     def server_bind(self):
+        self.socket.close()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
@@ -52,18 +62,120 @@ class _IPv4HTTPServer(HTTPServer):
 # 添加 src 到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
+from app.memory_api import (  # noqa: E402
+    MEMORY_API_MAX_DIRECTORY_ENTRIES,
+    MEMORY_API_MAX_FILE_BYTES,
+    MEMORY_API_MAX_FILES,
+    MEMORY_API_MAX_TOTAL_BYTES,
+    load_memory_entries_for_api,
+    public_memory_entry,
+)
+from core.brain.agent_factory import AgentFactory  # noqa: E402
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType  # noqa: E402
 from core.brain.orchestrator import AgentTask, Orchestrator  # noqa: E402
+from core.brain.role_dispatch_service import (  # noqa: E402
+    RoleDispatchService,
+    RoleTaskTerminationUnconfirmedError,
+    RoleWorkerInvalidResultError,
+    RoleWorkerUnavailableError,
+)
+from core.brain.role_registry import create_default_registry  # noqa: E402
+from core.brain.role_worker import (  # noqa: E402
+    RoleWorkerSupervisor,
+    apply_worker_token_usage,
+    execute_role_task,
+)
+from core.kernel.capability_api import (  # noqa: E402
+    CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+    CapabilityRegistryRequestError,
+    parse_capability_query_items,
+    resolve_capability_registry,
+)
+from core.kernel.capability_registry import CapabilityRegistry  # noqa: E402
+from core.kernel.capability_resolver import (  # noqa: E402
+    CapabilityResolver,
+    CompatibilityTarget,
+)
+from core.kernel.event_bus import EventBus  # noqa: E402
 from core.kernel.ollama_manager import OllamaManager  # noqa: E402
-from core.kernel.plugin_sdk import global_plugin_manager  # noqa: E402
-from core.kernel.terminal_executor import TerminalCommand, TerminalExecutor  # noqa: E402
+from core.kernel.plugin_broker import FIRST_PARTY_EVENT_GRANTS  # noqa: E402
+from core.kernel.plugin_sdk import (  # noqa: E402
+    PLUGIN_API_VERSION,
+    PluginManager,
+)
+from core.kernel.runtime_security import (  # noqa: E402
+    configured_allowed_origins,
+    terminal_access_enabled,
+    terminal_request_is_authorized,
+)
+from core.kernel.terminal_executor import TerminalCommand  # noqa: E402
+from core.kernel.terminal_policy import (  # noqa: E402
+    TerminalPolicyError,
+    validate_terminal_operation,
+)
+from core.kernel.terminal_worker import TerminalWorker  # noqa: E402
 
 logger = logging.getLogger(__name__)
+MAX_REQUEST_BODY_BYTES = 32 * 1024
+MAX_REQUEST_QUERY_BYTES = MAX_REQUEST_BODY_BYTES
+REQUEST_QUERY_TOO_LARGE_MESSAGE = "Request query exceeds the 32 KiB limit"
+REQUEST_BODY_CHUNK_BYTES = 8 * 1024
+REQUEST_BODY_READ_TIMEOUT_SECONDS = 2.0
+REQUEST_BODY_DISCARD_TIMEOUT_SECONDS = 0.25
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+
+class InvalidJsonBody(ValueError):
+    """Raised when an API request body cannot be decoded as JSON."""
+
+
+class InvalidRequestBody(ValueError):
+    """Raised when a valid JSON payload does not match the API request shape."""
+
+
+class RequestBodyTooLarge(ValueError):
+    """Raised when an API request exceeds the shared body-size limit."""
+
+
+def _query_value_within_limit(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_REQUEST_QUERY_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _normalize_dispatch_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    normalized = []
+    index = 0
+    while index < len(value):
+        code_point = ord(value[index])
+        if 0xD800 <= code_point <= 0xDBFF:
+            if index + 1 >= len(value):
+                return None
+            low_surrogate = ord(value[index + 1])
+            if not 0xDC00 <= low_surrogate <= 0xDFFF:
+                return None
+            scalar = 0x10000 + (
+                ((code_point - 0xD800) << 10)
+                | (low_surrogate - 0xDC00)
+            )
+            normalized.append(chr(scalar))
+            index += 2
+            continue
+        if 0xDC00 <= code_point <= 0xDFFF:
+            return None
+        normalized.append(value[index])
+        index += 1
+    return "".join(normalized)
 
 
 def _configured_allowed_origins() -> list[str]:
-    raw = os.environ.get("JARVIS_ALLOWED_ORIGINS", "*")
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return configured_allowed_origins()
 
 
 # ============================================================
@@ -72,21 +184,142 @@ def _configured_allowed_origins() -> list[str]:
 
 class AppState:
     """应用全局状态"""
-    def __init__(self):
+    def __init__(
+        self,
+        terminal=None,
+        role_tasks: RoleWorkerSupervisor | None = None,
+        role_dispatch: RoleDispatchService | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        capability_resolver: CapabilityResolver | None = None,
+        capability_target: CompatibilityTarget | None = None,
+        event_bus: EventBus | None = None,
+        plugin_manager: PluginManager | None = None,
+    ):
+        if role_dispatch is not None:
+            dispatch_supervisor = role_dispatch.supervisor
+            if role_tasks is None:
+                role_tasks = dispatch_supervisor
+            elif role_tasks is not dispatch_supervisor:
+                raise ValueError(
+                    "role_tasks and role_dispatch must share the same supervisor"
+                )
         self.ollama = OllamaManager()
-        self.terminal = TerminalExecutor()
+        self.terminal = terminal if terminal is not None else TerminalWorker()
         self.memory_store = MemoryStore(memory_dir=".auto-memory")
         self.orchestrator = Orchestrator()
+        self.role_registry = create_default_registry()
+        self.agent_factory = AgentFactory(
+            registry=self.role_registry,
+            orchestrator=self.orchestrator,
+            ollama_manager=self.ollama,
+        )
+        manager_event_bus = (
+            getattr(plugin_manager, "event_bus", None)
+            if plugin_manager is not None
+            else None
+        )
+        if (
+            event_bus is not None
+            and isinstance(manager_event_bus, EventBus)
+            and manager_event_bus is not event_bus
+        ):
+            raise ValueError("plugin_manager and event_bus must share the same EventBus")
+        self.event_bus = (
+            event_bus
+            if event_bus is not None
+            else manager_event_bus
+            if isinstance(manager_event_bus, EventBus)
+            else EventBus()
+        )
+        self.plugin_manager = (
+            plugin_manager
+            if plugin_manager is not None
+            else PluginManager(
+                REPOSITORY_ROOT / "plugins",
+                event_bus=self.event_bus,
+                grants=FIRST_PARTY_EVENT_GRANTS,
+            )
+        )
+        self.capability_registry = (
+            capability_registry
+            if capability_registry is not None
+            else CapabilityRegistry(
+                REPOSITORY_ROOT,
+                cache_ttl_seconds=CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
+            )
+        )
+        if role_tasks is None:
+            role_tasks = RoleWorkerSupervisor(
+                execute_role_task,
+                runner_config={
+                    "ollama_base_url": self.ollama.base_url,
+                    "role_model": self.agent_factory._role_model,
+                    "memory_dir": str((Path.cwd() / ".auto-memory").resolve()),
+                    "repository_root": str(Path.cwd().resolve()),
+                    "role_tool_assembly": (
+                        self.capability_registry.role_tool_assembly().to_dict()
+                    ),
+                },
+                on_terminal=lambda record: apply_worker_token_usage(
+                    record,
+                    self.ollama,
+                ),
+            )
+        self.role_tasks = role_tasks
+        self.role_dispatch = (
+            role_dispatch
+            if role_dispatch is not None
+            else RoleDispatchService(self.role_registry, self.role_tasks)
+        )
+        self.capability_resolver = (
+            capability_resolver
+            if capability_resolver is not None
+            else CapabilityResolver()
+        )
+        self.capability_target = (
+            capability_target
+            if capability_target is not None
+            else CompatibilityTarget(
+                python=platform.python_version(),
+                jarvis_api=PLUGIN_API_VERSION,
+            )
+        )
         self.start_time = time.time()
         self.request_count = 0
         self._lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_completed: set[str] = set()
 
     def increment_requests(self):
         with self._lock:
             self.request_count += 1
 
+    def shutdown(self) -> None:
+        with self._shutdown_lock:
+            first_error = None
+            for resource, cleanup in (
+                ("role_tasks", self.role_tasks.shutdown),
+                ("orchestrator", self.orchestrator.shutdown),
+                ("agent_factory", self.agent_factory.shutdown),
+                ("plugin_manager", self.plugin_manager.close),
+                ("event_bus", self.event_bus.destroy),
+                ("terminal", self.terminal.close),
+            ):
+                if resource in self._shutdown_completed:
+                    continue
+                try:
+                    cleanup()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                else:
+                    self._shutdown_completed.add(resource)
+            if first_error is not None:
+                raise first_error
+
 
 state = AppState()
+atexit.register(state.shutdown)
 
 
 # ============================================================
@@ -94,6 +327,8 @@ state = AppState()
 # ============================================================
 
 class JARVISHandler(BaseHTTPRequestHandler):
+    app_state = state
+
     """J.A.R.V.I.S. API 请求处理器"""
 
     # 禁用日志（避免控制台噪音）
@@ -107,21 +342,136 @@ class JARVISHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self._send_cors_headers()
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error(self, message: str, status: int = 400):
+    def _send_error(
+        self,
+        message: str,
+        status: int = 400,
+        code: str | None = None,
+    ):
         """发送错误响应"""
-        self._send_json({"error": message}, status)
+        self._send_json({
+            "error": {
+                "code": code or f"HTTP_{status}",
+                "message": message,
+            }
+        }, status)
 
     def _read_body(self) -> Dict[str, Any]:
         """读取 JSON 请求体"""
         try:
             content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            return json.loads(body) if body else {}
-        except Exception:
+        except (TypeError, ValueError) as error:
+            raise InvalidJsonBody("Request body must be valid JSON") from error
+        if content_length < 0:
+            raise InvalidJsonBody("Request body must be valid JSON")
+        if content_length > MAX_REQUEST_BODY_BYTES:
+            self._discard_request_body(content_length)
+            raise RequestBodyTooLarge("Request body exceeds the 32 KiB limit")
+        body, complete = self._consume_request_body(
+            content_length,
+            collect=True,
+            timeout_seconds=REQUEST_BODY_READ_TIMEOUT_SECONDS,
+        )
+        if not complete or body is None:
+            raise InvalidJsonBody("Request body must be valid JSON")
+        if not body:
             return {}
+        try:
+            payload = json.loads(body)
+        except (ValueError, RecursionError) as error:
+            raise InvalidJsonBody("Request body must be valid JSON") from error
+        if not isinstance(payload, dict):
+            raise InvalidRequestBody("Request body must be a JSON object")
+        return payload
+
+    def _read_plugin_lifecycle_plugin_id(self) -> str | None:
+        """Read the single allowed field for Plugin lifecycle requests."""
+        data = self._read_body()
+        plugin_id = data.get("plugin_id")
+        if not plugin_id:
+            self._send_error(
+                "Missing plugin_id parameter",
+                code="MISSING_PLUGIN_ID",
+            )
+            return None
+        if set(data) != {"plugin_id"} or not isinstance(plugin_id, str):
+            self._send_error(
+                "Plugin lifecycle requests accept only a string plugin_id",
+                code="INVALID_REQUEST",
+            )
+            return None
+        return plugin_id
+
+    def _consume_request_body(
+        self,
+        content_length: int,
+        *,
+        collect: bool,
+        timeout_seconds: float,
+    ) -> tuple[bytes | None, bool]:
+        """Read or discard a declared body under one total socket deadline."""
+        remaining = content_length
+        deadline = time.monotonic() + timeout_seconds
+        chunks = [] if collect else None
+        connection = getattr(self, "connection", None)
+        original_timeout = None
+        restore_timeout = False
+
+        if connection is not None:
+            try:
+                original_timeout = connection.gettimeout()
+                restore_timeout = True
+            except (AttributeError, OSError):
+                self.close_connection = True
+                return None, False
+
+        try:
+            while remaining > 0:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    break
+                if connection is not None:
+                    try:
+                        connection.settimeout(remaining_time)
+                    except (AttributeError, OSError):
+                        break
+                read_size = min(remaining, REQUEST_BODY_CHUNK_BYTES)
+                try:
+                    chunk = self.rfile.read(read_size)
+                except (OSError, ValueError):
+                    break
+                if not chunk:
+                    break
+                chunk = chunk[:read_size]
+                if chunks is not None:
+                    chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            if restore_timeout:
+                try:
+                    getattr(self, "connection").settimeout(original_timeout)
+                except (AttributeError, OSError):
+                    self.close_connection = True
+
+        complete = remaining == 0
+        if not complete:
+            self.close_connection = True
+        body = b"".join(chunks) if complete and chunks is not None else None
+        return body, complete
+
+    def _discard_request_body(self, content_length: int) -> bool:
+        """Best-effort bounded discard before returning an oversized-body error."""
+        _, complete = self._consume_request_body(
+            content_length,
+            collect=False,
+            timeout_seconds=REQUEST_BODY_DISCARD_TIMEOUT_SECONDS,
+        )
+        return complete
 
     def _send_cors_headers(self):
         allowed_origins = _configured_allowed_origins()
@@ -133,8 +483,11 @@ class JARVISHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", request_origin)
             self.send_header("Vary", "Origin")
 
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Jarvis-Terminal-Token",
+        )
 
     def _cors(self):
         """处理 CORS 预检请求"""
@@ -145,6 +498,19 @@ class JARVISHandler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _reject_oversized_api_query(self) -> bool:
+        if not self.path.startswith("/api/"):
+            return False
+        raw_query = self.path.partition("?")[2]
+        if _query_value_within_limit(raw_query):
+            return False
+        self._send_error(
+            REQUEST_QUERY_TOO_LARGE_MESSAGE,
+            413,
+            "REQUEST_QUERY_TOO_LARGE",
+        )
+        return True
+
     # ============================================================
     # 路由处理
     # ============================================================
@@ -154,7 +520,10 @@ class JARVISHandler(BaseHTTPRequestHandler):
         if self._cors():
             return
 
-        state.increment_requests()
+        self.app_state.increment_requests()
+        if self._reject_oversized_api_query():
+            return
+        request_path = self.path.split("?", 1)[0]
         routes = {
             "/api/health": self.handle_health,
             "/api/system/stats": self.handle_system_stats,
@@ -163,26 +532,39 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/ollama/chat/stream": self.handle_ollama_chat_stream,
             "/api/ollama/token-usage": self.handle_ollama_token_usage,
             "/api/plugins": self.handle_plugins_list,
+            "/api/capabilities/registry": self.handle_capabilities_registry,
             "/api/memory/entries": self.handle_memory_entries,
             "/api/events": self.handle_events,
             "/api/orchestrator/agents": self.handle_orchestrator_agents,
             "/api/orchestrator/history": self.handle_orchestrator_history,
+            "/api/roles": self.handle_roles_list,
         }
 
-        handler = routes.get(self.path)
+        handler = routes.get(request_path)
         if handler:
             handler()
-        else:
-            self._send_error(f"Not Found: {self.path}", 404)
+            return
+
+        roles_prefix = "/api/roles/"
+        if request_path.startswith(roles_prefix):
+            role_name = request_path.removeprefix(roles_prefix)
+            if role_name and "/" not in role_name:
+                self.handle_role_get(role_name)
+                return
+
+        self._send_error(f"Not Found: {self.path}", 404)
 
     def do_POST(self):
         """POST 请求路由"""
         if self._cors():
             return
 
-        state.increment_requests()
+        self.app_state.increment_requests()
+        if self._reject_oversized_api_query():
+            return
         routes = {
             "/api/ollama/chat": self.handle_ollama_chat,
+            "/api/ollama/chat/stream": self.handle_ollama_chat_stream_post,
             "/api/ollama/token-usage": self.handle_ollama_token_usage,
             "/api/terminal/execute": self.handle_terminal_execute,
             "/api/plugins/load": self.handle_plugin_load,
@@ -190,13 +572,55 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/plugins/disable": self.handle_plugin_disable,
             "/api/memory/store": self.handle_memory_store,
             "/api/orchestrator/dispatch": self.handle_orchestrator_dispatch,
+            "/api/roles/dispatch": self.handle_role_dispatch,
+            "/api/roles/dispatch_by_cap": self.handle_role_dispatch_by_cap,
+            "/api/roles/batch_dispatch": self.handle_role_batch_dispatch,
         }
 
         handler = routes.get(self.path)
         if handler:
-            handler()
+            try:
+                handler()
+            except InvalidJsonBody as error:
+                self._send_error(str(error), 400, "INVALID_JSON")
+            except InvalidRequestBody as error:
+                self._send_error(str(error), 400, "INVALID_REQUEST")
+            except RequestBodyTooLarge as error:
+                self._send_error(str(error), 413, "REQUEST_BODY_TOO_LARGE")
         else:
             self._send_error(f"Not Found: {self.path}", 404)
+
+    def do_DELETE(self):
+        """DELETE request routing."""
+        if self._cors():
+            return
+
+        self.app_state.increment_requests()
+        if self._reject_oversized_api_query():
+            return
+        prefix = "/api/memory/probes/"
+        if self.path.startswith(prefix):
+            parts = self.path.removeprefix(prefix).split("/", 1)
+            if len(parts) == 2:
+                try:
+                    memory_type = MemoryType(parts[0])
+                except ValueError:
+                    pass
+                else:
+                    try:
+                        self.handle_memory_delete(memory_type, parts[1])
+                    except InvalidJsonBody as error:
+                        self._send_error(str(error), 400, "INVALID_JSON")
+                    except InvalidRequestBody as error:
+                        self._send_error(str(error), 400, "INVALID_REQUEST")
+                    except RequestBodyTooLarge as error:
+                        self._send_error(
+                            str(error),
+                            413,
+                            "REQUEST_BODY_TOO_LARGE",
+                        )
+                    return
+        self._send_error(f"Not Found: {self.path}", 404)
 
     # ============================================================
     # API 端点实现
@@ -204,32 +628,55 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_health(self):
         """健康检查"""
-        uptime = time.time() - state.start_time
+        uptime = time.time() - self.app_state.start_time
         self._send_json({
             "status": "healthy",
             "uptime": round(uptime, 2),
-            "requests": state.request_count,
+            "requests": self.app_state.request_count,
             "version": "1.0.0",
         })
 
     def handle_ollama_chat_stream(self):
         """Ollama 流式聊天（SSE）"""
-        # 从查询参数读取
-        query = {}
-        if '?' in self.path:
-            qs = self.path.split('?', 1)[1]
-            for pair in qs.split('&'):
-                if '=' in pair:
-                    k, v = pair.split('=', 1)
-                    query[k] = v
+        raw_query = self.path.partition("?")[2]
+        if not _query_value_within_limit(raw_query):
+            self._send_error(
+                REQUEST_QUERY_TOO_LARGE_MESSAGE,
+                413,
+                "REQUEST_QUERY_TOO_LARGE",
+            )
+            return
 
-        model = query.get("model", "default")
-        messages_raw = query.get("messages", "[]")
+        query = parse_qs(raw_query)
+        model = query.get("model", ["default"])[0]
+        messages_raw = query.get("messages", ["[]"])[0]
+        if not _query_value_within_limit(model) or not _query_value_within_limit(
+            messages_raw
+        ):
+            self._send_error(
+                REQUEST_QUERY_TOO_LARGE_MESSAGE,
+                413,
+                "REQUEST_QUERY_TOO_LARGE",
+            )
+            return
 
         try:
             messages = json.loads(messages_raw)
         except json.JSONDecodeError:
             messages = [{"role": "user", "content": messages_raw}]
+
+        self._stream_ollama_chat(model, messages)
+
+    def handle_ollama_chat_stream_post(self):
+        """Ollama JSON-body 流式聊天（SSE）"""
+        data = self._read_body()
+        self._stream_ollama_chat(
+            data.get("model", "default"),
+            data.get("messages", []),
+        )
+
+    def _stream_ollama_chat(self, model: str, messages: list):
+        """Write one canonical Ollama SSE response."""
 
         # SSE 响应头
         self.send_response(200)
@@ -239,8 +686,9 @@ class JARVISHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
+        completed = False
         try:
-            for chunk_text, is_done in state.ollama.stream_chat_generator(model, messages):
+            for chunk_text, is_done in self.app_state.ollama.stream_chat_generator(model, messages):
                 event_data = json.dumps({
                     "model": model,
                     "content": chunk_text,
@@ -250,16 +698,22 @@ class JARVISHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
                 if is_done:
+                    completed = True
                     break
 
-            # 结束事件
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            if completed:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
 
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as e:
-            error_data = json.dumps({"error": str(e)}, ensure_ascii=False)
+        except Exception as error:
+            error_data = json.dumps({
+                "error": {
+                    "code": "OLLAMA_STREAM_ERROR",
+                    "message": str(error),
+                },
+            }, ensure_ascii=False)
             self.wfile.write(f"data: {error_data}\n\n".encode("utf-8"))
             self.wfile.flush()
 
@@ -307,37 +761,40 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_ollama_status(self):
         """Ollama 状态"""
-        status = state.ollama.get_status()
-        self._send_json(state.ollama.to_dict(status))
+        status = self.app_state.ollama.get_status()
+        self._send_json(self.app_state.ollama.to_dict(status))
 
     def handle_ollama_models(self):
         """Ollama 已安装模型"""
-        models = state.ollama.list_models()
-        self._send_json({"models": [m.to_dict() if hasattr(m, 'to_dict') else m for m in models]})
+        models = self.app_state.ollama.list_models()
+        self._send_json({"models": [asdict(model) for model in models]})
 
     def handle_ollama_chat(self):
-        """Ollama 聊天"""
+        """Ollama 非流式聊天"""
         data = self._read_body()
         model = data.get("model", "default")
         messages = data.get("messages", [])
-        stream = data.get("stream", False)
+        if data.get("stream", False) is not False:
+            self._send_error(
+                "Use /api/ollama/chat/stream for streaming requests",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
 
-        result = state.ollama.chat(model, messages, stream)
-        if isinstance(result, dict):
-            usage = result.get("usage")
-            if isinstance(usage, dict):
-                state.ollama.record_token_usage(
-                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                )
-            else:
-                state.ollama.record_token_usage()
+        result = self.app_state.ollama.chat(model, messages, False)
+        if "error" in result:
+            self._send_error(
+                "Ollama chat request failed",
+                502,
+                "OLLAMA_UPSTREAM_ERROR",
+            )
+            return
         self._send_json(result)
 
     def handle_ollama_token_usage(self):
         """Ollama token usage snapshot"""
-        usage = state.ollama.get_token_usage()
-        self._send_json(usage.to_dict())
+        self._send_json(self.app_state.ollama.get_token_usage_snapshot())
 
     def handle_terminal_execute(self):
         """终端命令执行"""
@@ -347,7 +804,24 @@ class JARVISHandler(BaseHTTPRequestHandler):
         timeout = data.get("timeout", 30)
 
         if not command:
-            self._send_error("Missing command parameter")
+            self._send_error(
+                "Missing command parameter",
+                code="MISSING_COMMAND",
+            )
+            return
+
+        try:
+            command, args, timeout = validate_terminal_operation(command, args, timeout)
+        except TerminalPolicyError as error:
+            self._send_error(str(error), 400, "INVALID_TERMINAL_REQUEST")
+            return
+        if not terminal_access_enabled():
+            self._send_error("Terminal execution is disabled", 403, "TERMINAL_DISABLED")
+            return
+        if not terminal_request_is_authorized(
+            self.headers.get("X-Jarvis-Terminal-Token"),
+        ):
+            self._send_error("Terminal capability token is invalid", 401, "TERMINAL_UNAUTHORIZED")
             return
 
         cmd = TerminalCommand(
@@ -355,14 +829,14 @@ class JARVISHandler(BaseHTTPRequestHandler):
             command=command,
             args=args,
             timeout=timeout,
-            risk_level=state.terminal._assess_risk(command),
+            risk_level=self.app_state.terminal._assess_risk(command),
         )
-        result = state.terminal.execute(cmd)
+        result = self.app_state.terminal.execute(cmd)
         self._send_json(result.to_dict())
 
     def handle_plugins_list(self):
         """插件列表"""
-        plugins = global_plugin_manager.get_all_plugins()
+        plugins = self.app_state.plugin_manager.get_all_plugins()
         self._send_json({
             "plugins": [
                 {
@@ -376,22 +850,59 @@ class JARVISHandler(BaseHTTPRequestHandler):
             ]
         })
 
+    def handle_capabilities_registry(self):
+        """Return a bounded, read-only view of repository capabilities."""
+        try:
+            raw_query = urlsplit(self.path).query
+            items = parse_qsl(
+                raw_query,
+                keep_blank_values=True,
+                max_num_fields=10,
+            )
+            query = parse_capability_query_items(items)
+        except (CapabilityRegistryRequestError, ValueError):
+            self._send_error(
+                "Capability registry query is invalid",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+
+        try:
+            response = resolve_capability_registry(
+                self.app_state.capability_registry,
+                self.app_state.capability_resolver,
+                self.app_state.capability_target,
+                query,
+            )
+        except Exception:
+            logger.exception("Capability registry resolution failed")
+            self._send_error(
+                "Capability registry is unavailable",
+                503,
+                "CAPABILITY_REGISTRY_UNAVAILABLE",
+            )
+            return
+        self._send_json(response)
+
     def handle_plugin_load(self):
         """加载插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
-        if not plugin_id:
-            self._send_error("Missing plugin_id parameter")
+        plugin_id = self._read_plugin_lifecycle_plugin_id()
+        if plugin_id is None:
             return
 
         # 查找 manifest
-        manifests = global_plugin_manager.discover()
+        manifests = self.app_state.plugin_manager.discover()
         manifest = next((m for m in manifests if m.plugin_id == plugin_id), None)
         if not manifest:
-            self._send_error(f"Plugin {plugin_id} not found")
+            self._send_error(
+                f"Plugin {plugin_id} not found",
+                404,
+                "PLUGIN_NOT_FOUND",
+            )
             return
 
-        instance = global_plugin_manager.load(manifest)
+        instance = self.app_state.plugin_manager.load(manifest)
         self._send_json({
             "plugin_id": instance.manifest.plugin_id,
             "name": instance.manifest.name,
@@ -400,24 +911,20 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_plugin_enable(self):
         """启用插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
-        if not plugin_id:
-            self._send_error("Missing plugin_id parameter")
+        plugin_id = self._read_plugin_lifecycle_plugin_id()
+        if plugin_id is None:
             return
 
-        result = global_plugin_manager.enable(plugin_id)
+        result = self.app_state.plugin_manager.enable(plugin_id)
         self._send_json({"success": result, "plugin_id": plugin_id})
 
     def handle_plugin_disable(self):
         """禁用插件"""
-        data = self._read_body()
-        plugin_id = data.get("plugin_id")
-        if not plugin_id:
-            self._send_error("Missing plugin_id parameter")
+        plugin_id = self._read_plugin_lifecycle_plugin_id()
+        if plugin_id is None:
             return
 
-        result = global_plugin_manager.disable(plugin_id)
+        result = self.app_state.plugin_manager.disable(plugin_id)
         self._send_json({"success": result, "plugin_id": plugin_id})
 
     def handle_memory_entries(self):
@@ -430,19 +937,16 @@ class JARVISHandler(BaseHTTPRequestHandler):
             except ValueError:
                 pass
 
-        entries = state.memory_store.load(mtype)
+        entries = load_memory_entries_for_api(
+            self.app_state.memory_store,
+            mtype,
+            max_directory_entries=MEMORY_API_MAX_DIRECTORY_ENTRIES,
+            max_files=MEMORY_API_MAX_FILES,
+            max_file_bytes=MEMORY_API_MAX_FILE_BYTES,
+            max_total_bytes=MEMORY_API_MAX_TOTAL_BYTES,
+        )
         self._send_json({
-            "entries": [
-                {
-                    "id": e.id,
-                    "type": e.type.value,
-                    "title": e.title,
-                    "content": e.content[:200],
-                    "created_at": e.created_at,
-                    "access_count": e.access_count,
-                }
-                for e in entries
-            ]
+            "entries": [public_memory_entry(entry) for entry in entries]
         })
 
     def handle_memory_store(self):
@@ -452,19 +956,69 @@ class JARVISHandler(BaseHTTPRequestHandler):
         title = data.get("title", "")
         content_inner = data.get("content", "")
         tags = data.get("tags", [])
+        probe_cleanup_token = data.get("probe_cleanup_token")
+
+        if type(memory_type) is not str:
+            raise InvalidRequestBody("Memory type must be a string")
+        if type(title) is not str:
+            raise InvalidRequestBody("Memory title must be a string")
+        if type(content_inner) is not str:
+            raise InvalidRequestBody("Memory content must be a string")
+        if type(tags) is not list or any(type(tag) is not str for tag in tags):
+            raise InvalidRequestBody("Memory tags must be an array of strings")
+        if probe_cleanup_token is not None and type(probe_cleanup_token) is not str:
+            raise InvalidRequestBody("Probe cleanup token must be a string")
 
         try:
             mtype = MemoryType(memory_type)
         except ValueError:
             mtype = MemoryType.USER
 
-        entry = MemoryEntry.create(mtype, title, content_inner, tags=tags)
-        path = state.memory_store.store(entry)
-        self._send_json({"success": True, "path": path})
+        metadata = {}
+        if probe_cleanup_token:
+            metadata["probe_cleanup_token"] = probe_cleanup_token
+        entry = MemoryEntry.create(
+            mtype,
+            title,
+            content_inner,
+            metadata=metadata,
+            tags=tags,
+        )
+        path = self.app_state.memory_store.store(entry)
+        self._send_json({
+            "success": True,
+            "path": path,
+            "id": entry.id,
+            "type": entry.type.value,
+        })
+
+    def handle_memory_delete(self, memory_type: MemoryType, entry_id: str):
+        """Delete one integration probe after cleanup-token verification."""
+        cleanup_token = self._read_body().get("cleanup_token", "")
+        deleted = self.app_state.memory_store.delete_probe(
+            memory_type,
+            entry_id,
+            cleanup_token,
+        )
+        if not deleted:
+            self._send_error("Memory entry not found", 404, "MEMORY_NOT_FOUND")
+            return
+        self._send_json({"success": True, "id": entry_id})
 
     def handle_events(self):
-        """Event history (event_bus module removed, returns empty list for now)"""
-        self._send_json({"events": []})
+        """Return the bounded history owned by this HTTP service."""
+        history = self.app_state.event_bus.get_history(limit=100)
+        self._send_json({
+            "events": [
+                {
+                    "type": str(event.type),
+                    "payload": str(event.payload)[:200],
+                    "timestamp": event.timestamp,
+                    "source": event.source,
+                }
+                for event in history
+            ]
+        })
 
     # ============================================================
     # Orchestrator endpoints
@@ -473,7 +1027,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
     def handle_orchestrator_agents(self):
         """List registered agents"""
         try:
-            agents = state.orchestrator.list_agents()
+            agents = self.app_state.orchestrator.list_agents()
             self._send_json({
                 "agents": [a.to_dict() for a in agents],
                 "count": len(agents),
@@ -483,9 +1037,27 @@ class JARVISHandler(BaseHTTPRequestHandler):
 
     def handle_orchestrator_history(self):
         """Task execution history"""
+        query_limit = parse_qs(
+            self.path.partition("?")[2],
+            keep_blank_values=True,
+        ).get("limit", [None])[0]
+        raw_limit = query_limit
+        if raw_limit is None:
+            raw_limit = self.headers.get("X-Limit", 10)
+
         try:
-            limit = int(self.headers.get("X-Limit", 10))
-            history = state.orchestrator.collect(limit=limit)
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            self._send_error(
+                "limit must be an integer",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+
+        limit = max(1, min(limit, 100))
+        try:
+            history = self.app_state.orchestrator.collect(limit=limit)
             self._send_json({
                 "results": [r.to_dict() for r in history],
                 "count": len(history),
@@ -496,39 +1068,278 @@ class JARVISHandler(BaseHTTPRequestHandler):
     def handle_orchestrator_dispatch(self):
         """Dispatch a task to a registered agent (simulated execution)"""
         data = self._read_body()
-        agent_name = data.get("agent_name", "")
-        prompt = data.get("prompt", "")
-        timeout = data.get("timeout", 30)
+        agent_name = _normalize_dispatch_text(data.get("agent_name", ""))
+        prompt = _normalize_dispatch_text(data.get("prompt", ""))
+        timeout = data.get("timeout", 300)
+        priority = data.get("priority", 1)
 
-        if not agent_name:
-            self._send_error("Missing agent_name parameter")
+        if agent_name is None:
+            self._send_error(
+                "agent_name must be a non-empty string",
+                400,
+                "INVALID_REQUEST",
+            )
             return
-        if not prompt:
-            self._send_error("Missing prompt parameter")
+        if prompt is None:
+            self._send_error(
+                "prompt must be a non-empty string",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int)
+            or not 1 <= timeout <= 300
+        ):
+            self._send_error(
+                "timeout must be an integer between 1 and 300",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 3
+        ):
+            self._send_error(
+                "priority must be an integer between 0 and 3",
+                400,
+                "INVALID_REQUEST",
+            )
             return
 
         logger.info(f"Mock dispatch to '{agent_name}': {prompt[:100]}")
         print(f"[ORCH] agent={agent_name} prompt={prompt}")
 
-        result = state.orchestrator.dispatch(
-            AgentTask(agent_name=agent_name, prompt=prompt, timeout=timeout)
+        result = self.app_state.orchestrator.dispatch(
+            AgentTask(
+                agent_name=agent_name,
+                prompt=prompt,
+                timeout=timeout,
+                priority=priority,
+            )
         )
         self._send_json(result.to_dict())
+
+    # ============================================================
+    # Role endpoints (Phase 11 - shared across adapters)
+    # ============================================================
+
+    def handle_roles_list(self):
+        """List registered roles, optionally filtered by capability."""
+        capability = parse_qs(
+            self.path.partition("?")[2],
+            keep_blank_values=True,
+        ).get("capability", [None])[0]
+        if capability is not None and not capability.strip():
+            capability = None
+        try:
+            roles = self.app_state.role_registry.list_roles(capability=capability)
+            self._send_json({
+                "roles": [r.to_dict() for r in roles],
+                "count": len(roles),
+            })
+        except Exception as e:
+            self._send_error(f"Failed to list roles: {e}", 500)
+
+    def handle_role_get(self, role_name):
+        """Return a single role profile by name."""
+        try:
+            profile = self.app_state.role_registry.get(role_name)
+        except Exception as e:
+            self._send_error(f"Failed to get role: {e}", 500)
+            return
+        if profile is None:
+            self._send_error(
+                f"Role '{role_name}' not found",
+                404,
+                "ROLE_NOT_FOUND",
+            )
+            return
+        self._send_json({"role": profile.to_dict()})
+
+    def _read_role_dispatch_prompt(self, data):
+        prompt = _normalize_dispatch_text(data.get("prompt", ""))
+        if prompt is None:
+            self._send_error(
+                "prompt must be a non-empty string",
+                400,
+                "INVALID_REQUEST",
+            )
+            return None, None
+        timeout = data.get("timeout", 300)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int)
+            or not 1 <= timeout <= 300
+        ):
+            self._send_error(
+                "timeout must be an integer between 1 and 300",
+                400,
+                "INVALID_REQUEST",
+            )
+            return None, None
+        return prompt, timeout
+
+    def _send_role_dispatch_error(self, error):
+        errors = (
+            (
+                RoleWorkerUnavailableError,
+                "ROLE_WORKER_UNAVAILABLE",
+                "Role worker is unavailable",
+            ),
+            (
+                RoleTaskTerminationUnconfirmedError,
+                "ROLE_TASK_TERMINATION_UNCONFIRMED",
+                "Worker process termination is not confirmed",
+            ),
+            (
+                RoleWorkerInvalidResultError,
+                "ROLE_WORKER_INVALID_RESULT",
+                "Role worker returned an invalid result",
+            ),
+        )
+        for error_type, code, message in errors:
+            if isinstance(error, error_type):
+                self._send_error(message, 503, code)
+                return
+        raise error
+
+    def handle_role_dispatch(self):
+        """Dispatch a task to a specific role."""
+        data = self._read_body()
+        role_name = _normalize_dispatch_text(data.get("role_name", ""))
+        if role_name is None:
+            self._send_error(
+                "role_name must be a non-empty string",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+        prompt, timeout = self._read_role_dispatch_prompt(data)
+        if prompt is None:
+            return
+        try:
+            result = self.app_state.role_dispatch.dispatch_by_role(
+                role_name,
+                prompt,
+                timeout,
+            )
+        except (
+            RoleWorkerUnavailableError,
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+        ) as error:
+            self._send_role_dispatch_error(error)
+            return
+        if result.status == "no_role":
+            self._send_error(
+                f"Role '{role_name}' not found",
+                404,
+                "ROLE_NOT_FOUND",
+            )
+            return
+        self._send_json(result.to_dict())
+
+    def handle_role_dispatch_by_cap(self):
+        """Dispatch a task by capability, selecting the highest-priority role."""
+        data = self._read_body()
+        capability = _normalize_dispatch_text(data.get("capability", ""))
+        if capability is None:
+            self._send_error(
+                "capability must be a non-empty string",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+        prompt, timeout = self._read_role_dispatch_prompt(data)
+        if prompt is None:
+            return
+        try:
+            result = self.app_state.role_dispatch.dispatch_by_capability(
+                capability,
+                prompt,
+                timeout,
+            )
+        except (
+            RoleWorkerUnavailableError,
+            RoleTaskTerminationUnconfirmedError,
+            RoleWorkerInvalidResultError,
+        ) as error:
+            self._send_role_dispatch_error(error)
+            return
+        if result.status == "no_capability":
+            self._send_error(
+                f"No role with capability: {capability}",
+                404,
+                "CAPABILITY_NOT_FOUND",
+            )
+            return
+        self._send_json(result.to_dict())
+
+    def handle_role_batch_dispatch(self):
+        """Dispatch multiple role/capability tasks in one request."""
+        data = self._read_body()
+        tasks = data.get("tasks", [])
+        if not isinstance(tasks, list):
+            self._send_error(
+                "tasks must be an array",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+        results = self.app_state.role_dispatch.batch_dispatch(tasks)
+        self._send_json({
+            "results": [r.to_dict() for r in results],
+            "count": len(results),
+        })
 
 
 # ============================================================
 # Server start
 # ============================================================
 
-def run_server(host: str = "127.0.0.1", port: int = 8080):
+def create_http_server(
+    host: str,
+    port: int,
+    app_state: AppState | None = None,
+):
+    handler_type = JARVISHandler
+    if app_state is not None:
+        handler_type = type(
+            "BoundJARVISHandler",
+            (JARVISHandler,),
+            {"app_state": app_state},
+        )
+    return _IPv4HTTPServer((host, port), handler_type)
+
+
+def run_server(
+    host: str | None = None,
+    port: int = 8080,
+    app_state: AppState | None = None,
+):
     """Start J.A.R.V.I.S. API server"""
-    server = _IPv4HTTPServer((host, port), JARVISHandler)
-    logger.info(f"J.A.R.V.I.S. API server started: http://{host}:{port}")
+    host = host or os.environ.get("JARVIS_HOST") or "127.0.0.1"
+    active_state = app_state or state
+    server = None
     try:
+        server = create_http_server(host, port, app_state=active_state)
+        logger.info(f"J.A.R.V.I.S. API server started: http://{host}:{port}")
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("server shutting down...")
-        server.shutdown()
+    finally:
+        try:
+            if server is not None:
+                try:
+                    server.shutdown()
+                finally:
+                    server.server_close()
+        finally:
+            active_state.shutdown()
 
 
 if __name__ == "__main__":

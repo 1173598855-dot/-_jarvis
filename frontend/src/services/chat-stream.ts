@@ -1,5 +1,8 @@
 import { JarvisApiError } from './jarvis-api';
 
+export const MAX_SSE_STREAM_BYTES = 8 * 1024 * 1024;
+export const MAX_SSE_EVENT_BYTES = 64 * 1024;
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -32,14 +35,26 @@ function abortIfNeeded(signal: AbortSignal) {
   }
 }
 
+function rejectOversizedSse(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): never {
+  const error = new JarvisApiError(
+    '鑱婂ぉ娴佸紡鍝嶅簲瓒呭嚭澶у皬闄愬埗',
+    'SSE_STREAM_TOO_LARGE',
+    502,
+  );
+  void reader.cancel(error);
+  throw error;
+}
+
 function processEvent(data: string, handlers: ChatHandlers) {
   if (!data || data === '[DONE]') {
     return data === '[DONE]';
   }
 
   let frame: {
-    error?: string | { code?: string; message?: string };
-    message?: { content?: string };
+    error?: { code?: string; message?: string };
+    content?: string;
     done?: boolean;
     prompt_eval_count?: number;
     eval_count?: number;
@@ -57,17 +72,15 @@ function processEvent(data: string, handlers: ChatHandlers) {
   }
 
   if (frame.error) {
-    const message = typeof frame.error === 'string'
-      ? frame.error
-      : frame.error.message || '聊天请求失败';
-    const code = typeof frame.error === 'string'
-      ? 'CHAT_STREAM_ERROR'
-      : frame.error.code || 'CHAT_STREAM_ERROR';
-    throw new JarvisApiError(message, code, 502);
+    throw new JarvisApiError(
+      frame.error.message || '聊天请求失败',
+      frame.error.code || 'CHAT_STREAM_ERROR',
+      502,
+    );
   }
 
-  if (frame.message?.content) {
-    handlers.onDelta(frame.message.content);
+  if (frame.content) {
+    handlers.onDelta(frame.content);
   }
 
   if (
@@ -126,18 +139,42 @@ export async function streamChat(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   let buffer = '';
+  let totalBytes = 0;
 
   while (true) {
     abortIfNeeded(signal);
     const { done, value } = await reader.read();
     if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+    if (!value || typeof value !== 'object' || !ArrayBuffer.isView(value)) {
+      throw new JarvisApiError(
+        '娴佸紡鍝嶅簲涓嶅寘鍚夸簩杩涘埗鏁版嵁',
+        'INVALID_SSE_RESPONSE',
+        502,
+      );
+    }
+    totalBytes += value.byteLength;
+    if (totalBytes > MAX_SSE_STREAM_BYTES) {
+      rejectOversizedSse(reader);
+    }
+
+    buffer += decoder.decode(
+      new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+      { stream: true },
+    );
     const parsed = parseSseEvents(buffer);
     buffer = parsed.remainder;
 
+    if (encoder.encode(buffer).byteLength > MAX_SSE_EVENT_BYTES) {
+      rejectOversizedSse(reader);
+    }
+
     for (const event of parsed.events) {
+      if (encoder.encode(event).byteLength > MAX_SSE_EVENT_BYTES) {
+        rejectOversizedSse(reader);
+      }
       if (processEvent(event, handlers)) {
         await reader.cancel();
         return;
@@ -146,8 +183,14 @@ export async function streamChat(
   }
 
   buffer += decoder.decode();
+  if (encoder.encode(buffer).byteLength > MAX_SSE_EVENT_BYTES) {
+    rejectOversizedSse(reader);
+  }
   const finalEvents = parseSseEvents(buffer ? `${buffer}\n\n` : '').events;
   for (const event of finalEvents) {
+    if (encoder.encode(event).byteLength > MAX_SSE_EVENT_BYTES) {
+      rejectOversizedSse(reader);
+    }
     if (processEvent(event, handlers)) return;
   }
 }

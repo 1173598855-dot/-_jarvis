@@ -13,14 +13,14 @@ class TestDispatchWithRetrySuccess:
 
     def test_success_on_first_attempt(self):
         orch = Orchestrator()
-        orch.register("worker", handler=lambda t: "ok", capabilities=[])
+        orch.register_in_process("worker", handler=lambda t: "ok", capabilities=[])
         result = orch.dispatch_with_retry(_make_task(), max_retries=2)
         assert result.status == "success"
         assert "retries" not in (result.error or "")
 
     def test_no_retries_counted_on_immediate_success(self):
         orch = Orchestrator()
-        orch.register("worker", handler=lambda t: "ok", capabilities=[])
+        orch.register_in_process("worker", handler=lambda t: "ok", capabilities=[])
         orch.dispatch_with_retry(_make_task("t1"), max_retries=3)
         assert orch.get_stats().get("total_retries", 0) == 0
 
@@ -38,7 +38,7 @@ class TestDispatchWithRetryRecovery:
                 raise TimeoutError("transient timeout")
             return "recovered"
 
-        orch.register("worker", handler=flaky_handler, capabilities=[])
+        orch.register_in_process("worker", handler=flaky_handler, capabilities=[])
         result = orch.dispatch_with_retry(_make_task("t_flaky"), max_retries=2)
         assert result.status == "success"
         assert counter[0] == 2
@@ -49,7 +49,7 @@ class TestDispatchWithRetryRecovery:
         def always_fail(t):
             raise TimeoutError("always fails")
 
-        orch.register("worker", handler=always_fail, capabilities=[])
+        orch.register_in_process("worker", handler=always_fail, capabilities=[])
         result = orch.dispatch_with_retry(_make_task("t_exhaust"), max_retries=1)
         assert result.status == "failed"
         assert "after" in (result.error or "")
@@ -60,7 +60,7 @@ class TestDispatchWithRetryRecovery:
         def always_fail(t):
             raise RuntimeError("boom")
 
-        orch.register("worker", handler=always_fail, capabilities=[])
+        orch.register_in_process("worker", handler=always_fail, capabilities=[])
         orch.dispatch_with_retry(_make_task("t_fail"), max_retries=0)
         assert orch.get_stats().get("total_errors", 0) >= 1
 
@@ -78,7 +78,7 @@ class TestDispatchWithRetryBackoff:
                 raise TimeoutError("retry me")
             return "ok"
 
-        orch.register("worker", handler=handler_with_timing, capabilities=[])
+        orch.register_in_process("worker", handler=handler_with_timing, capabilities=[])
         result = orch.dispatch_with_retry(
             _make_task("t_timing"), max_retries=2, backoff_factor=0.5
         )
@@ -93,14 +93,14 @@ class TestDispatchWithRetryParameters:
 
     def test_max_retries_zero(self):
         orch = Orchestrator()
-        orch.register("worker", handler=lambda t: "ok", capabilities=[])
+        orch.register_in_process("worker", handler=lambda t: "ok", capabilities=[])
         result = orch.dispatch_with_retry(_make_task("t0"), max_retries=0)
         assert result.status == "success"
 
     def test_busy_status_does_not_retry(self):
         """busy status is treated as success, no retry triggered."""
         orch = Orchestrator()
-        orch.register("worker", handler=lambda t: "ok", capabilities=[])
+        orch.register_in_process("worker", handler=lambda t: "ok", capabilities=[])
 
         original = orch.dispatch
         call_count = [0]
@@ -125,7 +125,7 @@ class TestDispatchWithRetryDefaults:
 
     def test_default_max_retries_is_2(self):
         orch = Orchestrator()
-        orch.register("worker", handler=lambda t: "ok", capabilities=[])
+        orch.register_in_process("worker", handler=lambda t: "ok", capabilities=[])
         # Should succeed on first attempt with default max_retries=2
         result = orch.dispatch_with_retry(_make_task("t_def"))
         assert result.status == "success"
@@ -140,6 +140,6 @@ class TestDispatchWithRetryDefaults:
                 raise TimeoutError("transient")
             return "ok"
 
-        orch.register("worker", handler=fail_once, capabilities=[])
+        orch.register_in_process("worker", handler=fail_once, capabilities=[])
         result = orch.dispatch_with_retry(_make_task("t_bo"), max_retries=1)
         assert result.status == "success"

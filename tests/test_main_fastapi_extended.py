@@ -1,36 +1,83 @@
 """Extended tests for main_fastapi.py - Iteration 50"""
+import asyncio
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
-from main_fastapi import AppState, app
+from main_fastapi import AppState, app, create_app
 
 client = TestClient(app, raise_server_exceptions=False)
 
 
 class TestAppState(unittest.TestCase):
+    def setUp(self):
+        self.memory_directory = tempfile.TemporaryDirectory(
+            prefix=".test-fastapi-app-state-"
+        )
+        self.addCleanup(self.memory_directory.cleanup)
+        self.state = AppState(memory_dir=self.memory_directory.name)
+        self.addCleanup(self.state.shutdown)
+
+    def test_agent_factory_uses_application_ollama_manager(self):
+        self.assertIs(
+            self.state.agent_factory._ollama_manager,
+            self.state.ollama,
+        )
+
     def test_default_values(self):
-        state = AppState()
-        self.assertEqual(state.request_count, 0)
-        self.assertGreater(state.start_time, 0)
+        self.assertEqual(self.state.request_count, 0)
+        self.assertGreater(self.state.start_time, 0)
 
     def test_start_time_set(self):
         import time
-        state = AppState()
-        state.start_time = time.time()
-        self.assertGreater(state.start_time, 0)
+
+        self.state.start_time = time.time()
+        self.assertGreater(self.state.start_time, 0)
 
 
 class TestHealthEndpoint(unittest.TestCase):
     def test_health_returns_200(self):
         r = client.get("/api/health")
         self.assertEqual(r.status_code, 200)
+
+    def test_health_accepts_exact_raw_query_budget(self):
+        import main_fastapi
+
+        response = client.get(
+            "/api/health?" + "x" * main_fastapi.MAX_REQUEST_QUERY_BYTES
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_api_query_over_budget_is_rejected_before_route_parsing(self):
+        import main_fastapi
+
+        path = (
+            "/api/capabilities/registry?"
+            + "x" * (main_fastapi.MAX_REQUEST_QUERY_BYTES + 1)
+        )
+        with patch.object(main_fastapi, "parse_capability_query_items") as parse:
+            response = client.get(path)
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(
+            response.json(),
+            {
+                "error": {
+                    "code": "REQUEST_QUERY_TOO_LARGE",
+                    "message": "Request query exceeds the 32 KiB limit",
+                }
+            },
+        )
+        parse.assert_not_called()
 
     def test_health_has_version(self):
         r = client.get("/api/health")
@@ -79,9 +126,68 @@ class TestOllamaEndpoints(unittest.TestCase):
         r = client.get("/api/ollama/models")
         self.assertIn(r.status_code, [200, 500])
 
-    def test_ollama_chat_requires_model(self):
+    def test_ollama_chat_normalizes_unavailable_upstream(self):
         r = client.post("/api/ollama/chat", json={"messages": []})
-        self.assertIn(r.status_code, [200, 400, 500])
+        self.assertIn(r.status_code, [200, 400, 502])
+        if r.status_code == 502:
+            self.assertEqual(r.json()["error"]["code"], "OLLAMA_UPSTREAM_ERROR")
+
+    def test_ollama_stream_rejects_oversized_ascii_query_value(self):
+        import main_fastapi
+
+        oversized_model = "m" * (main_fastapi.MAX_REQUEST_BODY_BYTES + 1)
+        response = client.get(
+            "/api/ollama/chat/stream",
+            params={"model": oversized_model},
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["error"]["code"], "REQUEST_QUERY_TOO_LARGE")
+
+    def test_ollama_stream_rejects_multibyte_query_value_over_byte_budget(self):
+        import main_fastapi
+
+        oversized_model = "é" * (main_fastapi.MAX_REQUEST_BODY_BYTES // 2 + 1)
+        self.assertLessEqual(len(oversized_model), main_fastapi.MAX_REQUEST_BODY_BYTES)
+        self.assertGreater(
+            len(oversized_model.encode("utf-8")),
+            main_fastapi.MAX_REQUEST_BODY_BYTES,
+        )
+        with self.assertRaises(main_fastapi.HTTPException) as raised:
+            asyncio.run(
+                main_fastapi.ollama_chat_stream(
+                    model=oversized_model,
+                    messages="[]",
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 413)
+        self.assertEqual(
+            raised.exception.detail,
+            {
+                "code": "REQUEST_QUERY_TOO_LARGE",
+                "message": "Request query exceeds the 32 KiB limit",
+            },
+        )
+
+    def test_ollama_stream_accepts_exact_raw_query_budget(self):
+        import main_fastapi
+
+        model = "m" * (
+            main_fastapi.MAX_REQUEST_QUERY_BYTES - len("model=")
+        )
+        with patch.object(
+            main_fastapi.state.ollama,
+            "stream_chat_generator",
+            return_value=[("done", True)],
+        ):
+            response = client.get(
+                "/api/ollama/chat/stream",
+                params={"model": model},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("data: [DONE]", response.text)
 
 
 class TestTerminalEndpoint(unittest.TestCase):
@@ -96,7 +202,16 @@ class TestMemoryEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
 
     def test_memory_store_requires_content(self):
-        r = client.post("/api/memory/store", json={})
+        memory_directory = tempfile.TemporaryDirectory(
+            prefix=".test-fastapi-memory-store-"
+        )
+        self.addCleanup(memory_directory.cleanup)
+        isolated_state = AppState(memory_dir=memory_directory.name)
+        with TestClient(
+            create_app(isolated_state),
+            raise_server_exceptions=False,
+        ) as isolated_client:
+            r = isolated_client.post("/api/memory/store", json={})
         self.assertIn(r.status_code, [200, 400, 422])
 
 

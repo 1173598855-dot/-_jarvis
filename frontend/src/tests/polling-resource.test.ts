@@ -1,4 +1,5 @@
 import { createRoot } from 'solid-js';
+import { render } from '@solidjs/testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import { createPollingResource } from '../primitives/create-polling-resource';
 
@@ -12,6 +13,21 @@ function withRoot<T>(factory: () => T) {
 }
 
 describe('createPollingResource', () => {
+  it('starts exactly one load when mounted with automatic polling', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn().mockResolvedValue({ value: 1 });
+    const mounted = render(() => {
+      createPollingResource({ load, intervalMs: 1000 });
+      return document.createElement('div');
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(load).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+    vi.useRealTimers();
+  });
+
   it('retains the last value and becomes stale after refresh failure', async () => {
     const load = vi.fn()
       .mockResolvedValueOnce({ value: 1 })

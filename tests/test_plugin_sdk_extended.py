@@ -5,9 +5,13 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
+from core.contracts.plugin_worker_protocol import LifecycleAction
+from core.kernel.event_bus import EventBus
+from core.kernel.plugin_broker import PluginBroker
 from core.kernel.plugin_sdk import (
     PluginInstance,
     PluginLoader,
@@ -16,6 +20,42 @@ from core.kernel.plugin_sdk import (
     RuntimeType,
     XiaoYiPluginAPI,
 )
+
+
+class _Runtime:
+    def __init__(self, plugin_root, load_spec, broker):
+        self.snapshot = SimpleNamespace(
+            plugin_id=Path(plugin_root).name,
+            pid=44001,
+            generation=load_spec.generation,
+            termination_confirmed=False,
+        )
+
+    def start(self):
+        return self.snapshot
+
+    def invoke(self, action):
+        statuses = {
+            LifecycleAction.LOAD: "loaded",
+            LifecycleAction.ACTIVATE: "enabled",
+            LifecycleAction.DEACTIVATE: "disabled",
+            LifecycleAction.CLEANUP: "unloaded",
+            LifecycleAction.SHUTDOWN: "unloaded",
+        }
+        if action is LifecycleAction.SHUTDOWN:
+            self.snapshot.termination_confirmed = True
+        return SimpleNamespace(success=True, status=statuses[action], error="")
+
+    def close(self):
+        self.snapshot.termination_confirmed = True
+
+
+def _loader(plugins_dir):
+    return PluginLoader(
+        plugins_dir,
+        PluginBroker(EventBus(), grants={}),
+        runtime_factory=_Runtime,
+    )
 
 
 class TestPluginManifest(unittest.TestCase):
@@ -95,6 +135,31 @@ class TestXiaoYiPluginAPI(unittest.TestCase):
         with self.assertRaises(PermissionError):
             api.read_file("/etc/passwd")
 
+    def test_list_dir_no_permission_raises(self):
+        api = XiaoYiPluginAPI("p1", [])
+        with self.assertRaises(PermissionError):
+            api.list_dir()
+
+    def test_list_dir_broker_passthrough(self):
+        class _BrokerResult:
+            allowed = True
+            error = ""
+            result = [{"name": "data.txt", "type": "file"}]
+
+        calls = []
+        api = XiaoYiPluginAPI(
+            "p1",
+            ["file_read"],
+            broker_call=lambda capability, args: (
+                calls.append((capability, args)) or _BrokerResult()
+            ),
+        )
+
+        result = api.list_dir("data")
+
+        self.assertEqual(result, [{"name": "data.txt", "type": "file"}])
+        self.assertEqual(calls, [("file.list", {"path": "data"})])
+
     def test_emit_event_no_permission_raises(self):
         api = XiaoYiPluginAPI("p1", [])
         with self.assertRaises(PermissionError):
@@ -110,10 +175,32 @@ class TestXiaoYiPluginAPI(unittest.TestCase):
         with self.assertRaises(PermissionError):
             api.get_system_stats()
 
+    def test_get_url_no_permission_raises(self):
+        api = XiaoYiPluginAPI("p1", [])
+        with self.assertRaises(PermissionError):
+            api.get_url("http://example.com/ok")
+
+    def test_get_url_broker_passthrough(self):
+        class _BrokerResult:
+            def __init__(self, result):
+                self.allowed = True
+                self.error = ""
+                self.result = result
+
+        api = XiaoYiPluginAPI(
+            "p1",
+            ["network"],
+            broker_call=lambda capability, args: _BrokerResult(
+                {"status": 200, "headers": {}, "body": "ok"}
+            ),
+        )
+        result = api.get_url("http://127.0.0.1/ok")
+        self.assertEqual(result["status"], 200)
+
 
 class TestPluginLoader(unittest.TestCase):
     def _make_loader(self):
-        return PluginLoader(plugins_dir=tempfile.mkdtemp())
+        return _loader(tempfile.mkdtemp())
 
     def test_discover_empty_dir(self):
         loader = self._make_loader()
@@ -124,16 +211,18 @@ class TestPluginLoader(unittest.TestCase):
             plugin_dir = Path(tmp) / "test_plugin"
             plugin_dir.mkdir()
             manifest_data = {
+                "plugin_id": "test_plugin",
                 "name": "test",
                 "version": "1.0",
                 "description": "test plugin",
                 "author": "tester",
                 "permissions": [],
                 "runtime": "native",
+                "entry_point": "plugin.py",
             }
             (plugin_dir / "manifest.json").write_text(
                 json.dumps(manifest_data), encoding="utf-8")
-            loader = PluginLoader(plugins_dir=tmp)
+            loader = _loader(tmp)
             found = loader.discover_plugins()
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0].name, "test")
@@ -144,11 +233,13 @@ class TestPluginLoader(unittest.TestCase):
             plugin_dir.mkdir()
             m = PluginManifest(name="p", version="1.0",
                               description="d", author="a",
-                              entry_point="main")
+                              entry_point="main.py",
+                              runtime="python_worker", plugin_id="p")
             manifest_data = asdict(m)
             (plugin_dir / "manifest.json").write_text(
                 json.dumps(manifest_data), encoding="utf-8")
-            loader = PluginLoader(plugins_dir=tmp)
+            (plugin_dir / "main.py").write_text("pass\n", encoding="utf-8")
+            loader = _loader(tmp)
             inst = loader.load_plugin(m)
             self.assertEqual(inst.status, PluginStatus.LOADED)
             self.assertEqual(inst.manifest.name, "p")
@@ -163,7 +254,7 @@ class TestPluginStatusEnum(unittest.TestCase):
 
 class TestRuntimeTypeEnum(unittest.TestCase):
     def test_all_runtimes_defined(self):
-        for r in ["python_uv", "python_venv",
+        for r in ["python_worker", "python_uv", "python_venv",
                    "node_worker", "native"]:
             self.assertIn(r, [e.value for e in RuntimeType])
 

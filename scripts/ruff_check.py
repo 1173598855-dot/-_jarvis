@@ -16,11 +16,12 @@ ruff_check.py — 小奕 J.A.R.V.I.S. 代码质量检查脚本
 
 import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -35,47 +36,192 @@ REPORT_FILE = PROJECT_ROOT / "scripts" / "ruff_report.json"
 # 2 = 内部错误（如配置文件问题）
 # 123 = ruff 内部异常
 NON_ISSUE_EXIT_CODES = {0, 2, 123}
+_MAX_RUFF_OUTPUT_BYTES = 8 * 1024 * 1024
+_RUFF_READ_CHUNK_BYTES = 64 * 1024
+
+
+def _ruff_command() -> list[str]:
+    ruff_path = shutil.which("ruff")
+    if ruff_path:
+        return [ruff_path]
+    if sys.executable:
+        return [sys.executable, "-m", "ruff"]
+    return ["ruff"]
+
+
+def _decode_process_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value or "")
+
+
+def _read_bounded_process_stream(
+    stream: object,
+    limit: int,
+    chunks: list[bytes],
+    overflow: threading.Event,
+) -> None:
+    total = 0
+    try:
+        while not overflow.is_set():
+            chunk = stream.read(_RUFF_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8", errors="replace")
+            elif not isinstance(chunk, bytes):
+                chunk = bytes(chunk)
+            next_total = total + len(chunk)
+            if next_total > limit:
+                retained = limit - total
+                if retained > 0:
+                    chunks.append(chunk[:retained])
+                overflow.set()
+                return
+            chunks.append(chunk)
+            total = next_total
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def _bounded_process_communicate(
+    process: object,
+    *,
+    timeout: float,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> tuple[bytes, bytes, bool, bool]:
+    """Collect both Ruff streams without retaining output beyond raw limits."""
+    stdout_stream = getattr(process, "stdout", None)
+    stderr_stream = getattr(process, "stderr", None)
+    if not callable(getattr(stdout_stream, "read", None)) or not callable(
+        getattr(stderr_stream, "read", None)
+    ):
+        return b"", b"", False, True
+
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    overflow = threading.Event()
+    stdout_reader = threading.Thread(
+        target=_read_bounded_process_stream,
+        args=(stdout_stream, stdout_limit, stdout_chunks, overflow),
+        daemon=True,
+    )
+    stderr_reader = threading.Thread(
+        target=_read_bounded_process_stream,
+        args=(stderr_stream, stderr_limit, stderr_chunks, overflow),
+        daemon=True,
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    killed = False
+
+    def kill_once() -> None:
+        nonlocal killed
+        if killed:
+            return
+        killed = True
+        try:
+            process.kill()
+        except (OSError, AttributeError):
+            pass
+
+    while True:
+        if overflow.is_set():
+            kill_once()
+            break
+        if process.poll() is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            kill_once()
+            break
+        try:
+            process.wait(timeout=min(remaining, 0.05))
+        except subprocess.TimeoutExpired:
+            continue
+        except (OSError, ValueError):
+            break
+
+    if killed:
+        try:
+            process.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+    stdout_reader.join(timeout=1.0)
+    stderr_reader.join(timeout=1.0)
+    for stream in (stdout_stream, stderr_stream):
+        try:
+            stream.close()
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    return (
+        b"".join(stdout_chunks),
+        b"".join(stderr_chunks),
+        timed_out,
+        overflow.is_set(),
+    )
+
+
+def _run_bounded_command(
+    command: list[str],
+    *,
+    cwd: Path | None,
+    timeout: float,
+) -> tuple[int, str, str]:
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr, timed_out, output_limited = _bounded_process_communicate(
+            process,
+            timeout=timeout,
+            stdout_limit=_MAX_RUFF_OUTPUT_BYTES,
+            stderr_limit=_MAX_RUFF_OUTPUT_BYTES,
+        )
+    except subprocess.TimeoutExpired:
+        return -1, "", f"ruff 执行超时（{timeout:g}s）"
+    except FileNotFoundError:
+        return -1, "", "ruff 命令未找到"
+    except Exception as error:
+        return -1, "", f"执行异常: {error}"
+
+    if output_limited:
+        return -1, "", f"ruff output exceeds {_MAX_RUFF_OUTPUT_BYTES} bytes"
+    if timed_out:
+        return -1, "", f"ruff 执行超时（{timeout:g}s）"
+    return (
+        process.returncode if process.returncode is not None else -1,
+        _decode_process_output(stdout),
+        _decode_process_output(stderr),
+    )
 
 
 def check_ruff_installed() -> str | None:
     """检测 ruff 是否可用，返回版本字符串或 None。"""
-    ruff_path = shutil.which("ruff")
-    if ruff_path is None:
-        return None
-
-    try:
-        result = subprocess.run(
-            ["ruff", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    code, stdout, _stderr = _run_bounded_command(
+        _ruff_command() + ["--version"], cwd=PROJECT_ROOT, timeout=10
+    )
+    if code == 0:
+        return stdout.strip()
 
     return None
 
 
 def run_ruff_command(args: list[str], cwd: Path) -> tuple[int, str, str]:
     """执行 ruff 命令，返回 (exit_code, stdout, stderr)。"""
-    cmd = ["ruff"] + args
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return result.returncode, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return -1, "", "ruff 执行超时（120s）"
-    except FileNotFoundError:
-        return -1, "", "ruff 命令未找到"
-    except Exception as e:
-        return -1, "", f"执行异常: {e}"
+    return _run_bounded_command(_ruff_command() + args, cwd=cwd, timeout=120)
 
 
 def parse_ruff_output(output: str) -> list[dict]:
@@ -167,7 +313,6 @@ def classify_severity(code: str) -> str:
         "SLF": "info",      # flake8-self
         "TCH": "info",      # flake8-type-checking
         "TRY": "warning",   # tryceratops
-        "UP": "info",       # pyupgrade
         "WPS": "warning",   # wemake-python-styleguide
         "PERF": "info",     # perflint
     }
@@ -320,10 +465,10 @@ def print_report(result: dict) -> None:
     # Lint 结果
     lint_code = result.get("lint_exit_code")
     if lint_code == -1:
-        print(f"\n  [×] ruff check 执行失败")
+        print("\n  [×] ruff check 执行失败")
         print(f"      错误: {result.get('lint_error', '未知错误')}")
     elif lint_code == 0:
-        print(f"\n  [✓] ruff check: 通过（无 lint 问题）")
+        print("\n  [✓] ruff check: 通过（无 lint 问题）")
     elif lint_code == 1:
         print(f"\n  [!] ruff check: 发现 {len(result.get('lint_issues', []))} 个 lint 问题")
     elif lint_code in (2, 123):
@@ -334,9 +479,9 @@ def print_report(result: dict) -> None:
     # Format 结果
     format_code = result.get("format_exit_code")
     if format_code == -1:
-        print(f"\n  [×] ruff format 执行失败")
+        print("\n  [×] ruff format 执行失败")
     elif format_code == 0:
-        print(f"\n  [✓] ruff format: 通过（格式匹配）")
+        print("\n  [✓] ruff format: 通过（格式匹配）")
     elif format_code == 1:
         print(f"\n  [!] ruff format: {len(result.get('format_issues', []))} 个文件格式不匹配")
 
@@ -353,7 +498,7 @@ def print_report(result: dict) -> None:
     # 汇总
     files = result.get("files_with_issues", 0)
     total = result.get("total_issues", 0)
-    print(f"\n  --- 汇总 ---")
+    print("\n  --- 汇总 ---")
     print(f"    问题文件数: {files}")
     print(f"    问题总数:   {total}")
 

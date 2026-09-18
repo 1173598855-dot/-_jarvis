@@ -1,6 +1,7 @@
 import si from 'systeminformation';
 
 const HARDWARE_CACHE_MS = 60_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 const EMPTY_METRIC = Object.freeze({
   total: null,
   used: null,
@@ -12,6 +13,21 @@ let hardwareCache = null;
 let hardwareExpiresAt = 0;
 
 const round = (value) => Math.round(value * 10) / 10;
+
+function withTimeout(operation, timeoutMs) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`System metric probe timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+
+  return Promise.race([
+    Promise.resolve().then(operation),
+    timeout,
+  ]).finally(() => clearTimeout(timeoutId));
+}
 
 async function loadHardware(provider) {
   const [cpu, graphics] = await Promise.all([
@@ -78,19 +94,38 @@ function normalizeDisk(disks) {
   };
 }
 
-export async function readSystemStats(provider = si) {
-  const [loadResult, memoryResult, diskResult, hardwareResult] =
+function normalizeNetwork(interfaces) {
+  if (!Array.isArray(interfaces)) {
+    return { interfaces: [] };
+  }
+
+  return {
+    interfaces: interfaces.map((item) => ({
+      name: item.iface || item.ifaceName || '',
+      ip: item.ip4 || '',
+      status: item.operstate || 'unknown',
+    })),
+  };
+}
+
+export async function readSystemStats(
+  provider = si,
+  probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+) {
+  const [loadResult, memoryResult, diskResult, networkResult, hardwareResult] =
     await Promise.allSettled([
-      provider.currentLoad(),
-      provider.mem(),
-      provider.fsSize(),
-      readHardware(provider),
+      withTimeout(() => provider.currentLoad(), probeTimeoutMs),
+      withTimeout(() => provider.mem(), probeTimeoutMs),
+      withTimeout(() => provider.fsSize(), probeTimeoutMs),
+      withTimeout(() => provider.networkInterfaces(), probeTimeoutMs),
+      withTimeout(() => readHardware(provider), probeTimeoutMs),
     ]);
 
   const unavailableFields = [];
   const load = loadResult.status === 'fulfilled' ? loadResult.value : null;
   const memory = memoryResult.status === 'fulfilled' ? memoryResult.value : null;
   const disks = diskResult.status === 'fulfilled' ? diskResult.value : null;
+  const network = networkResult.status === 'fulfilled' ? networkResult.value : null;
   const hardware = hardwareResult.status === 'fulfilled'
     ? hardwareResult.value
     : null;
@@ -103,6 +138,9 @@ export async function readSystemStats(provider = si) {
   }
   if (!Array.isArray(disks) || disks.length === 0) {
     unavailableFields.push('disk');
+  }
+  if (!Array.isArray(network)) {
+    unavailableFields.push('network');
   }
   if (!hardware) {
     unavailableFields.push('hardware');
@@ -120,6 +158,7 @@ export async function readSystemStats(provider = si) {
     },
     memory: normalizeMemory(memory),
     disk: normalizeDisk(disks),
+    network: normalizeNetwork(network),
     gpu: hardware?.graphics?.controllers?.map((controller) => ({
       model: controller.model,
       vendor: controller.vendor,

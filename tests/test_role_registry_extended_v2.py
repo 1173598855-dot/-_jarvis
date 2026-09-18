@@ -1,11 +1,184 @@
 """Extended tests v2 for role_registry.py - Iteration 56 (API-corrected)"""
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
 
 from core.brain.role_registry import AgentProfile, RoleRegistry
+
+ROOT = Path(__file__).parent.parent
+ROLE_REGISTRY_SCRIPT = ROOT / "src" / "core" / "brain" / "role_registry.py"
+
+
+class TestRoleRegistryCLI(unittest.TestCase):
+    def _run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", str(ROLE_REGISTRY_SCRIPT), *arguments],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def test_get_command_prints_resolved_role(self):
+        result = self._run_cli("get", "engineer")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        profile = json.loads(result.stdout)
+        self.assertEqual(profile["name"], "engineer")
+        self.assertIn("coding", profile["capabilities"])
+
+    def test_register_command_accepts_profile_file(self):
+        profile = {
+            "name": "cli_fixture",
+            "display_name": "CLI Fixture",
+            "description": "CLI registration fixture",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".test-role-registry-cli-",
+            dir=ROOT,
+        ) as temp_dir:
+            profile_path = Path(temp_dir) / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            result = self._run_cli("register", str(profile_path))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Registered role: cli_fixture")
+
+
+class TestRoleRegistrySnapshotOwnership(unittest.TestCase):
+    def test_registry_detaches_mutable_profiles_and_snapshots(self):
+        profile = AgentProfile(
+            name="mutable",
+            display_name="Mutable",
+            description="d",
+            capabilities=["original"],
+            tools=["tool"],
+            metadata={"nested": {"value": 1}},
+        )
+        reg = RoleRegistry()
+        reg.register(profile)
+
+        profile.capabilities.append("external")
+        profile.metadata["nested"]["value"] = 2
+        stored = reg.get("mutable")
+        self.assertEqual(stored.capabilities, ["original"])
+        self.assertEqual(stored.metadata, {"nested": {"value": 1}})
+
+        stored.capabilities.append("caller")
+        stored.metadata["nested"]["value"] = 3
+        listed = reg.list_roles()
+        listed[0].tools.append("caller")
+
+        current = reg.get("mutable")
+        self.assertEqual(current.capabilities, ["original"])
+        self.assertEqual(current.tools, ["tool"])
+        self.assertEqual(current.metadata, {"nested": {"value": 1}})
+
+        inherited = RoleRegistry()
+        inherited.register(
+            AgentProfile(
+                name="parent",
+                display_name="Parent",
+                description="d",
+                metadata={"nested": {"parent": 1}},
+            )
+        )
+        inherited.register(
+            AgentProfile(
+                name="child",
+                display_name="Child",
+                description="d",
+                parent_role="parent",
+                metadata={"child": {"value": 1}},
+            )
+        )
+        resolved = inherited.get("child")
+        resolved.metadata["nested"]["parent"] = 9
+        resolved.metadata["child"]["value"] = 9
+        self.assertEqual(
+            inherited.get("child").metadata,
+            {"nested": {"parent": 1}, "child": {"value": 1}},
+        )
+
+
+class TestRoleRegistryInheritanceCycles(unittest.TestCase):
+    def test_register_rejects_direct_self_cycle_without_mutating_registry(self):
+        registry = RoleRegistry()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Role inheritance cycle detected: self -> self$",
+        ):
+            registry.register(
+                AgentProfile(
+                    name="self",
+                    display_name="Self",
+                    description="d",
+                    parent_role="self",
+                )
+            )
+
+        self.assertEqual(len(registry), 0)
+
+    def test_register_rejects_indirect_cycle_and_preserves_forward_reference(self):
+        registry = RoleRegistry()
+        registry.register(
+            AgentProfile(
+                name="child",
+                display_name="Child",
+                description="d",
+                parent_role="future_parent",
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Role inheritance cycle detected: future_parent -> child -> future_parent$",
+        ):
+            registry.register(
+                AgentProfile(
+                    name="future_parent",
+                    display_name="Future Parent",
+                    description="d",
+                    parent_role="child",
+                )
+            )
+
+        self.assertIn("child", registry)
+        self.assertNotIn("future_parent", registry)
+        self.assertEqual(registry.get("child").parent_role, "future_parent")
+
+
+class TestRoleRegistryDeepInheritance(unittest.TestCase):
+    def test_get_resolves_chain_beyond_python_recursion_limit(self):
+        registry = RoleRegistry()
+
+        for index in range(1100):
+            registry.register(
+                AgentProfile(
+                    name=f"role-{index}",
+                    display_name=f"Role {index}",
+                    description="deep inheritance fixture",
+                    parent_role=f"role-{index - 1}" if index else None,
+                    capabilities=[f"cap-{index}"],
+                    priority=97 if index == 1099 else 1,
+                )
+            )
+
+        resolved = registry.get("role-1099")
+
+        self.assertIsNotNone(resolved)
+        self.assertIsNone(resolved.parent_role)
+        self.assertIn("cap-0", resolved.capabilities)
+        self.assertIn("cap-1099", resolved.capabilities)
+        self.assertEqual(resolved.priority, 97)
 
 
 class TestRoleRegistryResolveInheritance(unittest.TestCase):
@@ -128,6 +301,7 @@ def run_all_tests():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for tc in [
+        TestRoleRegistryInheritanceCycles,
         TestRoleRegistryResolveInheritance,
         TestRoleRegistryEdgeCases,
         TestRoleRegistryJson,

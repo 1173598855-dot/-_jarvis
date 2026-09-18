@@ -51,7 +51,7 @@
 3. 安全检查 → 静态审计（security-auditor 技能）
 4. 下载/导入 → save_skill() / Write() / 安装到本地
 5. 验证调用 → 测试新部署的技能/工具
-6. 记录到 GITHUB_LEARNING_REPORT.md → 追踪来源与版本
+6. 记录到 docs/reports/GITHUB_LEARNING_REPORT.md → 追踪来源与版本
 ```
 
 **搜索目标**（每轮迭代前自动检索，9 大类别）：
@@ -194,7 +194,7 @@ Step 5：记录桥接决策
 3. 安全检查                         →  静态审计（security-auditor 技能）
 4. 下载/导入                        →  save_skill() / Write() / 安装到 mcp/
 5. 验证调用                         →  测试新部署的技能/工具
-6. 记录到 GITHUB_LEARNING_REPORT.md →  追踪来源与版本
+6. 记录到 docs/reports/GITHUB_LEARNING_REPORT.md →  追踪来源与版本
 ```
 
 **停止条件**（满足任一即停止搜索）：

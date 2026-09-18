@@ -1,10 +1,13 @@
 """Project configuration tests."""
 
 import sys
-import tomllib
 import unittest
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10
+    import tomli as tomllib
 
 ROOT = Path(__file__).parent.parent
 
@@ -34,6 +37,20 @@ class TestPythonDependencies(unittest.TestCase):
             self.config["project"]["optional-dependencies"]["dev"]
         )
         self.assertIn("httpx2", dev_deps)
+
+    def test_ruff_linter_dependency_declared(self):
+        dev_deps = self._dependency_names(
+            self.config["project"]["optional-dependencies"]["dev"]
+        )
+        self.assertIn("ruff", dev_deps)
+
+    def test_python_310_toml_backport_dependency_declared(self):
+        dev_dependencies = self.config["project"]["optional-dependencies"]["dev"]
+
+        self.assertIn(
+            "tomli>=2.0.0; python_version < '3.11'",
+            dev_dependencies,
+        )
 
 
 def run_all_tests():

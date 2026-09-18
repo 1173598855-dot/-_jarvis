@@ -5,10 +5,26 @@ Agent 工厂测试 - Phase 11 集成层验证
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.brain.agent_factory import AgentFactory, DispatchResult
+from core.brain.role_registry import READ_ONLY_ROLE_TOOLS
+from core.brain.role_tools import RoleToolBroker, RoleToolPolicy
+from core.contracts.role_tool_protocol import RoleToolDefinition
+
+
+def _tool_definition(name):
+    return RoleToolDefinition(
+        name=name,
+        description=f"Read {name} state",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
 
 
 class TestDispatchByRole(unittest.TestCase):
@@ -216,15 +232,16 @@ class TestBuildFullPrompt(unittest.TestCase):
         self.assertIn("no secrets", prompt)
 
     def test_build_prompt_with_tools(self):
-        """_build_full_prompt includes tools when present"""
+        """Profile declarations alone do not grant prompt tool access."""
         from core.brain.role_registry import AgentProfile
         profile = AgentProfile(
             name="coder", display_name="Coder", description="developer",
             capabilities=["coding"], tools=["python", "bash"],
         )
         prompt = self.factory._build_full_prompt(profile, "fix bug", "")
-        self.assertIn("AVAILABLE TOOLS", prompt)
-        self.assertIn("python", prompt)
+        self.assertIn("[TOOL ACCESS] disabled", prompt)
+        self.assertNotIn("AVAILABLE TOOLS", prompt)
+        self.assertNotIn("python", prompt)
 
     def test_build_prompt_no_constraints_no_tools(self):
         """_build_full_prompt works without constraints or tools"""
@@ -265,6 +282,337 @@ class TestDispatchResultExtended(unittest.TestCase):
         self.assertEqual(r.task_id, "")
 
 
+class TestOllamaRoleExecution(unittest.TestCase):
+    @staticmethod
+    def _response(content="role output"):
+        return {
+            "model": "fixture-role",
+            "message": {"role": "assistant", "content": content},
+            "done": True,
+        }
+
+    def test_execute_role_once_invokes_resolved_handler_without_orchestrator_dispatch(self):
+        factory = AgentFactory()
+        handler = Mock(return_value="direct output")
+
+        with (
+            patch.object(factory, "_default_handler", return_value=handler),
+            patch.object(factory.orchestrator, "dispatch") as dispatch,
+            patch.object(factory.orchestrator, "register") as register,
+        ):
+            result = factory.execute_role_once(
+                "engineer",
+                "inspect",
+                task_id="outer-task-123",
+            )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.task_id, "outer-task-123")
+        self.assertEqual(result.message, "direct output")
+        handler.assert_called_once()
+        self.assertEqual(handler.call_args.args[0].task_id, "outer-task-123")
+        dispatch.assert_not_called()
+        register.assert_not_called()
+
+    def test_execute_role_once_preserves_prompt_and_authorized_tool_metadata(self):
+        terminal_definition = _tool_definition("terminal_executor")
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy(
+                {"engineer": ["terminal_executor", "plugin_sdk"]}
+            ),
+            handlers={"terminal_executor": lambda arguments: arguments},
+            definitions={"terminal_executor": terminal_definition},
+        )
+        legacy_manager = Mock()
+        legacy_manager.chat.return_value = self._response("legacy output")
+        legacy_factory = AgentFactory(
+            ollama_manager=legacy_manager,
+            role_model="fixture-role",
+            role_tool_broker=broker,
+        )
+        legacy_tasks = []
+        original_dispatch = legacy_factory.orchestrator.dispatch
+
+        def capture_legacy(task):
+            legacy_tasks.append(task)
+            return original_dispatch(task)
+
+        with patch.object(
+            legacy_factory.orchestrator,
+            "dispatch",
+            side_effect=capture_legacy,
+        ):
+            legacy_factory.dispatch_by_role("engineer", "inspect the workspace")
+
+        direct_manager = Mock()
+        direct_manager.chat.return_value = self._response("direct output")
+        direct_factory = AgentFactory(
+            ollama_manager=direct_manager,
+            role_model="fixture-role",
+            role_tool_broker=broker,
+        )
+        profile = direct_factory.registry.get("engineer")
+        resolved_handler = direct_factory._default_handler(profile)
+        direct_tasks = []
+
+        def capture_direct(task):
+            direct_tasks.append(task)
+            return resolved_handler(task)
+
+        with patch.object(
+            direct_factory,
+            "_default_handler",
+            return_value=capture_direct,
+        ):
+            result = direct_factory.execute_role_once(
+                "engineer",
+                "inspect the workspace",
+                task_id="outer-task-456",
+            )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(direct_tasks[0].task_id, "outer-task-456")
+        self.assertEqual(direct_tasks[0].prompt, legacy_tasks[0].prompt)
+        self.assertEqual(direct_tasks[0].metadata, legacy_tasks[0].metadata)
+        self.assertEqual(
+            direct_manager.chat.call_args.args[1],
+            legacy_manager.chat.call_args.args[1],
+        )
+        self.assertEqual(
+            direct_tasks[0].metadata["authorized_tools"],
+            ["terminal_executor"],
+        )
+        self.assertEqual(
+            direct_manager.chat.call_args.args[1][1],
+            {"role": "user", "content": "inspect the workspace"},
+        )
+
+    def test_generic_dispatch_does_not_run_model_tools_but_direct_execution_does(self):
+        tool_definition = _tool_definition("terminal_executor")
+        tool_handler = Mock(return_value={"status": "ready"})
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy({"engineer": ["terminal_executor"]}),
+            handlers={"terminal_executor": tool_handler},
+            definitions={"terminal_executor": tool_definition},
+        )
+        tool_response = {
+            "model": "fixture-role",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "terminal_executor",
+                        "arguments": {},
+                    },
+                }],
+            },
+            "done": True,
+        }
+        manager = Mock()
+        manager.chat.side_effect = [
+            tool_response,
+            tool_response,
+            self._response("direct output"),
+        ]
+        factory = AgentFactory(
+            ollama_manager=manager,
+            role_model="fixture-role",
+            role_tool_broker=broker,
+        )
+
+        generic = factory.dispatch_by_role("engineer", "inspect")
+        direct = factory.execute_role_once(
+            "engineer",
+            "inspect",
+            task_id="direct-tool-task",
+        )
+
+        self.assertEqual(generic.status, "error")
+        self.assertNotIn("tools", manager.chat.call_args_list[0].kwargs)
+        self.assertEqual(direct.status, "success")
+        self.assertEqual(manager.chat.call_args_list[1].kwargs["tools"], [
+            tool_definition.to_ollama()
+        ])
+        tool_handler.assert_called_once_with({})
+
+    def test_execute_role_once_sanitizes_handler_failure(self):
+        factory = AgentFactory()
+        handler = Mock(side_effect=RuntimeError("socket path and secret"))
+
+        with patch.object(factory, "_default_handler", return_value=handler):
+            result = factory.execute_role_once(
+                "engineer",
+                "inspect",
+                task_id="outer-task-789",
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.task_id, "outer-task-789")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_execute_role_once_returns_no_role(self):
+        factory = AgentFactory()
+
+        result = factory.execute_role_once(
+            "missing-role",
+            "inspect",
+            task_id="outer-task-missing",
+        )
+
+        self.assertEqual(result.status, "no_role")
+        self.assertEqual(result.task_id, "outer-task-missing")
+        self.assertEqual(result.message, "Role 'missing-role' not found")
+
+    def test_injected_manager_executes_role_with_system_and_user_messages(self):
+        manager = Mock()
+        manager.chat.return_value = self._response()
+        factory = AgentFactory(ollama_manager=manager, role_model="fixture-role")
+
+        result = factory.dispatch_by_role("engineer", "write a unit test")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.message, "role output")
+        model, messages = manager.chat.call_args.args
+        self.assertEqual(model, "fixture-role")
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("工程师", messages[0]["content"])
+        self.assertIn("[TOOL ACCESS] disabled", messages[0]["content"])
+        self.assertNotIn("AVAILABLE TOOLS", messages[0]["content"])
+        self.assertNotIn("write a unit test", messages[0]["content"])
+        self.assertEqual(
+            messages[1],
+            {"role": "user", "content": "write a unit test"},
+        )
+        self.assertEqual(manager.chat.call_args.kwargs, {"stream": False})
+
+    def test_injected_broker_exposes_only_authorized_registered_tools(self):
+        manager = Mock()
+        manager.chat.return_value = self._response()
+        terminal_definition = _tool_definition("terminal_executor")
+        broker = RoleToolBroker(
+            policy=RoleToolPolicy(
+                {"engineer": ["terminal_executor", "plugin_sdk"]}
+            ),
+            handlers={"terminal_executor": lambda arguments: arguments},
+            definitions={"terminal_executor": terminal_definition},
+        )
+        factory = AgentFactory(
+            ollama_manager=manager,
+            role_tool_broker=broker,
+        )
+        captured_tasks = []
+        original_dispatch = factory.orchestrator.dispatch
+
+        def capture(task):
+            captured_tasks.append(task)
+            return original_dispatch(task)
+
+        with patch.object(
+            factory.orchestrator,
+            "dispatch",
+            side_effect=capture,
+        ):
+            result = factory.dispatch_by_role(
+                "engineer",
+                "inspect the workspace",
+            )
+
+        self.assertEqual(result.status, "success")
+        system_prompt = manager.chat.call_args.args[1][0]["content"]
+        self.assertIn("[TOOL ACCESS] disabled", system_prompt)
+        self.assertNotIn("terminal_executor", system_prompt)
+        self.assertNotIn("plugin_sdk", system_prompt)
+        self.assertEqual(
+            captured_tasks[0].metadata["declared_tools"],
+            [
+                "orchestrator",
+                "terminal_executor",
+                "plugin_sdk",
+                *READ_ONLY_ROLE_TOOLS["engineer"],
+            ],
+        )
+        self.assertEqual(
+            captured_tasks[0].metadata["authorized_tools"],
+            ["terminal_executor"],
+        )
+        self.assertNotIn("tools", captured_tasks[0].metadata)
+
+    def test_injected_manager_error_response_is_sanitized(self):
+        manager = Mock()
+        manager.chat.return_value = {"error": "connection details"}
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_injected_manager_blank_content_is_an_error(self):
+        manager = Mock()
+        manager.chat.return_value = self._response("   ")
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_injected_manager_exception_is_sanitized(self):
+        manager = Mock()
+        manager.chat.side_effect = RuntimeError("socket path and secret")
+        factory = AgentFactory(ollama_manager=manager)
+
+        result = factory.dispatch_by_role("engineer", "task")
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Ollama role execution failed")
+
+    def test_role_recovers_for_next_request_after_execution_error(self):
+        manager = Mock()
+        manager.chat.side_effect = [
+            {"error": "offline"},
+            self._response("recovered"),
+        ]
+        factory = AgentFactory(ollama_manager=manager)
+
+        first = factory.dispatch_by_role("engineer", "first task")
+        second = factory.dispatch_by_role("engineer", "second task")
+
+        self.assertEqual(first.status, "error")
+        self.assertEqual(first.message, "Ollama role execution failed")
+        self.assertEqual(second.status, "success")
+        self.assertEqual(second.message, "recovered")
+        self.assertEqual(manager.chat.call_count, 2)
+        info = factory.orchestrator.list_agents()[0]
+        self.assertEqual(info.status, "idle")
+        self.assertEqual(info.errors_count, 1)
+        self.assertEqual(info.tasks_completed, 1)
+
+    def test_role_model_uses_process_configuration(self):
+        with patch.dict("os.environ", {"JARVIS_ROLE_MODEL": "configured-role"}):
+            factory = AgentFactory()
+
+        self.assertEqual(factory._role_model, "configured-role")
+
+    def test_dispatch_llm_uses_valid_chat_signature(self):
+        manager = Mock()
+        manager.chat.side_effect = [
+            self._response("engineer"),
+            self._response("implemented"),
+        ]
+        factory = AgentFactory(ollama_manager=manager, role_model="fixture-role")
+
+        result = factory.dispatch_llm("implement feature")
+
+        self.assertEqual(result.role_name, "engineer")
+        self.assertEqual(result.message, "implemented")
+        first_call = manager.chat.call_args_list[0]
+        self.assertEqual(first_call.args[0], "fixture-role")
+        self.assertEqual(first_call.args[1][0]["role"], "user")
+        self.assertEqual(first_call.kwargs, {"stream": False})
+
+
 def run_all_tests():
     print("=" * 60)
     print("J.A.R.V.I.S. agent_factory tests - Iteration 36")
@@ -274,7 +622,8 @@ def run_all_tests():
     suite = unittest.TestSuite()
     for tc in [TestDispatchByRole, TestDispatchByCapability, TestBatchDispatch,
                TestListRoles, TestIntegration, TestDispatchResult,
-               TestDispatchResultExtended, TestAgentFactoryInit, TestBuildFullPrompt]:
+               TestDispatchResultExtended, TestAgentFactoryInit, TestBuildFullPrompt,
+               TestOllamaRoleExecution]:
         suite.addTests(loader.loadTestsFromTestCase(tc))
 
     runner = unittest.TextTestRunner(verbosity=2)

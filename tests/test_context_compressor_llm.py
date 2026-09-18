@@ -134,6 +134,26 @@ class TestLLMCompressorHistory(unittest.TestCase):
         h1.append({"fake": True})
         self.assertEqual(len(c.compression_history), 0)
 
+    def test_history_retains_only_the_newest_thousand_records(self):
+        c = LLMCompressor()
+        for index in range(1005):
+            c._record(_make_entry(f"entry-{index}"), "fallback")
+
+        history = c.compression_history
+
+        self.assertEqual(len(history), 1000)
+        self.assertEqual(history[0]["title"], "entry-5")
+        self.assertEqual(history[-1]["title"], "entry-1004")
+
+    def test_history_records_are_independent_values(self):
+        c = LLMCompressor()
+        c._record(_make_entry("owned"), "fallback")
+
+        exposed = c.compression_history
+        exposed[0]["action"] = "rewritten"
+
+        self.assertEqual(c.compression_history[0]["action"], "fallback")
+
     def test_fallback_records_fallback_action(self):
         c = LLMCompressor()
         entries = [_make_entry("e1", "x", importance=0.9)]

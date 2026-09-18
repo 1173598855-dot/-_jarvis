@@ -206,11 +206,11 @@ class TestEventBusEdgeCases(unittest.TestCase):
         bus.emit("nonexistent", "data")  # should not raise
         self.assertEqual(len(bus.get_history()), 1)
 
-    def test_unsubscribe_nonexistent_returns_true(self):
-        """unsubscribe returns True even for nonexistent sub_id"""
+    def test_unsubscribe_nonexistent_returns_false(self):
+        """unsubscribe returns False for a nonexistent sub_id"""
         bus = EventBus(max_history=10)
         result = bus.unsubscribe(99999)
-        self.assertTrue(result)  # implementation always returns True
+        self.assertFalse(result)
 
     def test_multiple_subscribers_same_event(self):
         """All subscribers of same event type should be called"""

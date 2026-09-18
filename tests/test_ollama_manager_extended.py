@@ -76,6 +76,7 @@ class TestOllamaManagerGetPost(unittest.TestCase):
         mgr = OllamaManager()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"models": []}
+        mock_resp.iter_content.return_value = [b'{"models": []}']
         mock_resp.raise_for_status = MagicMock()
         with patch.object(mgr._session, "get", return_value=mock_resp):
             result = mgr._get("/api/tags")
@@ -92,6 +93,7 @@ class TestOllamaManagerGetPost(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"model": "llama2",
                               "done": True}
+        mock_resp.iter_content.return_value = [b'{"model": "llama2", "done": true}']
         mock_resp.raise_for_status = MagicMock()
         with patch.object(mgr._session, "post", return_value=mock_resp):
             result = mgr._post("api/generate", {"model": "llama2"})
@@ -145,6 +147,7 @@ class TestOllamaManagerPullModel(unittest.TestCase):
         mock_resp.iter_lines.return_value = [
             json.dumps({"status": "success"}).encode()
         ]
+        mock_resp.iter_content.return_value = [b'{"status": "success"}\n']
         with patch.object(mgr._session, "post", return_value=mock_resp):
             result = mgr.pull_model("llama2")
         self.assertIn("success", result)
@@ -162,9 +165,13 @@ class TestOllamaManagerChat(unittest.TestCase):
         mgr = OllamaManager()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "message": {"content": "Hello!"},
+            "model": "llama2",
+            "message": {"role": "assistant", "content": "Hello!"},
             "done": True,
         }
+        mock_resp.iter_content.return_value = [
+            b'{"model": "llama2", "message": {"role": "assistant", "content": "Hello!"}, "done": true}'
+        ]
         mock_resp.raise_for_status = MagicMock()
         msgs = [{"role": "user", "content": "hi"}]
         with patch.object(mgr._session, "post", return_value=mock_resp):
@@ -178,6 +185,35 @@ class TestOllamaManagerChat(unittest.TestCase):
             result = mgr.chat("llama2", msgs)
         self.assertIn("error", result)
 
+    def test_chat_rejects_malformed_tool_calls(self):
+        malformed_calls = [
+            [{}],
+            [{"function": {}}],
+            [{"function": {"name": "", "arguments": {}}}],
+            [{"function": {"name": "repository_metadata", "arguments": []}}],
+            [{"function": {"name": "repository_metadata", "arguments": "{"}}],
+            [{"id": "", "function": {"name": "repository_metadata", "arguments": {}}}],
+        ]
+
+        for tool_calls in malformed_calls:
+            with self.subTest(tool_calls=tool_calls):
+                mgr = OllamaManager()
+                response = {
+                    "model": "fixture",
+                    "message": {"role": "assistant", "tool_calls": tool_calls},
+                    "done": True,
+                }
+                with patch.object(mgr, "_post", return_value=response):
+                    result = mgr.chat(
+                        "fixture",
+                        [{"role": "user", "content": "inspect"}],
+                    )
+
+                self.assertEqual(
+                    result,
+                    {"error": "Ollama chat response is invalid"},
+                )
+
 
 class TestOllamaManagerStreamChat(unittest.TestCase):
     def test_stream_chat_generator_yields_tuples(self):
@@ -187,6 +223,10 @@ class TestOllamaManagerStreamChat(unittest.TestCase):
         mock_resp.iter_lines.return_value = [
             json.dumps({"message": {"content": "chunk1"}, "done": False}).encode(),
             json.dumps({"message": {"content": "chunk2"}, "done": True}).encode(),
+        ]
+        mock_resp.iter_content.return_value = [
+            b'{"message": {"content": "chunk1"}, "done": false}\n'
+            b'{"message": {"content": "chunk2"}, "done": true}\n'
         ]
         msgs = [{"role": "user", "content": "hi"}]
         with patch.object(mgr._session, "post", return_value=mock_resp):

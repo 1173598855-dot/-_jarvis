@@ -104,6 +104,35 @@ class TestRegisteredAgentLifecycle(unittest.TestCase):
         a.fail()
         self.assertEqual(a.status, AgentStatus.ERROR)
 
+    def test_recover_from_error_returns_to_idle_and_preserves_error_count(self):
+        agent = self._make_agent()
+        agent.assign(AgentTask(agent_name="test_agent", prompt="p"))
+        agent.fail()
+
+        recovered = agent.recover_from_error()
+
+        self.assertTrue(recovered)
+        self.assertEqual(agent.status, AgentStatus.IDLE)
+        self.assertEqual(agent.errors_count, 1)
+        self.assertIsNone(agent.current_task)
+
+    def test_recover_from_error_refuses_non_error_states(self):
+        for status in (AgentStatus.IDLE, AgentStatus.BUSY, AgentStatus.SHUTDOWN):
+            with self.subTest(status=status):
+                agent = self._make_agent()
+                agent.status = status
+                self.assertFalse(agent.recover_from_error())
+                self.assertEqual(agent.status, status)
+
+    def test_recover_from_error_refuses_nonrecoverable_error(self):
+        agent = self._make_agent()
+        agent.assign(AgentTask(agent_name="test_agent", prompt="p"))
+        agent.fail(recoverable=False)
+
+        self.assertFalse(agent.recover_from_error())
+        self.assertEqual(agent.status, AgentStatus.ERROR)
+        self.assertEqual(agent.errors_count, 1)
+
     def test_info_returns_agent_info(self):
         a = self._make_agent('my_agent', ['c1', 'c2'])
         info = a.info()
@@ -136,7 +165,7 @@ class TestOrchestratorInitAndShutdown(unittest.TestCase):
 
     def test_shutdown_blocks_new_dispatches(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.shutdown()
         result = orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(result.status, 'error')
@@ -152,21 +181,71 @@ class TestOrchestratorInitAndShutdown(unittest.TestCase):
         self.assertTrue(orch._shutdown)
 
 
+class TestOrchestratorRecovery(unittest.TestCase):
+    def test_recover_agent_preserves_failed_result_history_and_stats(self):
+        orchestrator = Orchestrator()
+
+        def fail(_task):
+            raise RuntimeError("failed")
+
+        orchestrator.register_in_process("worker", fail)
+        result = orchestrator.dispatch(
+            AgentTask(task_id="failed-task", agent_name="worker", prompt="task")
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertTrue(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "idle")
+        self.assertEqual(orchestrator.list_agents()[0].errors_count, 1)
+        self.assertEqual(
+            orchestrator.collect(task_id="failed-task")[0].status,
+            "error",
+        )
+        self.assertEqual(orchestrator.get_stats()["total_errors"], 1)
+
+    def test_recover_agent_refuses_missing_and_non_error_agents(self):
+        orchestrator = Orchestrator()
+        orchestrator.register_in_process("worker", lambda _task: "ok")
+
+        self.assertFalse(orchestrator.recover_agent("missing"))
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        orchestrator._agents["worker"].assign(
+            AgentTask(agent_name="worker", prompt="busy")
+        )
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "busy")
+
+    def test_recover_agent_does_not_recover_timeout(self):
+        orchestrator = Orchestrator()
+
+        def slow(_task):
+            time.sleep(0.1)
+            return "late"
+
+        orchestrator.register_in_process("worker", slow)
+        result = orchestrator.dispatch(
+            AgentTask(agent_name="worker", prompt="task", timeout=0.01)
+        )
+
+        self.assertEqual(result.status, "timeout")
+        self.assertFalse(orchestrator.recover_agent("worker"))
+        self.assertEqual(orchestrator.list_agents()[0].status, "error")
+
 class TestOrchestratorRegisterUnregister(unittest.TestCase):
     def test_register_returns_self(self):
         orch = Orchestrator()
-        result = orch.register('a', lambda t: 'ok')
+        result = orch.register_in_process('a', lambda t: 'ok')
         self.assertIs(result, orch)
 
     def test_register_adds_agent(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok', capabilities=['c1'])
+        orch.register_in_process('a', lambda t: 'ok', capabilities=['c1'])
         self.assertIn('a', orch._agents)
 
     def test_register_replaces_existing(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'first')
-        orch.register('a', lambda t: 'second')
+        orch.register_in_process('a', lambda t: 'first')
+        orch.register_in_process('a', lambda t: 'second')
         result = orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(result.result, 'second')
 
@@ -176,7 +255,7 @@ class TestOrchestratorRegisterUnregister(unittest.TestCase):
 
     def test_unregister_success(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         self.assertTrue(orch.unregister('a'))
         self.assertNotIn('a', orch._agents)
 
@@ -186,7 +265,7 @@ class TestOrchestratorRegisterUnregister(unittest.TestCase):
 
     def test_list_agents_populated(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok', capabilities=['c1'])
+        orch.register_in_process('a', lambda t: 'ok', capabilities=['c1'])
         agents = orch.list_agents()
         self.assertEqual(len(agents), 1)
         self.assertEqual(agents[0].name, 'a')
@@ -200,13 +279,13 @@ class TestOrchestratorDispatch(unittest.TestCase):
 
     def test_dispatch_increments_total_dispatched(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(orch._stats['total_dispatched'], 1)
 
     def test_dispatch_increments_total_success(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(orch._stats['total_success'], 1)
 
@@ -214,7 +293,7 @@ class TestOrchestratorDispatch(unittest.TestCase):
         orch = Orchestrator()
         def handler(task):
             raise ValueError('test error')
-        orch.register('a', handler)
+        orch.register_in_process('a', handler)
         result = orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(result.status, 'error')
         self.assertEqual(orch._stats['total_errors'], 1)
@@ -224,13 +303,13 @@ class TestOrchestratorDispatch(unittest.TestCase):
         def slow(task):
             time.sleep(5)
             return 'never'
-        orch.register('slow', slow)
+        orch.register_in_process('slow', slow)
         result = orch.dispatch(AgentTask(agent_name='slow', prompt='p', timeout=1))
         self.assertEqual(result.status, 'timeout')
 
     def test_dispatch_records_history(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(len(orch._history), 1)
 
@@ -239,7 +318,7 @@ class TestOrchestratorDispatchConcurrent(unittest.TestCase):
     def test_concurrent_multiple_agents(self):
         orch = Orchestrator()
         for i in range(3):
-            orch.register(f'agent{i}', lambda t, i=i: {'id': i})
+            orch.register_in_process(f'agent{i}', lambda t, i=i: {'id': i})
         tasks = [AgentTask(agent_name=f'agent{i}', prompt='p') for i in range(3)]
         results = orch.dispatch_concurrent(tasks)
         self.assertEqual(len(results), 3)
@@ -254,7 +333,7 @@ class TestOrchestratorDispatchConcurrent(unittest.TestCase):
         def handler(task):
             time.sleep(0.05)
             return 'done'
-        orch.register('a', handler)
+        orch.register_in_process('a', handler)
         tasks = [AgentTask(agent_name='a', prompt='p') for _ in range(3)]
         results = orch.dispatch_concurrent(tasks)
         self.assertEqual(len(results), 3)
@@ -265,7 +344,7 @@ class TestOrchestratorDispatchConcurrent(unittest.TestCase):
 class TestOrchestratorCollect(unittest.TestCase):
     def _populate(self, orch, n=3):
         for i in range(n):
-            orch.register(f'a{i}', lambda t, i=i: f'r{i}')
+            orch.register_in_process(f'a{i}', lambda t, i=i: f'r{i}')
             orch.dispatch(AgentTask(agent_name=f'a{i}', prompt='p'))
 
     def test_collect_empty(self):
@@ -279,8 +358,8 @@ class TestOrchestratorCollect(unittest.TestCase):
 
     def test_collect_filter_by_agent_name(self):
         orch = Orchestrator()
-        orch.register('target', lambda t: 'ok')
-        orch.register('other', lambda t: 'ok')
+        orch.register_in_process('target', lambda t: 'ok')
+        orch.register_in_process('other', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='target', prompt='p'))
         orch.dispatch(AgentTask(agent_name='other', prompt='p'))
         results = orch.collect(agent_name='target')
@@ -290,8 +369,8 @@ class TestOrchestratorCollect(unittest.TestCase):
         orch = Orchestrator()
         def fail(task):
             raise RuntimeError('fail')
-        orch.register('ok', lambda t: 'ok')
-        orch.register('fail', fail)
+        orch.register_in_process('ok', lambda t: 'ok')
+        orch.register_in_process('fail', fail)
         orch.dispatch(AgentTask(agent_name='ok', prompt='p'))
         orch.dispatch(AgentTask(agent_name='fail', prompt='p'))
         results = orch.collect(status='error')
@@ -328,7 +407,7 @@ class TestOrchestratorRunWithTimeout(unittest.TestCase):
 class TestOrchestratorEdgeCases(unittest.TestCase):
     def test_get_stats_returns_copy(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         s1 = orch.get_stats()
         s1['total_dispatched'] = 999
@@ -337,10 +416,10 @@ class TestOrchestratorEdgeCases(unittest.TestCase):
 
     def test_stats_after_multiple_dispatches(self):
         orch = Orchestrator()
-        orch.register('ok', lambda t: 'ok')
+        orch.register_in_process('ok', lambda t: 'ok')
         def fail(task):
             raise RuntimeError()
-        orch.register('fail', fail)
+        orch.register_in_process('fail', fail)
         orch.dispatch(AgentTask(agent_name='ok', prompt='p'))
         orch.dispatch(AgentTask(agent_name='ok', prompt='p'))
         orch.dispatch(AgentTask(agent_name='fail', prompt='p'))
@@ -351,7 +430,7 @@ class TestOrchestratorEdgeCases(unittest.TestCase):
 
     def test_collect_after_shutdown(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         orch.shutdown()
         results = orch.collect()
@@ -359,14 +438,14 @@ class TestOrchestratorEdgeCases(unittest.TestCase):
 
     def test_dispatch_after_shutdown_returns_error(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         orch.shutdown()
         result = orch.dispatch(AgentTask(agent_name='a', prompt='p'))
         self.assertEqual(result.status, 'error')
 
     def test_concurrent_no_stats_corruption(self):
         orch = Orchestrator()
-        orch.register('a', lambda t: 'ok')
+        orch.register_in_process('a', lambda t: 'ok')
         tasks = [AgentTask(agent_name='a', prompt='p') for _ in range(20)]
         results = orch.dispatch_concurrent(tasks)
         self.assertEqual(len(results), 20)
@@ -382,6 +461,7 @@ def run_all_tests():
     for tc in [TestAgentTaskDataclass, TestAgentResultSerialization,
                TestAgentInfoDataclass, TestRegisteredAgentLifecycle,
                TestOrchestratorInitAndShutdown, TestOrchestratorRegisterUnregister,
+               TestOrchestratorRecovery,
                TestOrchestratorDispatch, TestOrchestratorDispatchConcurrent,
                TestOrchestratorCollect, TestOrchestratorRunWithTimeout,
                TestOrchestratorEdgeCases]:

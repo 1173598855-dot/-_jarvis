@@ -3,14 +3,24 @@ Ollama Manager complete test suite - Iteration #28
 Uses unittest.mock to simulate HTTP calls; no Ollama service required.
 Run: python3 tests/test_ollama_manager.py
 """
+import json
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from core.kernel.ollama_manager import OllamaManager, OllamaModel, OllamaStatus, TokenUsage, print_status
+import core.kernel.ollama_manager as ollama_manager_module
+from core.kernel.ollama_manager import (
+    OllamaManager,
+    OllamaModel,
+    OllamaStatus,
+    TokenUsage,
+    print_status,
+)
 
 
 def make_manager():
@@ -23,8 +33,10 @@ def mock_response(status_code=200, json_data=None, content=b""):
     resp.raise_for_status = MagicMock()
     if json_data is not None:
         resp.json = MagicMock(return_value=json_data)
+        content = json.dumps(json_data).encode("utf-8")
     lines = [ln for ln in content.split(b"\n") if ln]
     resp.iter_lines = MagicMock(return_value=lines)
+    resp.iter_content = MagicMock(return_value=[content] if content else [])
     return resp
 
 
@@ -126,6 +138,19 @@ class TestGetStatus(unittest.TestCase):
             status = m.get_status()
         assert status.running is False
 
+    def test_gpu_available_is_boolean_when_no_models_are_running(self):
+        m = make_manager()
+        responses = [
+            mock_response(json_data={"version": "0.9.0"}),
+            mock_response(json_data={"models": []}),
+            mock_response(json_data={"models": []}),
+        ]
+        with patch.object(m._session, "get", side_effect=responses):
+            status = m.get_status()
+
+        self.assertIs(type(status.gpu_available), bool)
+        self.assertFalse(status.gpu_available)
+
 
 # ============================================================
 # list_models
@@ -213,6 +238,93 @@ class TestChat(unittest.TestCase):
             result = m.chat("llama3", [{"role": "user", "content": "hi"}])
         assert "error" in result
 
+    def test_chat_records_native_ollama_token_counts_once(self):
+        m = make_manager()
+        resp = mock_response(json_data={
+            "model": "llama3",
+            "message": {"role": "assistant", "content": "Hi!"},
+            "done": True,
+            "prompt_eval_count": 8,
+            "eval_count": 3,
+        })
+
+        with patch.object(m._session, "post", return_value=resp):
+            m.chat("llama3", [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(m.get_token_usage().total_tokens, 11)
+        self.assertEqual(len(m.get_token_usage_snapshot()["samples"]), 1)
+
+    def test_chat_serializes_supplied_tools(self):
+        m = make_manager()
+        definition = {
+            "type": "function",
+            "function": {
+                "name": "repository_metadata",
+                "description": "Read repository metadata",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+        }
+        response = {
+            "model": "fixture",
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response) as post:
+            result = m.chat(
+                "fixture",
+                [{"role": "user", "content": "inspect"}],
+                tools=[definition],
+            )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(post.call_args.args[1]["tools"], [definition])
+
+    def test_chat_omits_tools_when_not_supplied(self):
+        m = make_manager()
+        response = {
+            "model": "fixture",
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response) as post:
+            result = m.chat(
+                "fixture",
+                [{"role": "user", "content": "inspect"}],
+            )
+
+        self.assertNotIn("error", result)
+        self.assertNotIn("tools", post.call_args.args[1])
+
+    def test_chat_accepts_valid_tool_only_response(self):
+        m = make_manager()
+        response = {
+            "model": "fixture",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "fixture-call-1",
+                        "function": {
+                            "name": "repository_metadata",
+                            "arguments": {},
+                        },
+                    }
+                ],
+            },
+            "done": True,
+        }
+
+        with patch.object(m, "_post", return_value=response):
+            result = m.chat("fixture", [{"role": "user", "content": "inspect"}])
+
+        self.assertEqual(result, response)
+
 class TestPullModel(unittest.TestCase):
     """pull_model() streaming pull with progress output"""
 
@@ -227,6 +339,7 @@ class TestPullModel(unittest.TestCase):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.iter_lines = MagicMock(return_value=progress_lines)
+        resp.iter_content = MagicMock(return_value=[b"\n".join(progress_lines)])
         with patch.object(m._session, "post", return_value=resp):
             result = m.pull_model("llama3:8b")
         self.assertIn("success", result)
@@ -266,6 +379,104 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(data["completion_tokens"], 2)
         self.assertEqual(data["total_tokens"], 3)
 
+    def test_session_snapshot_tracks_latest_totals_and_samples(self):
+        m = make_manager()
+        m.record_token_usage(prompt_tokens=10, completion_tokens=5)
+        m.record_token_usage(prompt_tokens=4, completion_tokens=6)
+
+        snapshot = m.get_token_usage_snapshot()
+
+        self.assertEqual(snapshot["latest"]["prompt_tokens"], 4)
+        self.assertEqual(snapshot["latest"]["total_tokens"], 10)
+        self.assertEqual(snapshot["totals"]["total_tokens"], 25)
+        self.assertEqual(len(snapshot["samples"]), 2)
+        self.assertIsInstance(snapshot["session_started_at"], int)
+
+    def test_get_token_usage_returns_an_independent_value(self):
+        m = make_manager()
+        m.record_token_usage(prompt_tokens=10, completion_tokens=5)
+
+        exposed = m.get_token_usage()
+        exposed.prompt_tokens = 999
+        exposed.completion_tokens = 999
+        exposed.total_tokens = 1998
+
+        current = m.get_token_usage()
+        self.assertEqual(current.prompt_tokens, 10)
+        self.assertEqual(current.completion_tokens, 5)
+        self.assertEqual(current.total_tokens, 15)
+
+    def test_concurrent_recording_does_not_lose_updates(self):
+        class YieldingTokenUsage(TokenUsage):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name in {"prompt_tokens", "completion_tokens"}:
+                    time.sleep(0.002)
+                return value
+
+        m = make_manager()
+        m._token_usage = YieldingTokenUsage()
+        worker_count = 16
+        start = threading.Barrier(worker_count + 1)
+        errors = []
+
+        def record():
+            try:
+                start.wait(timeout=5)
+                m.record_token_usage(prompt_tokens=1, completion_tokens=1)
+            except BaseException as error:
+                errors.append(error)
+
+        workers = [threading.Thread(target=record) for _ in range(worker_count)]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=5)
+        for worker in workers:
+            worker.join(timeout=5)
+
+        self.assertFalse(errors)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        usage = m.get_token_usage()
+        self.assertEqual(usage.prompt_tokens, worker_count)
+        self.assertEqual(usage.completion_tokens, worker_count)
+        self.assertEqual(usage.total_tokens, worker_count * 2)
+        self.assertEqual(len(m.get_token_usage_snapshot()["samples"]), worker_count)
+
+    def test_sample_history_retains_the_newest_sixty_entries(self):
+        m = make_manager()
+        for index in range(65):
+            m.record_token_usage(prompt_tokens=index, completion_tokens=0)
+
+        samples = m.get_token_usage_snapshot()["samples"]
+
+        self.assertEqual(len(samples), 60)
+        self.assertEqual(samples[0]["prompt_tokens"], 5)
+        self.assertEqual(samples[-1]["prompt_tokens"], 64)
+
+    def test_records_native_ollama_token_fields(self):
+        m = make_manager()
+
+        recorded = m.record_token_usage_from_response({
+            "prompt_eval_count": 11,
+            "eval_count": 7,
+        })
+
+        self.assertTrue(recorded)
+        self.assertEqual(m.get_token_usage().total_tokens, 18)
+
+    def test_records_compatible_nested_usage_fields(self):
+        m = make_manager()
+
+        recorded = m.record_token_usage_from_response({
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+            },
+        })
+
+        self.assertTrue(recorded)
+        self.assertEqual(m.get_token_usage().total_tokens, 9)
+
 class TestStreamChat(unittest.TestCase):
     """_stream_chat() and stream_chat_generator()"""
 
@@ -279,10 +490,27 @@ class TestStreamChat(unittest.TestCase):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.iter_lines = MagicMock(return_value=chunk_lines)
+        resp.iter_content = MagicMock(return_value=[b"\n".join(chunk_lines)])
         with patch.object(m._session, "post", return_value=resp):
             result = m._stream_chat({"model": "m", "messages": [], "stream": True})
         self.assertIn("message", result)
         self.assertIn("Hello world", result["message"]["content"])
+
+    def test_stream_chat_records_final_native_token_counts(self):
+        m = make_manager()
+        chunk_lines = [
+            b'{"message": {"content": "Hello"}, "done": false}',
+            b'{"message": {"content": ""}, "done": true, "prompt_eval_count": 6, "eval_count": 2}',
+        ]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.iter_lines = MagicMock(return_value=chunk_lines)
+        resp.iter_content = MagicMock(return_value=[b"\n".join(chunk_lines)])
+
+        with patch.object(m._session, "post", return_value=resp):
+            m._stream_chat({"model": "m", "messages": [], "stream": True})
+
+        self.assertEqual(m.get_token_usage().total_tokens, 8)
 
     def test_stream_chat_connection_error(self):
         """_stream_chat returns error dict on connection failure"""
@@ -301,11 +529,28 @@ class TestStreamChat(unittest.TestCase):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.iter_lines = MagicMock(return_value=chunk_lines)
+        resp.iter_content = MagicMock(return_value=[b"\n".join(chunk_lines)])
         with patch.object(m._session, "post", return_value=resp):
             results = list(m.stream_chat_generator("m", [{"role": "u", "content": "h"}]))
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], ("Hi", False))
         self.assertEqual(results[1], ("!", True))
+
+    def test_stream_chat_generator_records_final_native_token_counts(self):
+        m = make_manager()
+        chunk_lines = [
+            b'{"message": {"content": "Hi"}, "done": false}',
+            b'{"message": {"content": ""}, "done": true, "prompt_eval_count": 9, "eval_count": 4}',
+        ]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.iter_lines = MagicMock(return_value=chunk_lines)
+        resp.iter_content = MagicMock(return_value=[b"\n".join(chunk_lines)])
+
+        with patch.object(m._session, "post", return_value=resp):
+            list(m.stream_chat_generator("m", []))
+
+        self.assertEqual(m.get_token_usage().total_tokens, 13)
 
     def test_stream_chat_generator_connection_error(self):
         """stream_chat_generator yields error tuple on connection failure"""
@@ -371,9 +616,79 @@ class TestChatStreamMode(unittest.TestCase):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.iter_lines = MagicMock(return_value=[b'{"message": {"content": "ok"}, "done": true}'])
+        resp.iter_content = MagicMock(
+            return_value=[b'{"message": {"content": "ok"}, "done": true}']
+        )
         with patch.object(m._session, "post", return_value=resp):
             result = m.chat("model", [{"role": "u", "content": "hi"}], stream=True)
         self.assertIn("message", result)
+
+
+class _ChunkedResponse:
+    def __init__(self, chunks, headers=None):
+        self.chunks = list(chunks)
+        self.headers = headers or {}
+        self.iter_content_calls = []
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, **kwargs):
+        self.iter_content_calls.append(kwargs)
+        return iter(self.chunks)
+
+
+class TestBoundedOllamaResponses(unittest.TestCase):
+    def test_get_rejects_response_body_over_limit_before_json_decode(self):
+        manager = make_manager()
+        response = _ChunkedResponse([b"12345"])
+
+        with patch.object(
+            ollama_manager_module, "MAX_OLLAMA_RESPONSE_BYTES", 4, create=True
+        ), patch.object(manager._session, "get", return_value=response):
+            result = manager._get("/api/version")
+
+        self.assertIn("error", result)
+        self.assertIn("exceeds", result["error"])
+        self.assertEqual(response.iter_content_calls[0]["chunk_size"], 8192)
+
+    def test_get_rejects_string_content_length_over_limit(self):
+        manager = make_manager()
+        response = _ChunkedResponse([b"{}"], headers={"Content-Length": "5"})
+
+        with patch.object(
+            ollama_manager_module, "MAX_OLLAMA_RESPONSE_BYTES", 4
+        ), patch.object(manager._session, "get", return_value=response):
+            result = manager._get("/api/version")
+
+        self.assertIn("exceeds", result["error"])
+
+    def test_stream_chat_rejects_oversized_ndjson_line(self):
+        manager = make_manager()
+        response = _ChunkedResponse([b"12345\n"])
+
+        with patch.object(
+            ollama_manager_module, "MAX_OLLAMA_STREAM_LINE_BYTES", 4, create=True
+        ), patch.object(manager._session, "post", return_value=response):
+            result = manager._stream_chat(
+                {"model": "m", "messages": [], "stream": True}
+            )
+
+        self.assertIn("error", result)
+        self.assertIn("line", result["error"])
+
+    def test_stream_chat_generator_rejects_total_stream_over_limit(self):
+        manager = make_manager()
+        response = _ChunkedResponse([b"{}\n{}\n"])
+
+        with patch.object(
+            ollama_manager_module, "MAX_OLLAMA_STREAM_BYTES", 4, create=True
+        ), patch.object(manager._session, "post", return_value=response):
+            result = list(manager.stream_chat_generator("m", []))
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0][1])
+        self.assertIn("exceeds", result[0][0])
 
 
 

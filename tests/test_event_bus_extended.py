@@ -1,5 +1,7 @@
 """Extended tests for event_bus.py - Iteration 44"""
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock
 
@@ -138,6 +140,60 @@ class TestEventBusPublish(unittest.TestCase):
         history = bus.get_history()
         self.assertEqual(len(history), 1)
 
+    def test_publish_preserves_supplied_event_source(self):
+        bus = EventBus()
+        event = Event(
+            event_type="plugin.worker.ready",
+            source="plugin:event-logger",
+            data={"ready": True},
+        )
+
+        bus.publish(event)
+
+        self.assertIs(bus.get_history()[-1], event)
+        self.assertEqual(bus.get_history()[-1].source, "plugin:event-logger")
+
+    def test_record_many_preserves_events_without_dispatching_subscribers(self):
+        bus = EventBus()
+        exact = MagicMock()
+        wildcard = MagicMock()
+        bus.subscribe("plugin.worker.ready", exact)
+        bus.subscribe("*", wildcard)
+        events = [
+            Event("plugin.worker.ready", "plugin:event-logger", {"index": 1}),
+            Event("plugin.worker.ready", "plugin:event-logger", {"index": 2}),
+        ]
+
+        self.assertTrue(bus.record_many(events))
+
+        history = bus.get_history()
+        self.assertEqual(history, events)
+        self.assertIs(history[0], events[0])
+        self.assertIs(history[1], events[1])
+        self.assertTrue(all(event.source == "plugin:event-logger" for event in history))
+        exact.assert_not_called()
+        wildcard.assert_not_called()
+
+    def test_record_many_deadline_and_lock_failure_record_nothing(self):
+        bus = EventBus()
+        existing = Event("system.ready", "test", {})
+        bus.publish(existing)
+        pending = [
+            Event("plugin.one", "plugin:event-logger", {"index": 1}),
+            Event("plugin.two", "plugin:event-logger", {"index": 2}),
+        ]
+
+        self.assertFalse(bus.record_many(pending, deadline=time.monotonic() - 1))
+        bus._lock.acquire()
+        try:
+            self.assertFalse(
+                bus.record_many(pending, deadline=time.monotonic() + 0.02)
+            )
+        finally:
+            bus._lock.release()
+
+        self.assertEqual(bus.get_history(), [existing])
+
 
 class TestEventBusHistory(unittest.TestCase):
     def test_get_history_empty(self):
@@ -178,6 +234,116 @@ class TestEventBusHistory(unittest.TestCase):
         bus.emit('t', 'data')
         bus.clear()
         self.assertEqual(bus.get_history(), [])
+
+
+class TestEventBusStateBoundaries(unittest.TestCase):
+    def test_concurrent_subscriptions_reserve_unique_ids(self):
+        class YieldingCounter(int):
+            def __add__(self, increment):
+                time.sleep(0.01)
+                return YieldingCounter(int(self) + increment)
+
+        bus = EventBus()
+        bus._sub_id_counter = YieldingCounter(0)
+        worker_count = 16
+        start = threading.Barrier(worker_count + 1)
+        subscription_ids = []
+
+        def subscribe():
+            start.wait(timeout=5)
+            subscription_ids.append(bus.subscribe("test", lambda event: None))
+
+        workers = [threading.Thread(target=subscribe) for _ in range(worker_count)]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=5)
+        for worker in workers:
+            worker.join(timeout=5)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(subscription_ids), worker_count)
+        self.assertEqual(len(set(subscription_ids)), worker_count)
+        self.assertEqual(bus.get_subscription_count(), worker_count)
+
+    def test_history_limit_is_an_exact_non_negative_integer(self):
+        bus = EventBus()
+        for index in range(3):
+            bus.emit("test", index)
+
+        self.assertEqual(bus.get_history(limit=0), [])
+        for invalid in (-1, True, 1.5):
+            with self.subTest(limit=invalid):
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    bus.get_history(limit=invalid)
+
+    def test_once_subscription_is_claimed_before_concurrent_callbacks(self):
+        bus = EventBus()
+        worker_count = 16
+        start = threading.Barrier(worker_count + 1)
+        callback_lock = threading.Lock()
+        callback_count = 0
+
+        def callback(event):
+            nonlocal callback_count
+            with callback_lock:
+                callback_count += 1
+            time.sleep(0.02)
+
+        bus.subscribe("test", callback, once=True)
+
+        workers = [
+            threading.Thread(
+                target=lambda: (start.wait(timeout=5), bus.emit("test")),
+            )
+            for _ in range(worker_count)
+        ]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=5)
+        for worker in workers:
+            worker.join(timeout=5)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(callback_count, 1)
+        self.assertEqual(bus.get_subscription_count(), 0)
+
+    def test_once_subscription_is_claimed_before_reentrant_emit(self):
+        bus = EventBus()
+        callback_count = 0
+
+        def callback(event):
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                bus.emit("test", "nested")
+
+        bus.subscribe("test", callback, once=True)
+        bus.emit("test", "outer")
+
+        self.assertEqual(callback_count, 1)
+        self.assertEqual(bus.get_subscription_count(), 0)
+
+    def test_wildcard_event_selects_wildcard_subscription_once(self):
+        bus = EventBus()
+        callback = MagicMock()
+        bus.subscribe("*", callback)
+
+        bus.emit("*", "payload")
+
+        callback.assert_called_once()
+
+    def test_unsubscribe_requires_an_exact_existing_integer_id(self):
+        bus = EventBus()
+        first_id = bus.subscribe("first", lambda event: None)
+        bus.subscribe("second", lambda event: None)
+
+        self.assertFalse(bus.unsubscribe(True))
+        self.assertFalse(bus.unsubscribe(1.0))
+        self.assertEqual(bus.get_subscription_count(), 2)
+        self.assertTrue(bus.unsubscribe(first_id))
+        self.assertFalse(bus.unsubscribe(first_id))
+        self.assertFalse(bus.unsubscribe(9999))
+        self.assertEqual(bus.get_subscription_count(), 1)
 
 
 class TestEventBusSubscriptionCount(unittest.TestCase):

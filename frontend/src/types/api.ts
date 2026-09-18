@@ -79,6 +79,10 @@ export interface GitStatus {
   count: number;
 }
 
+export interface GitBranches {
+  branches: string[];
+}
+
 export interface GitCommit {
   hash: string;
   author: string;
@@ -102,6 +106,60 @@ export interface PluginInfo {
   version: string;
   status: string;
   permissions: string[];
+}
+
+export type CapabilityKind = 'skill' | 'plugin' | 'role_tool' | 'ui_component';
+export type CapabilityLifecycle = 'discovered' | 'disabled' | 'enabled' | 'invalid';
+export type CapabilityCompatibilityStatus = 'unknown' | 'compatible' | 'incompatible';
+export type CapabilityProvenanceStatus = 'incomplete' | 'complete' | 'verified';
+export type CapabilityHealthStatus = 'healthy' | 'degraded' | 'invalid';
+export type CapabilityRiskLevel = 'low' | 'medium' | 'high';
+
+export interface CapabilityCompatibility {
+  constraints: Record<string, string>;
+  status: CapabilityCompatibilityStatus;
+  reasons: string[];
+}
+
+export interface CapabilityProvenance {
+  source_url: string | null;
+  license: string | null;
+  sha256: string | null;
+  status: CapabilityProvenanceStatus;
+}
+
+export interface CapabilityHealth {
+  status: CapabilityHealthStatus;
+  issues: string[];
+}
+
+export interface CapabilityRisk {
+  level: CapabilityRiskLevel;
+  reasons: string[];
+}
+
+export interface CapabilityRecord {
+  schema_version: 1;
+  capability_id: string;
+  kind: CapabilityKind;
+  name: string;
+  version: string | null;
+  description: string;
+  relative_path: string;
+  entrypoint: string | null;
+  lifecycle: CapabilityLifecycle;
+  permissions: string[];
+  compatibility: CapabilityCompatibility;
+  provenance: CapabilityProvenance;
+  health: CapabilityHealth;
+  risk: CapabilityRisk;
+}
+
+export interface CapabilityRegistryResponse {
+  schema_version: 1;
+  capabilities: CapabilityRecord[];
+  count: number;
+  issues: string[];
 }
 
 export interface EventInfo {

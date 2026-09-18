@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolveE2EPort } from './scripts/e2e-port.js';
+
+const e2ePort = resolveE2EPort();
+const e2eBaseURL = `http://127.0.0.1:${e2ePort}`;
 
 export default defineConfig({
   testDir: './e2e',
@@ -7,15 +11,17 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: e2eBaseURL,
     trace: 'retain-on-failure',
   },
-  webServer: {
-    command: 'npm run dev -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:5173',
-    reuseExistingServer: false,
-    timeout: 120_000,
-  },
+  webServer: process.env.JARVIS_EXTERNAL_E2E_SERVER === '1'
+    ? undefined
+    : {
+        command: `npm run dev -- --host 127.0.0.1 --port ${e2ePort} --strictPort`,
+        url: e2eBaseURL,
+        reuseExistingServer: false,
+        timeout: 120_000,
+      },
   projects: [
     {
       name: 'desktop',

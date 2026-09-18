@@ -13,10 +13,10 @@ Ollama 服务状态检测脚本 — 小奕 J.A.R.V.I.S.
     1 — 服务未启动
 """
 
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
 
 # 确保能导入项目模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "core", "kernel"))
@@ -84,7 +84,7 @@ def print_human_report(report: dict) -> None:
 
     # 服务状态
     if svc["running"]:
-        print(f"  状态    : 运行中")
+        print("  状态    : 运行中")
         print(f"  地址    : {svc['url']}")
         print(f"  版本    : {svc['version'] or '未知'}")
     else:
