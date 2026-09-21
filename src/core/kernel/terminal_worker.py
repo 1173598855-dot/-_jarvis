@@ -487,16 +487,16 @@ class TerminalWorker:
     def _spawn_isolated(self) -> tuple[subprocess.Popen[Any], bool]:
         sandbox, staged_source = self._ensure_os_sandbox()
         if self._os_sandbox_platform == "windows":
-            interpreter = Path(getattr(sandbox, "interpreter"))
+            interpreter = str(getattr(sandbox, "interpreter"))
             suspended = True
         elif self._os_sandbox_platform == "macos":
-            interpreter = Path(sys.executable)
+            interpreter = sys.executable
             suspended = False
         else:
             raise RuntimeError("Worker OS isolation platform is invalid")
         process = sandbox.spawn(
             [
-                str(interpreter),
+                interpreter,
                 "-S",
                 "-u",
                 "-m",
