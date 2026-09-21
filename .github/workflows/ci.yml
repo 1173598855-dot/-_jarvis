@@ -19,12 +19,15 @@ jobs:
 
   python-contracts:
     runs-on: ubuntu-latest
+    env:
+      TMPDIR: ${{ runner.temp }}/jarvis-python-tmp
     # Job-level backstop only. Both Python test steps below enforce their own
     # per-command deadlines, so a hang is reported with the offending test
     # instead of being truncated by this cap.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - run: mkdir -p "$TMPDIR" && chmod 700 "$TMPDIR"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
