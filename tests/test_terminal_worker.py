@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -659,9 +659,12 @@ class TestTerminalWorker(unittest.TestCase):
             os.environ,
             {"TEMP": "C:\\virtual-temp", "TMPDIR": "C:\\authorized-temp"},
             clear=True,
+        ), patch(
+            "core.kernel.terminal_worker.Path",
+            side_effect=PureWindowsPath,
         ):
             self.assertEqual(
-                _worker_sandbox_path(), Path("C:\\authorized-temp")
+                _worker_sandbox_path(), PureWindowsPath("C:\\authorized-temp")
             )
 
     def test_worker_child_drops_identity_after_os_isolation(self):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import posixpath
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -57,6 +58,7 @@ def _seatbelt_literal(path: str | Path) -> str:
 def macos_sandbox_profile(
     read_paths: tuple[str | Path, ...],
     writable_root: str | Path,
+    executable_path: str | Path | None = None,
 ) -> str:
     """Build a default-deny profile with bounded reads and one write root."""
     if not isinstance(read_paths, tuple):
@@ -77,6 +79,10 @@ def macos_sandbox_profile(
         for path in unique_reads
     )
     lines.append(f"(allow file-write* (subpath {_seatbelt_literal(writable)}))")
+    if executable_path is not None:
+        lines.append(
+            f"(allow process-exec (literal {_seatbelt_literal(executable_path)}))"
+        )
     lines.extend(
         (
             "(allow process-fork)",
@@ -138,7 +144,9 @@ class MacOSSandbox:
                 else runtime_read_paths
             )
             profile = macos_sandbox_profile(
-                tuple(paths) + (code_root,), writable_root
+                tuple(paths) + (code_root,),
+                writable_root,
+                executable_path=sys.executable,
             )
             return cls(
                 root=root,

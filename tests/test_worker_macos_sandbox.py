@@ -34,8 +34,21 @@ class TestMacOSSandboxContract(unittest.TestCase):
             '(allow file-write* (subpath "/private/tmp/jarvis-worker"))',
             profile,
         )
+        self.assertNotIn("process-exec", profile)
         self.assertNotIn("network-outbound", profile)
         self.assertNotIn("network-inbound", profile)
+
+        executable_profile = macos_sandbox_profile(
+            read_paths=(PurePosixPath("/Library/Frameworks/Python.framework"),),
+            writable_root=PurePosixPath("/private/tmp/jarvis-worker"),
+            executable_path=PurePosixPath(
+                "/Library/Frameworks/Python.framework/Versions/3.11/bin/python"
+            ),
+        )
+        self.assertIn(
+            '(allow process-exec (literal "/Library/Frameworks/Python.framework/Versions/3.11/bin/python"))',
+            executable_profile,
+        )
 
     def test_profile_escapes_seatbelt_literals_and_rejects_invalid_paths(self) -> None:
         profile = macos_sandbox_profile(

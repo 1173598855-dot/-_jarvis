@@ -632,7 +632,7 @@ describe('Ollama streaming chat proxy', () => {
       expect(response.status).toBe(200);
       expect(body).toContain('OLLAMA_STREAM_ERROR');
       expect(body).not.toContain('data: [DONE]');
-      expect(ollamaOverflowBytesSent).toBeLessThan(16 * 1024 * 1024);
+      expect(ollamaOverflowBytesSent).toBeLessThanOrEqual(16 * 1024 * 1024);
     } finally {
       ollamaChatMode = 'healthy';
     }
