@@ -617,7 +617,8 @@ class RoleWorkerSupervisor:
                 if not self._process_is_alive(runtime):
                     self._join_process(runtime, timeout=0)
                     while self._connection_ready(runtime.connection):
-                        self._receive_event(task_id, runtime)
+                        if not self._receive_event(task_id, runtime):
+                            break
                     with self._lock:
                         pending = runtime.pending_event
                         record = self._records.get(task_id)
@@ -668,19 +669,20 @@ class RoleWorkerSupervisor:
         finally:
             self._cleanup_runtime(task_id)
 
-    def _receive_event(self, task_id: str, runtime: _TaskRuntime) -> None:
+    def _receive_event(self, task_id: str, runtime: _TaskRuntime) -> bool:
         try:
             max_event_bytes = (
                 self._max_output_bytes + MAX_WORKER_EVENT_OVERHEAD_BYTES
             )
             raw_event = runtime.connection.recv_bytes(max_event_bytes + 1)
             if len(raw_event) > max_event_bytes:
-                return
+                return False
             payload = json.loads(raw_event.decode("utf-8"))
             event = WorkerEvent.from_dict(payload)
         except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            return
+            return False
         self._accept_event(task_id, event)
+        return True
 
     @staticmethod
     def _connection_ready(connection: Connection, timeout: float = 0.0) -> bool:
