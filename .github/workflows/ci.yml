@@ -20,7 +20,7 @@ jobs:
   python-contracts:
     runs-on: ubuntu-latest
     env:
-      TMPDIR: ${{ runner.temp }}/jarvis-python-tmp
+      TMPDIR: ${{ github.workspace }}/.test-python-tmp
     # Job-level backstop only. Both Python test steps below enforce their own
     # per-command deadlines, so a hang is reported with the offending test
     # instead of being truncated by this cap.
