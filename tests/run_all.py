@@ -586,6 +586,7 @@ def _run_suite(
     json_report: str = "",
     title: str = "",
     abandon_on_timeout: bool = False,
+    run_in_main_thread: bool = False,
 ):
     timeout_expired = threading.Event()
     result_holder = {}
@@ -598,14 +599,22 @@ def _run_suite(
     def run_suite():
         result_holder["result"] = unittest.TextTestRunner(verbosity=2).run(suite)
 
-    # The worker is a daemon so a wedged test cannot keep the interpreter alive
-    # after the deadline. Without this, a timeout returned an exit code the
-    # process could not act on until the hung test finally finished.
-    thread = threading.Thread(target=run_suite, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout if timeout > 0 else None)
+    if run_in_main_thread:
+        # multiprocessing spawn is not reliable when the parent test suite is
+        # running from a daemon thread on Linux CI. The CI job has its own
+        # process-level deadline, so keep the full suite on the main thread.
+        run_suite()
+        thread = None
+    else:
+        # The worker is a daemon so a wedged test cannot keep the interpreter
+        # alive after the deadline. Without this, a timeout returned an exit
+        # code the process could not act on until the hung test finally
+        # finished.
+        thread = threading.Thread(target=run_suite, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout if timeout > 0 else None)
 
-    if thread.is_alive():
+    if thread is not None and thread.is_alive():
         timeout_expired.set()
         print(f"\nTimeout: {timeout}s exceeded")
         _write_report(json_report, {
@@ -699,6 +708,10 @@ def main(argv=None) -> int:
         json_report=arguments.json_report,
         title=title,
         abandon_on_timeout=True,
+        run_in_main_thread=(
+            os.environ.get("JARVIS_RUN_SUITE_IN_MAIN_THREAD", "").casefold()
+            == "1"
+        ),
     )
 
 

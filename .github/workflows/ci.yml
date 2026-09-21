@@ -38,6 +38,8 @@ jobs:
       - run: npm ci
         working-directory: frontend
       - run: python tests/run_all.py --timeout 1800 --json-report run-all-report.json
+        env:
+          JARVIS_RUN_SUITE_IN_MAIN_THREAD: "1"
       - run: python scripts/discover_tests.py --timeout 1800 --json-report discover-report.json
       - run: python -m compileall -q src tests scripts
       - run: python scripts/ci_local_integration.py --require-services --overall-timeout 900  # uses scripts/local_ollama_fixture.py
