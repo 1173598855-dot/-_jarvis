@@ -78,10 +78,15 @@ class TestPluginWorkerEntrypoint(unittest.TestCase):
         expected_root = self.plugin_root.resolve()
         with patch.object(sys, "argv", ["plugin_worker.py", "--plugin-root", str(expected_root)]):
             with patch.object(sys, "path", list(sys.path)):
-                with patch("runtime.plugin_worker.PluginWorkerServer") as server:
-                    server.return_value.serve.return_value = 0
+                with patch(
+                    "runtime.plugin_worker.apply_worker_resource_limits"
+                ), patch(
+                    "runtime.plugin_worker.isolate_worker_network"
+                ), patch("runtime.plugin_worker.isolate_worker_filesystem"):
+                    with patch("runtime.plugin_worker.PluginWorkerServer") as server:
+                        server.return_value.serve.return_value = 0
 
-                    self.assertEqual(main(), 0)
+                        self.assertEqual(main(), 0)
 
         self.assertEqual(server.call_args.args[3], expected_root)
 
@@ -111,7 +116,11 @@ class TestPluginWorkerEntrypoint(unittest.TestCase):
                     "runtime.plugin_worker.apply_worker_resource_limits",
                     side_effect=lambda: order.append("limits"),
                 ):
-                    with patch("runtime.plugin_worker.PluginWorkerServer") as server:
+                    with patch(
+                        "runtime.plugin_worker.isolate_worker_network"
+                    ), patch(
+                        "runtime.plugin_worker.isolate_worker_filesystem"
+                    ), patch("runtime.plugin_worker.PluginWorkerServer") as server:
                         server.return_value.serve.side_effect = lambda: (
                             order.append("serve"),
                             0,
@@ -151,7 +160,9 @@ class TestPluginWorkerEntrypoint(unittest.TestCase):
                         "runtime.plugin_worker.isolate_worker_network",
                         side_effect=lambda: order.append("network"),
                     ):
-                        with patch("runtime.plugin_worker.PluginWorkerServer") as server:
+                        with patch(
+                            "runtime.plugin_worker.isolate_worker_filesystem"
+                        ), patch("runtime.plugin_worker.PluginWorkerServer") as server:
                             server.return_value.serve.side_effect = lambda: (
                                 order.append("serve"),
                                 0,
@@ -170,7 +181,7 @@ class TestPluginWorkerEntrypoint(unittest.TestCase):
                 with patch(
                     "runtime.plugin_worker.isolate_worker_filesystem",
                     side_effect=WorkerFilesystemIsolationError("denied"),
-                ):
+                ), patch("runtime.plugin_worker.isolate_worker_network"):
                     with patch("runtime.plugin_worker.PluginWorkerServer") as server:
                         self.assertEqual(main(), 2)
 
