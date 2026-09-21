@@ -34,6 +34,10 @@ class TestMacOSSandboxContract(unittest.TestCase):
             '(allow file-write* (subpath "/private/tmp/jarvis-worker"))',
             profile,
         )
+        self.assertIn(
+            '(allow file-map-executable (subpath "/Library/Frameworks/Python.framework"))',
+            profile,
+        )
         self.assertNotIn("process-exec", profile)
         self.assertNotIn("network-outbound", profile)
         self.assertNotIn("network-inbound", profile)

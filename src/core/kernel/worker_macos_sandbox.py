@@ -70,6 +70,7 @@ def macos_sandbox_profile(
         if normalized not in seen:
             seen.add(normalized)
             unique_reads.append(normalized)
+    runtime_paths = tuple(unique_reads)
     writable = _seatbelt_path(writable_root)
     if writable not in seen:
         unique_reads.append(writable)
@@ -77,6 +78,10 @@ def macos_sandbox_profile(
     lines.extend(
         f"(allow file-read* (subpath {_seatbelt_literal(path)}))"
         for path in unique_reads
+    )
+    lines.extend(
+        f"(allow file-map-executable (subpath {_seatbelt_literal(path)}))"
+        for path in runtime_paths
     )
     lines.append(f"(allow file-write* (subpath {_seatbelt_literal(writable)}))")
     if executable_path is not None:
