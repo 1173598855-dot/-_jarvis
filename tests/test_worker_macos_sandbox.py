@@ -46,7 +46,7 @@ class TestMacOSSandboxContract(unittest.TestCase):
             ),
         )
         self.assertIn(
-            '(allow process-exec (subpath "/Library/Frameworks/Python.framework/Versions/3.11/bin"))',
+            '(allow process-exec (literal "/Library/Frameworks/Python.framework/Versions/3.11/bin/python"))',
             executable_profile,
         )
 

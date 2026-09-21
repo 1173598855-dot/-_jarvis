@@ -80,10 +80,8 @@ def macos_sandbox_profile(
     )
     lines.append(f"(allow file-write* (subpath {_seatbelt_literal(writable)}))")
     if executable_path is not None:
-        executable = _seatbelt_path(executable_path)
-        executable_parent = posixpath.dirname(executable)
         lines.append(
-            f"(allow process-exec (subpath {_seatbelt_literal(executable_parent)}))"
+            f"(allow process-exec (literal {_seatbelt_literal(executable_path)}))"
         )
     lines.extend(
         (
@@ -148,7 +146,7 @@ class MacOSSandbox:
             profile = macos_sandbox_profile(
                 tuple(paths) + (code_root,),
                 writable_root,
-                executable_path=sys.executable,
+                executable_path=str(Path(sys.executable).resolve()),
             )
             return cls(
                 root=root,
