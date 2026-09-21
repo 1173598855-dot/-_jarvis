@@ -25,6 +25,18 @@ WORKER_MACOS_SANDBOX = (
     "staged-readonly-code",
     "writable-root",
 )
+_MACOS_SYSTEM_READ_PATHS = (
+    "/usr/lib",
+    "/System/Library",
+    "/Library/Frameworks",
+)
+_MACOS_STANDARD_IO = (
+    "/dev/null",
+    "/dev/urandom",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+)
 
 
 class WorkerMacOSSandboxError(RuntimeError):
@@ -82,6 +94,18 @@ def macos_sandbox_profile(
     lines.extend(
         f"(allow file-map-executable (subpath {_seatbelt_literal(path)}))"
         for path in runtime_paths
+    )
+    lines.extend(
+        f"(allow file-read* (literal {_seatbelt_literal(path)}))"
+        for path in _MACOS_STANDARD_IO
+    )
+    lines.extend(
+        f"(allow file-write* (literal {_seatbelt_literal(path)}))"
+        for path in _MACOS_STANDARD_IO
+    )
+    lines.append(
+        '(allow mach-lookup (global-name "com.apple.system.logger") '
+        '(global-name "com.apple.system.notification_center"))'
     )
     lines.append(f"(allow file-write* (subpath {_seatbelt_literal(writable)}))")
     if executable_path is not None:
@@ -149,7 +173,7 @@ class MacOSSandbox:
                 else runtime_read_paths
             )
             profile = macos_sandbox_profile(
-                tuple(paths) + (code_root,),
+                tuple(_MACOS_SYSTEM_READ_PATHS) + tuple(paths) + (code_root,),
                 writable_root,
                 executable_path=str(Path(sys.executable).resolve()),
             )

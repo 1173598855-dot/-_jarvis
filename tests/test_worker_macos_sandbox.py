@@ -38,6 +38,11 @@ class TestMacOSSandboxContract(unittest.TestCase):
             '(allow file-map-executable (subpath "/Library/Frameworks/Python.framework"))',
             profile,
         )
+        self.assertIn(
+            '(allow mach-lookup (global-name "com.apple.system.logger") '
+            '(global-name "com.apple.system.notification_center"))',
+            profile,
+        )
         self.assertNotIn("process-exec", profile)
         self.assertNotIn("network-outbound", profile)
         self.assertNotIn("network-inbound", profile)
