@@ -481,7 +481,7 @@ class TerminalWorker:
             except BaseException:
                 self._cleanup_os_sandbox_unlocked()
                 raise
-            self._staged_source = Path(staged_source)
+            self._staged_source = staged_source
             return sandbox, self._staged_source
 
     def _spawn_isolated(self) -> tuple[subprocess.Popen[Any], bool]:
