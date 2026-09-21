@@ -554,6 +554,10 @@ class TestTerminalWorker(unittest.TestCase):
                 "core.kernel.terminal_worker.apply_worker_resource_limits",
                 side_effect=lambda: order.append("limits"),
             ), patch(
+                "core.kernel.terminal_worker.isolate_worker_network"
+            ), patch(
+                "core.kernel.terminal_worker.isolate_worker_filesystem"
+            ), patch(
                 "core.kernel.terminal_worker._read_worker_request",
                 side_effect=lambda: (order.append("request"), {
                     "command_id": "budget",
