@@ -659,7 +659,7 @@ class TestTerminalWorker(unittest.TestCase):
                 self.assertEqual(_worker_main(), 0)
                 self.assertEqual(
                     __import__("tempfile").tempdir,
-                    str(sandbox),
+                    None,
                 )
         finally:
             stdin.detach()

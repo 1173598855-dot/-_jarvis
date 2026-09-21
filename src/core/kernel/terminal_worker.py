@@ -218,6 +218,7 @@ def _worker_main() -> int:
     """Read one request from stdin, execute it, and emit one JSON response."""
     request: object = None
     executor: TerminalExecutor | None = None
+    previous_tempdir = tempfile.tempdir
     try:
         apply_worker_resource_limits()
         isolate_worker_network()
@@ -285,6 +286,7 @@ def _worker_main() -> int:
     finally:
         if executor is not None:
             executor.close()
+        tempfile.tempdir = previous_tempdir
 
 
 class TerminalWorker:
