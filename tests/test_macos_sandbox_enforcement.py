@@ -20,8 +20,10 @@ from core.kernel.worker_windows_isolation import (
 
 
 @unittest.skipUnless(
-    sys.platform == "darwin" and shutil.which("sandbox-exec"),
-    "real Seatbelt enforcement requires macOS sandbox-exec",
+    sys.platform == "darwin"
+    and shutil.which("sandbox-exec")
+    and os.environ.get("GITHUB_ACTIONS", "").casefold() != "true",
+    "real Seatbelt enforcement requires a non-hosted macOS sandbox-exec runner",
 )
 class TestMacOSSandboxEnforcement(unittest.TestCase):
     def test_seatbelt_denies_ungranted_read_and_loopback_but_allows_worker_root(

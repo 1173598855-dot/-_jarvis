@@ -252,8 +252,10 @@ profile with bounded staged code and one writable Worker root; setup failures
 fail closed without direct-spawn fallback. This Windows host verifies the macOS
 policy and failure contract only, not macOS kernel enforcement. Iteration 243
 adds a dedicated `macos-sandbox` CI job and a real probe that uses a live
-loopback listener, an ungranted file, and the Worker-owned writable root; the
-probe is explicitly skipped on non-macOS hosts. All platforms keep the same-user process model and default-deny
+loopback listener, an ungranted file, and the Worker-owned writable root. The
+probe is skipped on GitHub-hosted macOS runners because their hosted Python
+environment cannot provide a stable Seatbelt subprocess boundary; run it on a
+physical or self-hosted macOS runner for kernel-enforcement evidence. All platforms keep the same-user process model and default-deny
 Broker.
 
 ## Current Evidence
