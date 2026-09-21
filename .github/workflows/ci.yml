@@ -18,7 +18,9 @@ jobs:
       - run: python -m ruff check src/ tests/ scripts/
 
   python-contracts:
-    runs-on: ubuntu-latest
+    # The aggregate suite exercises the parent-owned Windows worker path. Linux
+    # namespace/Landlock evidence runs independently in linux-sandbox below.
+    runs-on: windows-latest
     # Job-level backstop only. Both Python test steps below enforce their own
     # per-command deadlines, so a hang is reported with the offending test
     # instead of being truncated by this cap.

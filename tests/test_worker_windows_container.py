@@ -195,17 +195,25 @@ class TestWindowsContainerContract(unittest.TestCase):
                 captured.update(kwargs)
                 return _FakeProcess()
 
-            process = container.spawn(
-                ["python.exe", "worker.py"],
-                cwd=root,
-                environment={"PATH": "C:\\Windows"},
-                popen=fake_popen,
-            )
+            with patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": r"C:\Users\worker\AppData\Local"},
+                clear=False,
+            ):
+                process = container.spawn(
+                    ["python.exe", "worker.py"],
+                    cwd=root,
+                    environment={"PATH": "C:\\Windows"},
+                    popen=fake_popen,
+                )
 
         self.assertIsInstance(process, _FakeProcess)
         self.assertEqual(captured["arguments"], ["python.exe", "worker.py"])
         self.assertIs(captured["app_container_sid"], identity.sid)
-        self.assertEqual(captured["env"]["LOCALAPPDATA"], os.environ["LOCALAPPDATA"])
+        self.assertEqual(
+            captured["env"]["LOCALAPPDATA"],
+            r"C:\Users\worker\AppData\Local",
+        )
 
 
 if __name__ == "__main__":
