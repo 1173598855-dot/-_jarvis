@@ -108,7 +108,7 @@ class _FakeTerminalSandbox:
         self.writable_root = self.root / "tmp"
         self.code_root.mkdir()
         self.writable_root.mkdir()
-        self.interpreter = Path("C:/Python/python.exe")
+        self.interpreter = PureWindowsPath("C:/Python/python.exe")
         self.stages: list[tuple[Path, str]] = []
         self.spawn_calls: list[dict[str, object]] = []
         self.processes: list[_IsolatedWorkerProcess] = []
@@ -182,6 +182,17 @@ def _load_http_main():
 
 
 class TestTerminalWorker(unittest.TestCase):
+    def setUp(self):
+        self._worker_tmpdir_patch = patch.dict(
+            os.environ,
+            {"TMPDIR": tempfile.gettempdir()},
+            clear=False,
+        )
+        self._worker_tmpdir_patch.start()
+
+    def tearDown(self):
+        self._worker_tmpdir_patch.stop()
+
     def test_explicit_os_isolation_false_overrides_injected_platform_factory(self):
         worker = TerminalWorker(
             os_isolation=False,
