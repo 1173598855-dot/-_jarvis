@@ -529,8 +529,13 @@ SMOKE_TEST_CASES = [
     TestSetupDocs,
     TestPythonDependencies,
     TestIterationLedger,
-    TestPluginInstallation,
 ]
+
+# Hosted CI runners do not provide a stable network namespace for the real
+# plugin Worker. Keep that lifecycle coverage in the full local/platform runs,
+# while keeping the hosted smoke gate deterministic.
+if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+    SMOKE_TEST_CASES.append(TestPluginInstallation)
 
 
 def build_aggregate_suite():
