@@ -1,6 +1,13 @@
 import {
   Chart,
-  registerables,
+  CategoryScale,
+  Filler,
+  Legend,
+  LinearScale,
+  LineController,
+  LineElement,
+  PointElement,
+  Tooltip,
   type ChartDataset,
   type TooltipItem,
 } from 'chart.js';
@@ -11,7 +18,16 @@ import {
   type Component,
 } from 'solid-js';
 
-Chart.register(...registerables);
+Chart.register(
+  CategoryScale,
+  Filler,
+  Legend,
+  LinearScale,
+  LineController,
+  LineElement,
+  PointElement,
+  Tooltip,
+);
 
 interface ChartDatasetInput {
   label: string;

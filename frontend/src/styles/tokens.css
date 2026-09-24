@@ -22,6 +22,8 @@
   --radius-lg: 8px;
   --shadow-overlay: 0 20px 48px rgba(0, 0, 0, 0.42);
   --duration-fast: 140ms;
+  --duration-standard: 220ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* Compatibility aliases removed with the legacy Widget stylesheet. */
   --bg: var(--color-bg);

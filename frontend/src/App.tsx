@@ -34,7 +34,14 @@ export const App: Component = () => {
   const [activeView, setActiveView] = createSignal<ViewId>('chat');
 
   const view = () => (
-    <Suspense fallback={<div class="view-loading" aria-label="正在加载视图" />}>
+    <Suspense fallback={(
+      <div class="view-loading" role="status" aria-label="正在加载视图" aria-busy="true">
+        <div class="view-loading__heading"><span /><span /></div>
+        <div class="view-loading__body">
+          <span /><span /><span /><span />
+        </div>
+      </div>
+    )}>
       <Switch>
         <Match when={activeView() === 'chat'}><ChatView /></Match>
         <Match when={activeView() === 'runtime'}><RuntimeView /></Match>

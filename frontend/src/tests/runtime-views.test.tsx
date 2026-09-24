@@ -53,7 +53,18 @@ vi.mock('chart.js', () => {
     destroy = chartMocks.destroy;
   }
 
-  return { Chart: ChartMock, registerables: [] };
+  const component = {};
+  return {
+    CategoryScale: component,
+    Filler: component,
+    Legend: component,
+    LinearScale: component,
+    LineController: component,
+    LineElement: component,
+    PointElement: component,
+    Tooltip: component,
+    Chart: ChartMock,
+  };
 });
 
 const UPDATED_AT = 1_700_000_000_000;

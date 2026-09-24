@@ -5,13 +5,13 @@ import RotateCcw from 'lucide-solid/icons/rotate-ccw';
 import Send from 'lucide-solid/icons/send';
 import Square from 'lucide-solid/icons/square';
 import Trash2 from 'lucide-solid/icons/trash-2';
-import remarkGfm from 'remark-gfm';
-import { SolidMarkdown } from 'solid-markdown';
 import {
   For,
   Show,
+  Suspense,
   createMemo,
   createSignal,
+  lazy,
   onCleanup,
   onMount,
 } from 'solid-js';
@@ -22,6 +22,10 @@ import type { ChatMessage } from '../services/chat-stream';
 import { streamChat } from '../services/chat-stream';
 import { jarvisApi } from '../services/jarvis-api';
 import type { OllamaModel } from '../types/api';
+
+const MarkdownContent = lazy(() => import('../components/MarkdownContent').then((module) => ({
+  default: module.MarkdownContent,
+})));
 
 interface ViewMessage extends ChatMessage {
   id: number;
@@ -260,12 +264,9 @@ export function ChatView() {
                   <Show when={message.content} fallback={<span class="chat-cursor" aria-label="正在生成" />}>
                     {message.role === 'assistant'
                       ? (
-                        <SolidMarkdown
-                          children={message.content}
-                          renderingStrategy="reconcile"
-                          remarkPlugins={[remarkGfm]}
-                          skipHtml
-                        />
+                        <Suspense fallback={<p>{message.content}</p>}>
+                          <MarkdownContent content={message.content} />
+                        </Suspense>
                       )
                       : <p>{message.content}</p>}
                   </Show>

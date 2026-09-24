@@ -20,11 +20,12 @@ export function IconButton(props: IconButtonProps) {
 
   return (
     <Tooltip.Root openDelay={350} closeDelay={0}>
-      <Tooltip.Trigger
-        as="button"
+       <Tooltip.Trigger
+         as="button"
         type="button"
         class={`icon-button icon-button--${props.variant || 'default'} ${props.class || ''}`}
         aria-label={props.label}
+        disabled={props.disabled}
         aria-disabled={props.disabled || undefined}
         onClick={handleClick}
       >
