@@ -82,6 +82,15 @@ from core.brain.role_worker import (
     apply_worker_token_usage,
     execute_role_task,
 )
+from core.brain.workflow_dag import (
+    FailurePolicy,
+    Workflow,
+    WorkflowEngine,
+    WorkflowExecutionError,
+    WorkflowNode,
+    WorkflowValidationError,
+    workflow_from_dict,
+)
 from core.contracts.worker_protocol import WorkerTaskRequest, WorkerTaskStatus
 from core.kernel.capability_api import (
     CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
@@ -1217,9 +1226,13 @@ def _validate_role_timeout(timeout: object) -> int:
     return timeout
 
 
-def _role_dispatch_http_error(code: str, message: str) -> HTTPException:
+def _role_dispatch_http_error(
+    code: str,
+    message: str,
+    status_code: int = 503,
+) -> HTTPException:
     return HTTPException(
-        status_code=503,
+        status_code=status_code,
         detail={"code": code, "message": message},
     )
 
@@ -1486,6 +1499,85 @@ async def batch_dispatch(request: Request):
         tasks,
     )
     return {"results": [r.to_dict() for r in results], "count": len(results)}
+
+
+@app.post("/api/workflows/run")
+async def run_workflow(request: Request):
+    """Validate and execute a dependency-ordered workflow DAG.
+
+    Nodes are dispatched through the same role dispatch service the single
+    task routes use; this route adds scheduling only.
+    """
+    data = await _read_role_body(request)
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "workflow body must be a JSON object",
+            },
+        )
+
+    raw_policy = data.get("failure_policy", FailurePolicy.FAIL_FAST.value)
+    try:
+        failure_policy = FailurePolicy(raw_policy)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "failure_policy must be 'fail_fast' or 'continue'",
+            },
+        ) from None
+
+    max_parallelism = data.get("max_parallelism", 4)
+    if (
+        isinstance(max_parallelism, bool)
+        or not isinstance(max_parallelism, int)
+        or not 1 <= max_parallelism <= 16
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "max_parallelism must be an integer between 1 and 16",
+            },
+        )
+
+    try:
+        workflow = workflow_from_dict(data.get("workflow", data))
+    except WorkflowValidationError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_WORKFLOW", "message": str(error)},
+        ) from None
+
+    def _dispatch(node: WorkflowNode):
+        result = state.role_dispatch.dispatch_by_role(
+            node.agent_name,
+            node.prompt,
+            node.timeout,
+        )
+        if result.status == "no_role":
+            raise WorkflowValidationError(
+                f"role '{node.agent_name}' is not registered"
+            )
+        return result.to_dict()
+
+    engine = WorkflowEngine(
+        _dispatch,
+        max_parallelism=max_parallelism,
+        failure_policy=failure_policy,
+    )
+    try:
+        run_result = await asyncio.to_thread(engine.run, workflow)
+    except WorkflowExecutionError as error:
+        raise _role_dispatch_http_error(
+            "WORKFLOW_FAILED",
+            str(error),
+            status_code=502,
+        ) from None
+    return run_result.to_dict()
 
 
 def create_app(app_state: Optional[AppState] = None) -> FastAPI:

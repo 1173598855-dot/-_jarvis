@@ -9,6 +9,7 @@ Iteration 230-239 已原样移入 [archive/](archive/)，没有从历史台账�
 
 | 文档 | 说明 |
 |---|---|
+| [AUDIT_REPORT_250.md](AUDIT_REPORT_250.md) | Dependency-aware workflow DAG scheduler |
 | [AUDIT_REPORT_249.md](AUDIT_REPORT_249.md) | Bounded provenance-aware memory search |
 | [AUDIT_REPORT_248.md](AUDIT_REPORT_248.md) | Production Linux Terminal Worker kernel-enforcement evidence |
 | [AUDIT_REPORT_247.md](AUDIT_REPORT_247.md) | Locale-independent discovery fixture diagnostics |

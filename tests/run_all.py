@@ -166,6 +166,11 @@ from test_worker_windows_isolation import (
     TestWindowsIsolationContract,
     TestWindowsIsolationRealEnforcement,
 )
+from test_workflow_dag import (
+    TestWorkflowEngine,
+    TestWorkflowFromDict,
+    TestWorkflowValidation,
+)
 
 from core.brain.context_compressor import ContextCompressor, MemoryEntry, MemoryStore, MemoryType
 from core.brain.role_registry import AgentProfile, RoleRegistry, create_default_registry
@@ -468,6 +473,9 @@ AGGREGATE_TEST_CASES = [
     TestWindowsIsolationRealEnforcement,
     TestWindowsContainerContract,
     TestRoleWorkerSupervisor,
+    TestWorkflowValidation,
+    TestWorkflowEngine,
+    TestWorkflowFromDict,
     TestBoundedJsonReader,
     TestCliJsonLimits,
     TestRoleDispatchServiceSelectionAndMapping,

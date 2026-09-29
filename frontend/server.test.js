@@ -346,6 +346,7 @@ beforeAll(async () => {
         req.url === '/api/roles/dispatch'
         || req.url === '/api/roles/dispatch_by_cap'
         || req.url === '/api/roles/batch_dispatch'
+        || req.url === '/api/workflows/run'
       )
     ) {
       let body = '';
@@ -941,6 +942,39 @@ describe('Core API bridge', () => {
       tasks: [{ role: 'engineer', prompt: 'task' }],
     });
     await expect(batch.json()).resolves.toEqual({ results: [], count: 0 });
+  });
+
+  test('proxies a workflow DAG run to the Core role surface', async () => {
+    const workflow = {
+      workflow_id: 'wf-1',
+      nodes: [
+        { node_id: 'a', agent_name: 'engineer', prompt: 'first' },
+        { node_id: 'b', agent_name: 'reviewer', prompt: 'second', depends_on: ['a'] },
+      ],
+    };
+    const response = await fetch(
+      `http://127.0.0.1:${apiPort}/api/workflows/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow, max_parallelism: 2 }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(coreRoleUrl).toBe('/api/workflows/run');
+    expect(coreRoleBody).toEqual({ workflow, max_parallelism: 2 });
+  });
+
+  test('rejects a workflow body whose nodes are not an array', async () => {
+    const response = await fetch(
+      `http://127.0.0.1:${apiPort}/api/workflows/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow: { workflow_id: 'wf', nodes: {} } }),
+      },
+    );
+    expect(response.status).toBe(400);
   });
 
   test('keeps synchronous role requests alive beyond the default Core timeout with fake timers', async () => {

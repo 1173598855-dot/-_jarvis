@@ -227,6 +227,22 @@ describe('RuntimeView', () => {
     expect(screen.getByTestId('runtime-metric-cpu').textContent).toContain('不可用');
     expect(screen.queryByText('0%')).toBeNull();
   });
+
+  it('feeds bounded timestamped samples into system trend charts', async () => {
+    const { resources } = readyResources();
+    renderWithResources(() => <RuntimeView />, resources);
+    await Promise.resolve();
+
+    expect(chartMocks.configs[0].data.labels).toEqual([
+      new Date(UPDATED_AT).toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }),
+    ]);
+    expect(chartMocks.configs[0].data.datasets[0].data).toEqual([17.4]);
+  });
 });
 
 describe('ModelsView', () => {

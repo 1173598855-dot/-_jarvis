@@ -864,6 +864,44 @@ app.post('/api/roles/batch_dispatch', async (req, res) => {
   });
 });
 
+function workflowProxyTimeoutMs(workflow, maxParallelism) {
+  const nodes = Array.isArray(workflow?.nodes) ? workflow.nodes : [];
+  const parallelism = (
+    Number.isSafeInteger(maxParallelism) && maxParallelism >= 1
+  ) ? Math.min(maxParallelism, 16) : 1;
+  let totalMs = 0;
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      continue;
+    }
+    const timeout = (
+      typeof node.timeout === 'number'
+      && Number.isSafeInteger(node.timeout)
+      && node.timeout >= 1
+      && node.timeout <= 300
+    ) ? node.timeout : 300;
+    totalMs = Math.min(totalMs + timeout * 1000, MAX_TIMER_MS);
+  }
+  const wallClockMs = Math.ceil(totalMs / parallelism) + ROLE_WORKER_GRACE_MS;
+  return Math.min(wallClockMs, MAX_TIMER_MS);
+}
+
+app.post('/api/workflows/run', async (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return sendApiError(res, 400, 'INVALID_REQUEST', 'Request body must be a JSON object');
+  }
+  const workflow = req.body.workflow ?? req.body;
+  if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) {
+    return sendApiError(res, 400, 'INVALID_REQUEST', 'workflow must be a JSON object');
+  }
+  if (workflow.nodes !== undefined && !Array.isArray(workflow.nodes)) {
+    return sendApiError(res, 400, 'INVALID_REQUEST', 'workflow.nodes must be an array');
+  }
+  await proxyCoreRequest(req, res, 'roles', {
+    timeoutMs: workflowProxyTimeoutMs(workflow, req.body.max_parallelism),
+  });
+});
+
 for (const action of ['load', 'enable', 'disable']) {
   app.post(`/api/plugins/${action}`, async (req, res) => {
     await proxyCoreRequest(req, res, 'plugins', {

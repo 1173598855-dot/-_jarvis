@@ -264,9 +264,13 @@ export function ChatView() {
                   <Show when={message.content} fallback={<span class="chat-cursor" aria-label="正在生成" />}>
                     {message.role === 'assistant'
                       ? (
-                        <Suspense fallback={<p>{message.content}</p>}>
-                          <MarkdownContent content={message.content} />
-                        </Suspense>
+                        message.streaming
+                          ? <p class="chat-message__streaming-text">{message.content}</p>
+                          : (
+                            <Suspense fallback={<p>{message.content}</p>}>
+                              <MarkdownContent content={message.content} />
+                            </Suspense>
+                          )
                       )
                       : <p>{message.content}</p>}
                   </Show>

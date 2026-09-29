@@ -177,4 +177,24 @@ describe('ChatView', () => {
     const code = await screen.findByText('npm run build');
     expect(code.tagName).toBe('CODE');
   });
+
+  it('keeps streaming text lightweight until the response completes', async () => {
+    let releaseStream!: () => void;
+    mocks.streamChat.mockImplementation(async (_request, handlers) => {
+      handlers.onDelta('执行 `npm run build`');
+      await new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+    });
+    renderChat();
+    await enterMessage();
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const streamingText = await screen.findByText('执行 `npm run build`');
+    expect(streamingText.tagName).toBe('P');
+    releaseStream();
+
+    const code = await screen.findByText('npm run build');
+    expect(code.tagName).toBe('CODE');
+  });
 });

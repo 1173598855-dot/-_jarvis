@@ -1,4 +1,9 @@
-import { Show } from 'solid-js';
+import {
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+} from 'solid-js';
 import { useRuntimeResources } from '../app/runtime-resources';
 import { ChartWidget } from '../components/ChartWidget';
 import { ResourceState } from '../components/ui/ResourceState';
@@ -28,11 +33,43 @@ function formatTime(value: number | undefined) {
   });
 }
 
+const MAX_SYSTEM_SAMPLES = 60;
+
+interface SystemSample {
+  timestamp: number;
+  cpu: number | null;
+  memory: number | null;
+  disk: number | null;
+}
+
 export function RuntimeView() {
   const resources = useRuntimeResources();
   const stats = () => resources.system.data();
   const tokenSnapshot = () => resources.tokens.data();
-  const systemLabel = () => [formatTime(resources.system.updatedAt())];
+  const [systemSamples, setSystemSamples] = createSignal<SystemSample[]>([]);
+
+  createEffect(() => {
+    const current = stats();
+    const timestamp = resources.system.updatedAt();
+    if (!current || timestamp === undefined) return;
+
+    const nextSample: SystemSample = {
+      timestamp,
+      cpu: current.cpu.usage,
+      memory: current.memory.usage,
+      disk: current.disk.usage,
+    };
+    setSystemSamples((previous) => {
+      const last = previous[previous.length - 1];
+      if (last?.timestamp === timestamp) {
+        return [...previous.slice(0, -1), nextSample];
+      }
+      return [...previous, nextSample].slice(-MAX_SYSTEM_SAMPLES);
+    });
+  });
+
+  const systemHistory = createMemo(() => systemSamples());
+  const systemLabels = () => systemHistory().map((sample) => formatTime(sample.timestamp));
 
   return (
     <div class="view-stack">
@@ -87,11 +124,11 @@ export function RuntimeView() {
                 <div class="runtime-charts">
                   <Show when={current().cpu.usage !== null}>
                     <ChartWidget
-                      title="CPU 使用率趋势"
-                      labels={systemLabel()}
-                      datasets={[{
-                        label: 'CPU',
-                        data: [current().cpu.usage],
+                       title="CPU 使用率趋势"
+                       labels={systemLabels()}
+                       datasets={[{
+                         label: 'CPU',
+                         data: systemHistory().map((sample) => sample.cpu),
                         color: '#42c8bd',
                         unit: '%',
                       }]}
@@ -102,11 +139,11 @@ export function RuntimeView() {
                   </Show>
                   <Show when={current().memory.usage !== null}>
                     <ChartWidget
-                      title="内存使用率趋势"
-                      labels={systemLabel()}
-                      datasets={[{
-                        label: '内存',
-                        data: [current().memory.usage],
+                       title="内存使用率趋势"
+                       labels={systemLabels()}
+                       datasets={[{
+                         label: '内存',
+                         data: systemHistory().map((sample) => sample.memory),
                         color: '#8e91c9',
                         unit: '%',
                       }]}
@@ -117,11 +154,11 @@ export function RuntimeView() {
                   </Show>
                   <Show when={current().disk.usage !== null}>
                     <ChartWidget
-                      title="磁盘使用率趋势"
-                      labels={systemLabel()}
-                      datasets={[{
-                        label: '磁盘',
-                        data: [current().disk.usage],
+                       title="磁盘使用率趋势"
+                       labels={systemLabels()}
+                       datasets={[{
+                         label: '磁盘',
+                         data: systemHistory().map((sample) => sample.disk),
                         color: '#e6ad54',
                         unit: '%',
                       }]}

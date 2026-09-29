@@ -1,3 +1,48 @@
+## Iteration #250 - 2026-09-27
+
+**Protocol**: Dependency-aware workflow DAG scheduler
+**Status**: Complete
+
+### Achievements
+
+- Added a stdlib-only `Workflow` graph that rejects duplicate nodes,
+  self-dependencies, unknown dependencies, cycles and node/edge overflows
+  before any execution, with deterministic Kahn topological layering.
+- Added a thread-safe `WorkflowEngine` that runs each topological layer
+  concurrently under a bounded `max_parallelism` and orders layers strictly.
+- Added `fail_fast` (raises and skips the remainder) and `continue` failure
+  policies; dependents of a failed node are marked `skipped` rather than run.
+- Exposed `POST /api/workflows/run` on the stdlib HTTPServer, FastAPI and the
+  Express bridge, reusing the existing role dispatch service and its terminable
+  Worker for every node. No new execution authority is introduced.
+- Documented the route and a `WorkflowRunResponse` schema in
+  `contracts/core-api.openapi.json`.
+
+### Verification
+
+- `python -m unittest tests.test_workflow_dag -v`: 19 passed
+- `python tests/run_all.py`: 1180 total (1169 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `git diff --check`: passed
+- Frontend Vitest `server.test.js`: 68 passed
+
+### Files Changed
+
+- `src/core/brain/workflow_dag.py`
+- `tests/test_workflow_dag.py`
+- `tests/run_all.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `contracts/core-api.openapi.json`
+- `docs/reports/AUDIT_REPORT_250.md`
+- `docs/reports/README.md`
+- `CHANGELOG.md`
+
+---
+
 ## Iteration #249 - 2026-09-09
 
 **Protocol**: Bounded provenance-aware memory search

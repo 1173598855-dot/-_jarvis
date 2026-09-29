@@ -85,6 +85,13 @@ from core.brain.role_worker import (  # noqa: E402
     apply_worker_token_usage,
     execute_role_task,
 )
+from core.brain.workflow_dag import (  # noqa: E402
+    FailurePolicy,
+    WorkflowEngine,
+    WorkflowExecutionError,
+    WorkflowValidationError,
+    workflow_from_dict,
+)
 from core.kernel.capability_api import (  # noqa: E402
     CAPABILITY_SNAPSHOT_CACHE_TTL_SECONDS,
     CapabilityRegistryRequestError,
@@ -575,6 +582,7 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/roles/dispatch": self.handle_role_dispatch,
             "/api/roles/dispatch_by_cap": self.handle_role_dispatch_by_cap,
             "/api/roles/batch_dispatch": self.handle_role_batch_dispatch,
+            "/api/workflows/run": self.handle_workflow_run,
         }
 
         handler = routes.get(self.path)
@@ -1295,6 +1303,64 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "results": [r.to_dict() for r in results],
             "count": len(results),
         })
+
+    def handle_workflow_run(self):
+        """Validate and execute a dependency-ordered workflow DAG."""
+        data = self._read_body()
+
+        raw_policy = data.get("failure_policy", FailurePolicy.FAIL_FAST.value)
+        try:
+            failure_policy = FailurePolicy(raw_policy)
+        except ValueError:
+            self._send_error(
+                "failure_policy must be 'fail_fast' or 'continue'",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+
+        max_parallelism = data.get("max_parallelism", 4)
+        if (
+            isinstance(max_parallelism, bool)
+            or not isinstance(max_parallelism, int)
+            or not 1 <= max_parallelism <= 16
+        ):
+            self._send_error(
+                "max_parallelism must be an integer between 1 and 16",
+                400,
+                "INVALID_REQUEST",
+            )
+            return
+
+        try:
+            workflow = workflow_from_dict(data.get("workflow", data))
+        except WorkflowValidationError as error:
+            self._send_error(str(error), 400, "INVALID_WORKFLOW")
+            return
+
+        def _dispatch(node):
+            result = self.app_state.role_dispatch.dispatch_by_role(
+                node.agent_name,
+                node.prompt,
+                node.timeout,
+            )
+            if result.status == "no_role":
+                raise WorkflowValidationError(
+                    f"role '{node.agent_name}' is not registered"
+                )
+            return result.to_dict()
+
+        engine = WorkflowEngine(
+            _dispatch,
+            max_parallelism=max_parallelism,
+            failure_policy=failure_policy,
+        )
+        try:
+            run_result = engine.run(workflow)
+        except WorkflowExecutionError as error:
+            self._send_error(str(error), 502, "WORKFLOW_FAILED")
+            return
+        self._send_json(run_result.to_dict())
 
 
 # ============================================================
