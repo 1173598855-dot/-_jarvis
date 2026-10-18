@@ -62,13 +62,27 @@ class _IPv4HTTPServer(HTTPServer):
 # 添加 src 到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
+from adapters.ollama_embedding import embedding_provider_from_env  # noqa: E402
+from adapters.sqlite_memory_index import SqliteMemoryIndexError  # noqa: E402
 from app.memory_api import (  # noqa: E402
     MEMORY_API_MAX_DIRECTORY_ENTRIES,
     MEMORY_API_MAX_FILE_BYTES,
     MEMORY_API_MAX_FILES,
     MEMORY_API_MAX_TOTAL_BYTES,
+    MemoryBackupFailedError,
+    MemoryBackupNotFoundError,
+    MemorySearchRequestError,
+    MemorySemanticUnavailableError,
+    MemoryTransferRequestError,
+    create_memory_backup_for_api,
+    export_memory_entries_for_api,
+    import_memory_entries_for_api,
+    list_memory_backups_for_api,
     load_memory_entries_for_api,
+    prune_memory_entries_for_api,
     public_memory_entry,
+    restore_memory_backup_for_api,
+    search_memory_entries_for_api,
 )
 from core.brain.agent_factory import AgentFactory  # noqa: E402
 from core.brain.context_compressor import MemoryEntry, MemoryStore, MemoryType  # noqa: E402
@@ -201,6 +215,7 @@ class AppState:
         capability_target: CompatibilityTarget | None = None,
         event_bus: EventBus | None = None,
         plugin_manager: PluginManager | None = None,
+        memory_dir: str = ".auto-memory",
     ):
         if role_dispatch is not None:
             dispatch_supervisor = role_dispatch.supervisor
@@ -212,7 +227,8 @@ class AppState:
                 )
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
-        self.memory_store = MemoryStore(memory_dir=".auto-memory")
+        self.memory_store = MemoryStore(memory_dir=memory_dir)
+        self.embedding_provider = embedding_provider_from_env()
         self.orchestrator = Orchestrator()
         self.role_registry = create_default_registry()
         self.agent_factory = AgentFactory(
@@ -541,6 +557,9 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/plugins": self.handle_plugins_list,
             "/api/capabilities/registry": self.handle_capabilities_registry,
             "/api/memory/entries": self.handle_memory_entries,
+            "/api/memory/export": self.handle_memory_export,
+            "/api/memory/backups": self.handle_memory_backups_list,
+            "/api/memory/search": self.handle_memory_search,
             "/api/events": self.handle_events,
             "/api/orchestrator/agents": self.handle_orchestrator_agents,
             "/api/orchestrator/history": self.handle_orchestrator_history,
@@ -578,6 +597,10 @@ class JARVISHandler(BaseHTTPRequestHandler):
             "/api/plugins/enable": self.handle_plugin_enable,
             "/api/plugins/disable": self.handle_plugin_disable,
             "/api/memory/store": self.handle_memory_store,
+            "/api/memory/import": self.handle_memory_import,
+            "/api/memory/backup": self.handle_memory_backup_create,
+            "/api/memory/restore": self.handle_memory_restore,
+            "/api/memory/prune": self.handle_memory_prune,
             "/api/orchestrator/dispatch": self.handle_orchestrator_dispatch,
             "/api/roles/dispatch": self.handle_role_dispatch,
             "/api/roles/dispatch_by_cap": self.handle_role_dispatch_by_cap,
@@ -956,6 +979,167 @@ class JARVISHandler(BaseHTTPRequestHandler):
         self._send_json({
             "entries": [public_memory_entry(entry) for entry in entries]
         })
+
+    def handle_memory_search(self):
+        """Memory search backed by the migratable SQLite metadata index"""
+        try:
+            items = parse_qsl(
+                urlsplit(self.path).query,
+                keep_blank_values=True,
+                max_num_fields=10,
+            )
+        except ValueError:
+            items = []
+        params = dict(items)
+        query = params.get("q")
+        raw_limit = params.get("limit", "10")
+        mode = params.get("mode", "lexical")
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            self._send_error("limit must be an integer", 400, "INVALID_REQUEST")
+            return
+        try:
+            response = search_memory_entries_for_api(
+                self.app_state.memory_store,
+                query,
+                limit=limit,
+                mode=mode,
+                embedding_provider=getattr(
+                    self.app_state, "embedding_provider", None
+                ),
+            )
+        except MemorySearchRequestError as error:
+            self._send_error(str(error), 400, "INVALID_REQUEST")
+            return
+        except MemorySemanticUnavailableError:
+            self._send_error(
+                "Memory semantic search is unavailable",
+                503,
+                "MEMORY_SEMANTIC_UNAVAILABLE",
+            )
+            return
+        except (SqliteMemoryIndexError, OSError):
+            self._send_error(
+                "Memory search index is unavailable",
+                503,
+                "MEMORY_INDEX_UNAVAILABLE",
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_export(self):
+        """Lossless bounded memory snapshot for migration"""
+        try:
+            response = export_memory_entries_for_api(self.app_state.memory_store)
+        except (SqliteMemoryIndexError, OSError):
+            self._send_error(
+                "Memory export is unavailable",
+                503,
+                "MEMORY_EXPORT_UNAVAILABLE",
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_import(self):
+        """Import memory records with id-level deduplication"""
+        data = self._read_body()
+        try:
+            response = import_memory_entries_for_api(
+                self.app_state.memory_store,
+                data,
+            )
+        except MemoryTransferRequestError as error:
+            self._send_error(str(error), 400, "INVALID_REQUEST")
+            return
+        except (TypeError, ValueError, OSError) as error:
+            self._send_error(
+                f"Memory import failed: {error}", 500, "MEMORY_IMPORT_FAILED"
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_backup_create(self):
+        """Create a verified memory backup with retention pruning"""
+        data = self._read_body()
+        max_retained = None
+        if isinstance(data, dict) and "max_retained" in data:
+            max_retained = data.get("max_retained")
+        try:
+            if max_retained is None:
+                response = create_memory_backup_for_api(
+                    self.app_state.memory_store
+                )
+            else:
+                response = create_memory_backup_for_api(
+                    self.app_state.memory_store,
+                    max_retained=max_retained,
+                )
+        except MemoryTransferRequestError as error:
+            self._send_error(str(error), 400, "INVALID_REQUEST")
+            return
+        except MemoryBackupFailedError:
+            self._send_error(
+                "Memory backup could not be created",
+                500,
+                "MEMORY_BACKUP_FAILED",
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_prune(self):
+        """Apply an explicit, bounded retention policy"""
+        data = self._read_body()
+        try:
+            response = prune_memory_entries_for_api(
+                self.app_state.memory_store,
+                data,
+            )
+        except MemoryTransferRequestError as error:
+            self._send_error(str(error), 400, "INVALID_REQUEST")
+            return
+        except (TypeError, ValueError, OSError) as error:
+            self._send_error(
+                f"Memory prune failed: {error}", 500, "MEMORY_PRUNE_FAILED"
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_backups_list(self):
+        """List existing memory backups with integrity status"""
+        try:
+            response = list_memory_backups_for_api(self.app_state.memory_store)
+        except OSError:
+            self._send_error(
+                "Memory backups are unavailable",
+                503,
+                "MEMORY_BACKUP_UNAVAILABLE",
+            )
+            return
+        self._send_json(response)
+
+    def handle_memory_restore(self):
+        """Restore a verified backup through idempotent import"""
+        data = self._read_body()
+        try:
+            response = restore_memory_backup_for_api(
+                self.app_state.memory_store,
+                data,
+            )
+        except MemoryBackupNotFoundError as error:
+            self._send_error(str(error), 404, "MEMORY_BACKUP_NOT_FOUND")
+            return
+        except MemoryTransferRequestError as error:
+            self._send_error(str(error), 400, "INVALID_REQUEST")
+            return
+        except MemoryBackupFailedError:
+            self._send_error(
+                "Memory restore failed its integrity check",
+                500,
+                "MEMORY_BACKUP_FAILED",
+            )
+            return
+        self._send_json(response)
 
     def handle_memory_store(self):
         """存储记忆"""

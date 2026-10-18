@@ -55,6 +55,25 @@ def _get_json(url, timeout=5):
             return error.code, body
 
 
+def _post_json(url, payload, timeout=5):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _NO_PROXY_OPENER.open(request, timeout=timeout) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            try:
+                body = json.load(error)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = {}
+            return error.code, body
+
+
 def _get_sse_payloads(url, timeout=5):
     request = urllib.request.Request(
         url,
@@ -991,6 +1010,24 @@ class TestSharedApiContract(unittest.TestCase):
             ("/api/plugins", "get"): {"502", "503"},
             ("/api/capabilities/registry", "get"): {"400", "502", "503"},
             ("/api/memory/entries", "get"): {"502", "503"},
+            ("/api/memory/search", "get"): {"400", "502", "503"},
+            ("/api/memory/export", "get"): {"502", "503"},
+            ("/api/memory/import", "post"): {"400", "413", "502", "503"},
+            ("/api/memory/backup", "post"): {"400", "413", "502", "503"},
+            ("/api/memory/backups", "get"): {"502", "503"},
+            ("/api/memory/restore", "post"): {
+                "400",
+                "404",
+                "413",
+                "500",
+                "502",
+                "503",
+            },
+            ("/api/memory/prune", "post"): {"400", "413", "502", "503"},
+            (
+                "/api/memory/probes/{memory_type}/{entry_id}",
+                "delete",
+            ): {"400", "404", "413", "422", "502", "503"},
             ("/api/events", "get"): {"502", "503"},
             ("/api/orchestrator/agents", "get"): {"502", "503"},
             ("/api/orchestrator/history", "get"): {"400", "502", "503"},
@@ -1064,7 +1101,46 @@ class TestSharedApiContract(unittest.TestCase):
         self.assertIn("get", self.contract["paths"]["/api/orchestrator/agents"])
         self.assertIn("get", self.contract["paths"]["/api/orchestrator/history"])
         self.assertIn("get", self.contract["paths"]["/api/capabilities/registry"])
+        self.assertIn("get", self.contract["paths"]["/api/memory/search"])
         self.assertIn("post", self.contract["paths"]["/api/orchestrator/dispatch"])
+        probe_operation = self.contract["paths"][
+            "/api/memory/probes/{memory_type}/{entry_id}"
+        ]["delete"]
+        self.assertIn("delete", self.contract["paths"][
+            "/api/memory/probes/{memory_type}/{entry_id}"
+        ])
+        self.assertEqual(probe_operation["operationId"], "deleteMemoryProbe")
+        probe_parameters = {
+            parameter["name"]: parameter
+            for parameter in probe_operation["parameters"]
+        }
+        self.assertEqual(
+            set(probe_parameters),
+            {"memory_type", "entry_id"},
+        )
+        self.assertEqual(
+            set(probe_parameters["memory_type"]["schema"]["enum"]),
+            {"user", "feedback", "project", "reference"},
+        )
+        self.assertTrue(
+            {"200", "400", "404", "413", "422", "502", "503"}.issubset(
+                probe_operation["responses"]
+            )
+        )
+        _assert_json_shape(
+            self,
+            self.contract,
+            {"$ref": "#/components/schemas/MemoryProbeCleanupRequest"},
+            {"cleanup_token": "one-time-token"},
+            "memory probe cleanup request",
+        )
+        _assert_json_shape(
+            self,
+            self.contract,
+            {"$ref": "#/components/schemas/MemoryProbeCleanupResponse"},
+            {"success": True, "id": "probe123"},
+            "memory probe cleanup response",
+        )
 
     def test_shared_orchestrator_subset_has_error_contracts(self):
         expected = {
@@ -1404,9 +1480,13 @@ class TestSharedApiContract(unittest.TestCase):
                 self.assertIn((method, path), routes)
 
     def test_all_implementations_match_stable_response_schemas(self):
+        import shutil
+        import tempfile
+
         from fastapi.testclient import TestClient
 
         import main_fastapi
+        from core.brain.context_compressor import MemoryEntry, MemoryType
         from core.kernel.ollama_manager import OllamaManager
 
         httpserver_module = _load_httpserver_module()
@@ -1415,13 +1495,21 @@ class TestSharedApiContract(unittest.TestCase):
         ollama_thread.start()
         ollama_url = f"http://127.0.0.1:{ollama_server.server_port}"
 
+        memory_dir = tempfile.mkdtemp(prefix=".test-contract-memory-")
+        seed_entry = MemoryEntry.create(
+            MemoryType.PROJECT,
+            "Contract fixture memory",
+            "contract searchable body text",
+            tags=["contract"],
+        )
         http_ollama = OllamaManager(base_url=ollama_url)
         with patch.object(
             httpserver_module,
             "OllamaManager",
             return_value=http_ollama,
         ):
-            http_state = httpserver_module.AppState()
+            http_state = httpserver_module.AppState(memory_dir=memory_dir)
+        http_state.memory_store.store(seed_entry)
         http_server = httpserver_module.create_http_server(
             "127.0.0.1",
             0,
@@ -1437,7 +1525,15 @@ class TestSharedApiContract(unittest.TestCase):
             "OllamaManager",
             return_value=fastapi_ollama,
         ):
-            fastapi_state = main_fastapi.AppState()
+            fastapi_state = main_fastapi.AppState(memory_dir=memory_dir)
+        fastapi_state.memory_store.store(
+            MemoryEntry.create(
+                MemoryType.PROJECT,
+                "Contract fixture memory",
+                "contract searchable body text",
+                tags=["contract"],
+            )
+        )
         fastapi_app = main_fastapi.create_app(fastapi_state)
 
         observed_dispatch_options = []
@@ -1497,6 +1593,7 @@ class TestSharedApiContract(unittest.TestCase):
                     "/api/ollama/token-usage",
                     "/api/plugins",
                     "/api/memory/entries",
+                    "/api/memory/export",
                     "/api/events",
                     "/api/orchestrator/agents",
                     "/api/orchestrator/history",
@@ -1514,6 +1611,183 @@ class TestSharedApiContract(unittest.TestCase):
                     _assert_json_shape(
                         self, self.contract, schema, response.json(), "fastapi"
                     )
+
+                search_path = "/api/memory/search?q=contract&limit=10"
+                search_schema = self.contract["paths"]["/api/memory/search"][
+                    "get"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                for name, request in clients.items():
+                    status, body = request(search_path)
+                    self.assertEqual(status, 200, f"{name} memory search: {body}")
+                    _assert_json_shape(
+                        self, self.contract, search_schema, body, f"{name} memory search"
+                    )
+                    self.assertEqual(body["query"], "contract", name)
+                    self.assertEqual(body["mode"], "lexical", name)
+                    self.assertTrue(
+                        any(item["id"] == seed_entry.id for item in body["results"]),
+                        f"{name} seeded memory entry not found",
+                    )
+                response = fastapi_client.get(search_path)
+                self.assertEqual(response.status_code, 200, "fastapi memory search")
+                _assert_json_shape(
+                    self, self.contract, search_schema, response.json(), "fastapi memory search"
+                )
+                self.assertTrue(
+                    any(item["id"] == seed_entry.id for item in response.json()["results"]),
+                    "fastapi seeded memory entry not found",
+                )
+
+                fulltext_path = "/api/memory/search?q=contract&mode=fulltext&limit=10"
+                for name, request in clients.items():
+                    status, body = request(fulltext_path)
+                    self.assertEqual(status, 200, f"{name} memory fulltext: {body}")
+                    _assert_json_shape(
+                        self, self.contract, search_schema, body, f"{name} memory fulltext"
+                    )
+                    self.assertEqual(body["mode"], "fulltext", name)
+                    self.assertTrue(
+                        any(item["id"] == seed_entry.id for item in body["results"]),
+                        f"{name} seeded memory entry not found via fulltext",
+                    )
+                response = fastapi_client.get(fulltext_path)
+                self.assertEqual(response.status_code, 200, "fastapi memory fulltext")
+                self.assertEqual(response.json()["mode"], "fulltext", "fastapi")
+
+                import_record = {
+                    "type": "project",
+                    "title": "Imported contract memory",
+                    "content": "imported body for transfer coverage",
+                    "tags": ["transfer"],
+                }
+                import_payload = {"entries": [import_record]}
+                import_schema = self.contract["paths"]["/api/memory/import"][
+                    "post"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                expected_imported = 1
+                for name, base in (
+                    ("python-http", core_url),
+                    ("express", express_url),
+                ):
+                    status, body = _post_json(
+                        f"{base}/api/memory/import", import_payload
+                    )
+                    self.assertEqual(status, 200, f"{name} memory import: {body}")
+                    _assert_json_shape(
+                        self,
+                        self.contract,
+                        import_schema,
+                        body,
+                        f"{name} memory import",
+                    )
+                    # All surfaces share one authoritative store, so only the
+                    # first import lands and the rest dedupe to skipped.
+                    self.assertEqual(body["imported"], expected_imported, name)
+                    self.assertEqual(body["skipped"], 1 - expected_imported, name)
+                    expected_imported = 0
+                response = fastapi_client.post(
+                    "/api/memory/import", json=import_payload
+                )
+                self.assertEqual(response.status_code, 200, "fastapi memory import")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    import_schema,
+                    response.json(),
+                    "fastapi memory import",
+                )
+                self.assertEqual(response.json()["skipped"], 1, "fastapi")
+                status, body = _get_json(f"{core_url}/api/memory/export")
+                self.assertEqual(status, 200, f"memory export after import: {body}")
+                self.assertTrue(
+                    any(
+                        item["title"] == "Imported contract memory"
+                        for item in body["entries"]
+                    ),
+                    "imported memory entry not found in export",
+                )
+
+                backup_schema = self.contract["paths"]["/api/memory/backup"][
+                    "post"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                status, backup = _post_json(f"{core_url}/api/memory/backup", {})
+                self.assertEqual(status, 200, f"memory backup: {backup}")
+                _assert_json_shape(
+                    self, self.contract, backup_schema, backup, "memory backup"
+                )
+                self.assertEqual(backup["entries"], 2, "memory backup entries")
+
+                backups_schema = self.contract["paths"]["/api/memory/backups"][
+                    "get"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                status, inventory = _get_json(f"{express_url}/api/memory/backups")
+                self.assertEqual(status, 200, f"memory backups: {inventory}")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    backups_schema,
+                    inventory,
+                    "memory backups",
+                )
+                self.assertTrue(
+                    any(
+                        item["name"] == backup["backup"] and item["intact"]
+                        for item in inventory["backups"]
+                    ),
+                    "created backup missing from inventory",
+                )
+
+                restore_schema = self.contract["paths"]["/api/memory/restore"][
+                    "post"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                response = fastapi_client.post(
+                    "/api/memory/restore", json={"backup": backup["backup"]}
+                )
+                self.assertEqual(response.status_code, 200, "fastapi memory restore")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    restore_schema,
+                    response.json(),
+                    "fastapi memory restore",
+                )
+                self.assertEqual(response.json()["backup"], backup["backup"])
+                self.assertEqual(response.json()["skipped"], 2, "fastapi")
+
+                prune_schema = self.contract["paths"]["/api/memory/prune"][
+                    "post"
+                ]["responses"]["200"]["content"]["application/json"]["schema"]
+                status, dry = _post_json(
+                    f"{core_url}/api/memory/prune",
+                    {"max_entries": 1, "dry_run": True},
+                )
+                self.assertEqual(status, 200, f"memory prune dry run: {dry}")
+                _assert_json_shape(
+                    self, self.contract, prune_schema, dry, "memory prune dry run"
+                )
+                self.assertEqual(dry["evaluated"], 2, "prune dry run evaluated")
+                self.assertEqual(dry["matched"], 1, "prune dry run matched")
+                self.assertEqual(dry["pruned"], [], "prune dry run pruned")
+                status, executed = _post_json(
+                    f"{express_url}/api/memory/prune",
+                    {"max_entries": 1, "min_importance": 1.1},
+                )
+                self.assertEqual(status, 400, f"memory prune invalid: {executed}")
+                response = fastapi_client.post(
+                    "/api/memory/prune", json={"max_entries": 1}
+                )
+                self.assertEqual(response.status_code, 200, "fastapi memory prune")
+                _assert_json_shape(
+                    self,
+                    self.contract,
+                    prune_schema,
+                    response.json(),
+                    "fastapi memory prune",
+                )
+                self.assertEqual(len(response.json()["pruned"]), 1, "fastapi")
+                self.assertEqual(response.json()["dry_run"], False, "fastapi")
+                status, exported = _get_json(f"{core_url}/api/memory/export")
+                self.assertEqual(exported["count"], 1, "prune reduced the store")
 
                 roles_list_schema = self.contract["paths"]["/api/roles"][
                     "get"
@@ -2908,9 +3182,13 @@ class TestSharedApiContract(unittest.TestCase):
             http_thread.join(timeout=5)
             http_state.shutdown()
             fastapi_state.shutdown()
+            from app.memory_api import close_memory_search_indexes
+
+            close_memory_search_indexes()
             ollama_server.shutdown()
             ollama_server.server_close()
             ollama_thread.join(timeout=5)
+            shutil.rmtree(memory_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -737,6 +737,101 @@
         }
       }
     },
+    "/api/memory/search": {
+      "get": {
+        "operationId": "searchMemoryEntries",
+        "description": "Deterministic memory search backed by the migratable SQLite metadata index. mode=lexical (default) applies the shared 5x/3x/1x title/tag/body scoring; mode=fulltext uses FTS5 trigram matching with BM25 relevance and requires a term of at least 3 characters; mode=semantic embeds the query through the server-configured local embedding provider (JARVIS_MEMORY_EMBED_MODEL, disabled when unset), catches up a bounded vector backlog per request and reports its coverage. The Markdown memory store stays authoritative; the index reconciles against a bounded snapshot on each request and is skipped when the entry fingerprint is unchanged.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 10
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "lexical",
+                "fulltext",
+                "semantic"
+              ],
+              "default": "lexical"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked memory search results with provenance citations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemorySearchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or limit violates the bounded search contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request query exceeds the 32 KiB limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the memory index cannot be reconciled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "listEvents",
@@ -1820,7 +1915,10 @@
                   },
                   "failure_policy": {
                     "type": "string",
-                    "enum": ["fail_fast", "continue"]
+                    "enum": [
+                      "fail_fast",
+                      "continue"
+                    ]
                   },
                   "max_parallelism": {
                     "type": "integer",
@@ -1865,6 +1963,517 @@
           },
           "502": {
             "description": "WORKFLOW_FAILED under the fail-fast policy, or the Core API returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/export": {
+      "get": {
+        "operationId": "exportMemoryEntries",
+        "description": "Lossless bounded memory snapshot for migration. Records carry every authoritative field, so importing them into a fresh store reproduces the same entries, ids and metadata.",
+        "responses": {
+          "200": {
+            "description": "Bounded memory snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryExportResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/import": {
+      "post": {
+        "operationId": "importMemoryEntries",
+        "description": "Import memory records into the authoritative store with id-level deduplication. Records whose id already exists or repeats inside the batch are skipped, so repeated imports are idempotent; per-record failures are rejected without aborting the batch.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "entries"
+                ],
+                "properties": {
+                  "entries": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import accounting with bounded, content-free rejection notes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The import payload violates the bounded transfer contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/backup": {
+      "post": {
+        "operationId": "createMemoryBackup",
+        "description": "Write a self-describing backup of the bounded export snapshot. The envelope embeds the SHA-256 of the canonically serialized payload, and backups beyond the retention cap are pruned oldest-first.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "max_retained": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64,
+                    "default": 8
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backup manifest with integrity metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryBackupCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The retention value violates the bounded contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/backups": {
+      "get": {
+        "operationId": "listMemoryBackups",
+        "description": "List existing memory backups, newest first, each with its recorded SHA-256 and an integrity flag recomputed at read time.",
+        "responses": {
+          "200": {
+            "description": "Backup inventory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryBackupListResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/restore": {
+      "post": {
+        "operationId": "restoreMemoryBackup",
+        "description": "Verify a named backup (strict name pattern, embedded SHA-256) and merge it back into the authoritative store through idempotent id-level import. Restore never deletes existing entries.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "backup"
+                ],
+                "properties": {
+                  "backup": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import accounting for the restored backup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The restore payload violates the bounded contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named backup does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The backup failed its integrity check or could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/probes/{memory_type}/{entry_id}": {
+      "delete": {
+        "operationId": "deleteMemoryProbe",
+        "description": "Delete one local-integration probe entry after verifying its per-entry cleanup token. Only entries created with a matching probe_cleanup_token and the fixed probe title prefix can be removed. Missing entries and invalid credentials both return MEMORY_NOT_FOUND.",
+        "parameters": [
+          {
+            "name": "memory_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "user",
+                "feedback",
+                "project",
+                "reference"
+              ]
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryProbeCleanupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The probe entry was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProbeCleanupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The JSON body is invalid or is not an object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The entry does not exist, is not a probe, or the cleanup token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "FastAPI rejected an invalid path parameter or cleanup body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Core API is not configured or the BFF proxy cannot complete the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/prune": {
+      "post": {
+        "operationId": "pruneMemoryEntries",
+        "description": "Apply an explicit, bounded retention policy. At least one criterion is required; integration probe entries are always excluded and entries with unparseable timestamps are kept. Deletion goes through the journalled delete path, at most 64 entries per request; dry_run returns the candidates without deleting.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryPruneRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retention accounting with bounded candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryPruneResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The retention policy violates the bounded contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the shared 32 KiB limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Core API returned an unavailable or invalid response.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2729,6 +3338,95 @@
           }
         }
       },
+      "MemorySearchResponse": {
+        "type": "object",
+        "required": [
+          "mode",
+          "query",
+          "count",
+          "results"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "lexical",
+              "fulltext",
+              "semantic"
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "type",
+                "title",
+                "snippet",
+                "score",
+                "source_ids"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "snippet": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": [
+                    "integer",
+                    "number"
+                  ]
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "required": [
+              "vectors",
+              "entries"
+            ],
+            "properties": {
+              "vectors": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entries": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "EventInfo": {
         "type": "object",
         "required": [
@@ -3365,7 +4063,10 @@
           },
           "output": {},
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "duration": {
             "type": "number",
@@ -3413,6 +4114,315 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/WorkflowNodeResult"
+            }
+          }
+        }
+      },
+      "MemoryExportEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "content",
+          "metadata",
+          "tags",
+          "created_at",
+          "last_accessed",
+          "access_count",
+          "importance",
+          "token_count",
+          "compressed"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "last_accessed": {
+            "type": "string"
+          },
+          "access_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "importance": {
+            "type": "number"
+          },
+          "token_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "compressed": {
+            "type": "boolean"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MemoryExportResponse": {
+        "type": "object",
+        "required": [
+          "count",
+          "entries"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryExportEntry"
+            }
+          }
+        }
+      },
+      "MemoryImportResponse": {
+        "type": "object",
+        "required": [
+          "received",
+          "imported",
+          "skipped",
+          "rejected",
+          "errors"
+        ],
+        "properties": {
+          "received": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "imported": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MemoryBackupCreateResponse": {
+        "type": "object",
+        "required": [
+          "backup",
+          "created_at",
+          "entries",
+          "bytes",
+          "payload_sha256",
+          "pruned"
+        ],
+        "properties": {
+          "backup": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "pruned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MemoryBackupSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "created_at",
+          "entries",
+          "bytes",
+          "payload_sha256",
+          "intact"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "intact": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MemoryBackupListResponse": {
+        "type": "object",
+        "required": [
+          "backups"
+        ],
+        "properties": {
+          "backups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryBackupSummary"
+            }
+          }
+        }
+      },
+      "MemoryProbeCleanupRequest": {
+        "type": "object",
+        "required": [
+          "cleanup_token"
+        ],
+        "properties": {
+          "cleanup_token": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "MemoryProbeCleanupResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "id"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "MemoryPruneRequest": {
+        "type": "object",
+        "properties": {
+          "max_entries": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8192
+          },
+          "max_age_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3650
+          },
+          "min_importance": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "MemoryPruneResponse": {
+        "type": "object",
+        "required": [
+          "evaluated",
+          "matched",
+          "candidates",
+          "dry_run",
+          "pruned",
+          "failed"
+        ],
+        "properties": {
+          "evaluated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "matched": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "type"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "pruned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "string"
             }
           }
         }

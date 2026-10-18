@@ -260,11 +260,12 @@ Broker.
 
 ## Current Evidence
 
-Iteration 249 is the current audit entry. It covers bounded lexical memory
-search with deterministic ranking and provenance; semantic embeddings remain a
-separate Phase F work package. The platform enforcement evidence for the Linux
-Plugin and Terminal Workers is recorded in Iterations 245, 246 and 248, while
-Windows and macOS boundaries retain their platform-specific evidence limits.
+Iteration 257 is the current audit entry. It closes Phase F with deterministic
+lexical and FTS5 retrieval, optional local semantic retrieval, a migratable
+SQLite index, bounded export/import, verified backup/restore, and explicit
+entry-level retention. The platform enforcement evidence for the Linux Plugin
+and Terminal Workers is recorded in Iterations 245, 246 and 248, while Windows
+and macOS boundaries retain their platform-specific evidence limits.
 Use [the report index](docs/reports/README.md) for the current ten-report window
 and [CHANGELOG.md](CHANGELOG.md) for the complete iteration ledger.
 
@@ -354,6 +355,13 @@ The stable cross-implementation response contract is maintained in
 | `/api/plugins/disable` | Python / FastAPI / Express | Disable a loaded Worker-isolated Plugin by `plugin_id` |
 | `/api/memory/entries` | Python / FastAPI / Express | Memory entries |
 | `/api/memory/store` | Python / FastAPI / Express | Store memory |
+| `/api/memory/search` | Python / FastAPI / Express | Bounded lexical, FTS5, or optional semantic memory search |
+| `/api/memory/export` | Python / FastAPI / Express | Bounded lossless memory export |
+| `/api/memory/import` | Python / FastAPI / Express | Idempotent memory import with id-level deduplication |
+| `/api/memory/backup` | Python / FastAPI / Express | Create a verified self-describing memory backup |
+| `/api/memory/backups` | Python / FastAPI / Express | List retained memory backups |
+| `/api/memory/restore` | Python / FastAPI / Express | Merge a verified memory backup without overwriting entries |
+| `/api/memory/prune` | Python / FastAPI / Express | Explicit bounded entry-level retention policy |
 | `DELETE /api/memory/probes/{type}/{id}` | Python / FastAPI / Express | Token-verified local integration probe cleanup |
 | `/api/events` | Python / FastAPI / Express | Event history |
 | `/api/orchestrator/agents` | Python / FastAPI / Express | Registered agent list |
@@ -368,6 +376,7 @@ The stable cross-implementation response contract is maintained in
 | `/api/roles/dispatch` | Python / FastAPI / Express | Synchronous role dispatch through a terminable Worker |
 | `/api/roles/dispatch_by_cap` | Python / FastAPI / Express | Capability-selected synchronous dispatch through a terminable Worker |
 | `/api/roles/batch_dispatch` | Python / FastAPI / Express | Ordered batch dispatch through terminable Workers |
+| `/api/workflows/run` | Python / FastAPI / Express | DAG workflow execution with bounded parallel layers |
 
 Git endpoints are Express-only and are declared in `contracts/core-api.openapi.json`
 with `x-jarvis-implementations: ["frontend/server.js"]`; Python services do not
@@ -377,5 +386,5 @@ implement or proxy them.
 
 - Audit reports are rolling iteration evidence, not a substitute for tests.
 - Prefer `rg` for repository search and the documented verification commands before claiming an iteration is complete.
-- Iteration 249 is the current evidence: the aggregate suite reports 1161 total (1150 passed, 11 skipped), and bounded discovery reports 2135 total (2123 passed, 12 skipped). Frontend verification reports Vitest 151 passed, Playwright 7 passed and 1 desktop-conditional skip; typecheck, build, Ruff lint and compileall passed.
+- Iteration 257 is the current evidence: the aggregate suite reports 1258 total (1247 passed, 11 skipped), and frontend Vitest reports 159 passed. Re-run the verification commands above for current results; historical discovery and Playwright counts are not restated because they were not part of that audit snapshot.
 - Worker filesystem and network unit tests verify decision logic and fail-closed behavior with injected platform doubles on this Windows host. Linux additionally has real Ubuntu 24.04 WSL2 evidence for the isolation primitives and the complete production Plugin Runtime and fixed Terminal Worker paths with a non-overflow UID/GID; Ubuntu 22.04 CI is the independent hosted-runner path. The Windows AppContainer boundary has a Windows real-enforcement test; the macOS Seatbelt boundary has a dedicated `macos-sandbox` CI job, but only a non-skipped macOS run can provide macOS kernel-enforcement evidence.

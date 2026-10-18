@@ -19,6 +19,11 @@ let ollamaOverflowBytesSent = 0;
 let coreMode = 'healthy';
 let coreCapabilityUrl;
 let coreHistoryUrl;
+let coreMemorySearchUrl;
+let coreMemoryImportUrl;
+let coreMemoryBackupUrl;
+let coreMemoryRestoreUrl;
+let coreMemoryPruneUrl;
 let coreDispatchBody;
 let coreRoleUrl;
 let coreRoleBody;
@@ -239,6 +244,66 @@ beforeAll(async () => {
     }
     if (req.url === '/api/memory/entries') {
       res.end(JSON.stringify({ entries: [] }));
+      return;
+    }
+    if (req.url?.startsWith('/api/memory/search')) {
+      coreMemorySearchUrl = req.url;
+      res.end(JSON.stringify({ query: 'fixture', count: 0, results: [] }));
+      return;
+    }
+    if (req.url === '/api/memory/export') {
+      res.end(JSON.stringify({ count: 0, entries: [] }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/memory/import') {
+      coreMemoryImportUrl = req.url;
+      res.end(JSON.stringify({
+        received: 1,
+        imported: 1,
+        skipped: 0,
+        rejected: 0,
+        errors: [],
+      }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/memory/backup') {
+      coreMemoryBackupUrl = req.url;
+      res.end(JSON.stringify({
+        backup: 'backup-20260930T120000-abcdef01.json',
+        created_at: '2026-09-30T12:00:00',
+        entries: 0,
+        bytes: 128,
+        payload_sha256: 'a'.repeat(64),
+        pruned: [],
+      }));
+      return;
+    }
+    if (req.url === '/api/memory/backups') {
+      res.end(JSON.stringify({ backups: [] }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/memory/restore') {
+      coreMemoryRestoreUrl = req.url;
+      res.end(JSON.stringify({
+        received: 2,
+        imported: 0,
+        skipped: 2,
+        rejected: 0,
+        errors: [],
+        backup: 'backup-20260930T120000-abcdef01.json',
+      }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/memory/prune') {
+      coreMemoryPruneUrl = req.url;
+      res.end(JSON.stringify({
+        evaluated: 2,
+        matched: 1,
+        candidates: [{ id: 'fixture000001', type: 'project' }],
+        dry_run: false,
+        pruned: ['fixture000001'],
+        failed: [],
+      }));
       return;
     }
     if (req.method === 'DELETE' && req.url === '/api/memory/probes/project/probe123') {
@@ -831,6 +896,115 @@ describe('Core API bridge', () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ success: true, id: 'probe123' });
+  });
+
+  test('proxies bounded memory search with its query string', async () => {
+    coreMemorySearchUrl = undefined;
+
+    const response = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/search?q=fixture&limit=10`,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      query: 'fixture',
+      count: 0,
+      results: [],
+    });
+    expect(coreMemorySearchUrl).toBe('/api/memory/search?q=fixture&limit=10');
+  });
+
+  test('proxies memory export and import with their payloads', async () => {
+    coreMemoryImportUrl = undefined;
+
+    const exported = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/export`,
+    );
+    expect(exported.status).toBe(200);
+    await expect(exported.json()).resolves.toEqual({ count: 0, entries: [] });
+
+    const imported = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/import`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entries: [{ type: 'project', title: 'fixture', content: 'body' }],
+        }),
+      },
+    );
+    expect(imported.status).toBe(200);
+    await expect(imported.json()).resolves.toEqual({
+      received: 1,
+      imported: 1,
+      skipped: 0,
+      rejected: 0,
+      errors: [],
+    });
+    expect(coreMemoryImportUrl).toBe('/api/memory/import');
+  });
+
+  test('proxies memory backup, inventory, and restore', async () => {
+    coreMemoryBackupUrl = undefined;
+    coreMemoryRestoreUrl = undefined;
+
+    const backup = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/backup`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(backup.status).toBe(200);
+    await expect(backup.json()).resolves.toEqual(
+      expect.objectContaining({ backup: 'backup-20260930T120000-abcdef01.json' }),
+    );
+    expect(coreMemoryBackupUrl).toBe('/api/memory/backup');
+
+    const inventory = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/backups`,
+    );
+    expect(inventory.status).toBe(200);
+    await expect(inventory.json()).resolves.toEqual({ backups: [] });
+
+    const restored = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/restore`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backup: 'backup-20260930T120000-abcdef01.json' }),
+      },
+    );
+    expect(restored.status).toBe(200);
+    await expect(restored.json()).resolves.toEqual(
+      expect.objectContaining({ skipped: 2 }),
+    );
+    expect(coreMemoryRestoreUrl).toBe('/api/memory/restore');
+  });
+
+  test('proxies bounded memory retention pruning', async () => {
+    coreMemoryPruneUrl = undefined;
+
+    const response = await fetch(
+      `http://127.0.0.1:${apiPort}/api/memory/prune`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_entries: 1, dry_run: false }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      evaluated: 2,
+      matched: 1,
+      candidates: [{ id: 'fixture000001', type: 'project' }],
+      dry_run: false,
+      pruned: ['fixture000001'],
+      failed: [],
+    });
+    expect(coreMemoryPruneUrl).toBe('/api/memory/prune');
   });
 
   test('proxies the shared orchestrator agent, history, and dispatch routes', async () => {

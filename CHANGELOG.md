@@ -1,3 +1,403 @@
+## Iteration #257 - 2026-09-30
+
+**Protocol**: Entry-level retention policies — Phase F exit gate met
+**Status**: Complete
+
+### Achievements
+
+- Added `MemoryStore.delete(memory_type, entry_id)`: a general journalled
+  deletion path reusing the probe deletion machinery (frontmatter identity,
+  reparse-point checks, two-stage stat snapshot comparison, index-aware
+  publish). Integration probe entries are refused here on purpose — they
+  leave only through `delete_probe` and its token check.
+- Bumped the `MemoryRepository` port to version 2 with `delete`; the
+  conformance checker verifies deletion on writable repositories and write
+  refusal on read-only repositories.
+- Added `prune_memory_entries_for_api`: an explicit, bounded, opt-in
+  retention engine — `max_entries` keeps the most valuable entries,
+  `max_age_days` prunes stale ones (unparseable timestamps are kept),
+  `min_importance` prunes lightweight ones; probe entries are always
+  excluded, `dry_run` reports candidates without deleting, and deletions
+  are capped at 64 per request.
+- Exposed `POST /api/memory/prune` on the stdlib HTTPServer, FastAPI and the
+  Express bridge with stable `INVALID_REQUEST`/`MEMORY_PRUNE_FAILED`
+  envelopes and standard proxy `502/503`.
+- Documented the route and the `MemoryPruneRequest`/`MemoryPruneResponse`
+  schemas in `contracts/core-api.openapi.json`; archived
+  `AUDIT_REPORT_247.md` per the ten-report window rule.
+
+### Verification
+
+- `python -m unittest tests.test_memory_retention tests.test_memory_repository`: 17 passed
+- `python tests/run_all.py`: 1258 total (1247 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+- Frontend Vitest `npm test -- --run`: 159 passed
+
+### Files Changed
+
+- `src/core/brain/context_compressor.py`
+- `src/core/contracts/memory_repository.py`
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `contracts/core-api.openapi.json`
+- `tests/test_memory_retention.py`
+- `tests/test_memory_repository.py`
+- `tests/test_api_contract.py`
+- `docs/reports/AUDIT_REPORT_257.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_247.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #256 - 2026-09-30
+
+**Protocol**: MemoryRepository port with unified conformance contract (Phase F)
+**Status**: Complete
+
+### Achievements
+
+- Added `core/contracts/memory_repository.py` defining the `MemoryRepository`
+  port as a structural `typing.Protocol` (id `memory-repository`, version 1)
+  freezing the bounded surface consumers depend on: `read_only`,
+  `memory_dir`, `load`, `store` and `get_stats`. The hardened Markdown
+  `MemoryStore` conforms structurally without any change.
+- Added `check_memory_repository_conformance`, the unified extension
+  contract test from the development guide: writable repositories verify the
+  store/load round trip, load determinism, statistics and budget-kwarg
+  refusal; read-only repositories verify bounded loads, determinism,
+  statistics and write refusal against a valid entry.
+- Aligned the shared memory reader annotation with the port; consumer
+  behavior is unchanged and the Markdown files remain the single
+  authoritative source.
+- Archived `AUDIT_REPORT_246.md` per the ten-report window rule, registered
+  in `manifest.json` with SHA-256 and size.
+
+### Verification
+
+- `python -m unittest tests.test_memory_repository -v`: 6 passed
+- `python tests/run_all.py`: 1247 total (1236 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/core/contracts/memory_repository.py`
+- `src/app/memory_api.py`
+- `tests/test_memory_repository.py`
+- `docs/reports/AUDIT_REPORT_256.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_246.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #255 - 2026-09-30
+
+**Protocol**: Verified memory backup, inventory and non-destructive restore (Phase F)
+**Status**: Complete
+
+### Achievements
+
+- Added `create_memory_backup_for_api`: self-describing backups under
+  `.auto-memory/backups/` with an embedded SHA-256 of the canonically
+  serialized export snapshot, written via temporary file and atomic replace,
+  verified by read-back, and pruned oldest-first beyond a bounded retention
+  cap (default 8, range 1-64). Backup names embed a microsecond stamp so
+  name order equals creation order; filesystem mtime proved too coarse for
+  back-to-back writes on Windows and was fixed before delivery.
+- Added `list_memory_backups_for_api`: newest-first inventory with recorded
+  hashes, sizes and an integrity flag recomputed at read time.
+- Added `restore_memory_backup_for_api`: strict name pattern and resolved-path
+  containment, bounded read, canonical SHA-256 verification, then a merge
+  through Iteration 254's idempotent import — restore never deletes entries.
+- Exposed `POST /api/memory/backup`, `GET /api/memory/backups` and
+  `POST /api/memory/restore` on the stdlib HTTPServer, FastAPI and the
+  Express bridge with stable `MEMORY_BACKUP_NOT_FOUND` (404) and
+  `MEMORY_BACKUP_FAILED` (500) envelopes plus standard proxy `502/503`.
+- Documented the routes and the `MemoryBackupCreateResponse`,
+  `MemoryBackupSummary` and `MemoryBackupListResponse` schemas in
+  `contracts/core-api.openapi.json`; archived `AUDIT_REPORT_245.md` per the
+  ten-report window rule.
+
+### Verification
+
+- `python -m unittest tests.test_memory_transfer -v`: 13 passed
+- `python tests/run_all.py`: 1241 total (1230 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+- Frontend Vitest `npm test -- --run`: 158 passed
+
+### Files Changed
+
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `contracts/core-api.openapi.json`
+- `tests/test_memory_transfer.py`
+- `tests/test_api_contract.py`
+- `docs/reports/AUDIT_REPORT_255.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_245.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #254 - 2026-09-30
+
+**Protocol**: Bounded memory export/import with id-level deduplication (Phase F)
+**Status**: Complete
+
+### Achievements
+
+- Added `export_memory_entries_for_api`: a bounded, lossless snapshot carrying
+  every authoritative entry field, bounded by the shared read-only snapshot
+  budgets (256 files, 1 MiB per file, 32 MiB total).
+- Added `import_memory_entries_for_api`: per-record validation, id-level
+  deduplication against the current store and inside the batch, and
+  deterministic id recomputation via `MemoryEntry.create` when a record omits
+  its id. Repeated imports are idempotent; per-record failures are rejected
+  without aborting the batch and reported as bounded, content-free notes.
+- Added `GET /api/memory/export` and `POST /api/memory/import` to the stdlib
+  HTTPServer, FastAPI and the Express bridge (proxy passthrough), governed by
+  the shared 32 KiB body limit and a 256-entry batch cap, with stable
+  `INVALID_REQUEST`/`MEMORY_IMPORT_FAILED` envelopes and standard proxy
+  `502/503`.
+- Documented both routes and the `MemoryExportEntry/Response` and
+  `MemoryImportResponse` schemas in `contracts/core-api.openapi.json`;
+  archived `AUDIT_REPORT_244.md` per the ten-report window rule.
+
+### Verification
+
+- `python -m unittest tests.test_memory_transfer -v`: 7 passed
+- `python tests/run_all.py`: 1235 total (1224 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+- Frontend Vitest `npm test -- --run`: 157 passed
+
+### Files Changed
+
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `contracts/core-api.openapi.json`
+- `tests/test_memory_transfer.py`
+- `tests/test_api_contract.py`
+- `tests/run_all.py`
+- `docs/reports/AUDIT_REPORT_254.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_244.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #253 - 2026-09-30
+
+**Protocol**: Optional local-embedding semantic memory retrieval (Phase F)
+**Status**: Complete
+
+### Achievements
+
+- Added the `EmbeddingProvider` port (bounded batches, validated model ids,
+  fail-closed vector validation) and the `OllamaEmbeddingProvider` adapter
+  for the local `POST /api/embed` endpoint with `OLLAMA_BASE_URL`
+  conventions; the provider is opt-in via `JARVIS_MEMORY_EMBED_MODEL` and
+  assembly fails closed on invalid configuration.
+- Bumped the SQLite memory index schema to version 3 with a `memory_vectors`
+  table keyed by `(entry_id, model_id)` and carrying its `content_hash`;
+  reconcile purges orphaned vectors and older schema versions reset
+  transparently as derived data.
+- Added `vector_backlog`, `store_vectors` (normalized float32 packing) and
+  `search_semantic` (pure-stdlib cosine ranking over hash-current vectors,
+  deterministic tie-breaks, dimension-mismatch rows skipped).
+- Extended `GET /api/memory/search` with `mode=semantic` on all three service
+  surfaces: the bounded backlog (32 embeds per request) is caught up before
+  the query is embedded, coverage is reported honestly via
+  `coverage: {vectors, entries}`, and stable 503 envelopes distinguish
+  `MEMORY_SEMANTIC_UNAVAILABLE` from `MEMORY_INDEX_UNAVAILABLE`.
+- Documented the mode, coverage and provider semantics in
+  `contracts/core-api.openapi.json`; archived `AUDIT_REPORT_243.md` per the
+  ten-report window rule.
+
+### Verification
+
+- `python -m unittest tests.test_sqlite_memory_index -v`: 54 passed
+- `python tests/run_all.py`: 1228 total (1217 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/core/contracts/embedding_provider.py`
+- `src/adapters/ollama_embedding.py`
+- `src/adapters/sqlite_memory_index.py`
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `contracts/core-api.openapi.json`
+- `tests/test_sqlite_memory_index.py`
+- `tests/run_all.py`
+- `docs/reports/AUDIT_REPORT_253.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_243.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #252 - 2026-09-30
+
+**Protocol**: Phase F trigram full-text memory retrieval
+**Status**: Complete
+
+### Achievements
+
+- Bumped the SQLite memory index schema to version 2 with an FTS5 `memory_fts`
+  virtual table (`tokenize='trigram'`); FTS5 availability is probed at open
+  and a build without it fails closed with a clear error.
+- Reconcile now rebuilds the FTS table inside the same bounded transaction as
+  the metadata rows, keeping the fingerprint-skip guarantee for both tables;
+  version 1 databases reset transparently because the index is derived data,
+  while unknown newer versions and read-only old databases fail closed.
+- Added `SqliteMemoryIndex.search_fulltext`: bounded, quote-safe, OR-combined
+  trigram MATCH joined back to the metadata rows, ordered by BM25 `rank` with
+  each hit carrying its positive relevance.
+- Added the shared `memory_fulltext_terms` contract rule (casefolded
+  alphanumeric or CJK runs of at least 3 characters) and a bounded `mode`
+  parameter (`lexical` default, `fulltext`) on `GET /api/memory/search` across
+  the stdlib HTTPServer, FastAPI and the Express bridge; responses declare
+  the mode and ranking stays deterministic with title/id tie-breaks.
+- Documented the parameter and updated the `MemorySearchResponse` schema in
+  `contracts/core-api.openapi.json`; archived `AUDIT_REPORT_242.md` per the
+  ten-report window rule.
+
+### Verification
+
+- `python -m unittest tests.test_sqlite_memory_index -v`: 31 passed
+- `python tests/run_all.py`: 1211 total (1200 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+
+### Files Changed
+
+- `src/core/contracts/memory_search.py`
+- `src/adapters/sqlite_memory_index.py`
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `contracts/core-api.openapi.json`
+- `tests/test_sqlite_memory_index.py`
+- `tests/test_api_contract.py`
+- `docs/reports/AUDIT_REPORT_252.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_242.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
+## Iteration #251 - 2026-09-29
+
+**Protocol**: Migratable SQLite memory metadata index (Phase F)
+**Status**: Complete
+
+### Achievements
+
+- Extracted the deterministic lexical search contract (term extraction,
+  matching, 5x/3x/1x scoring, snippet alignment, bounded provenance ids) from
+  the fixed role tool into `core/contracts/memory_search.py`; the role tool
+  and the HTTP surface now rank identically for the same entry set.
+- Added a stdlib-only `SqliteMemoryIndex` adapter over the file-authoritative
+  MemoryStore: versioned schema, fingerprint-skip reconcile with one-transaction
+  row replacement, bounded fail-closed budgets, read-only URI mode and
+  fail-closed handling of schema mismatch and malformed rows. Every row cites
+  the authoritative `entry_id` and a SHA-256 `content_hash`.
+- Exposed `GET /api/memory/search` on the stdlib HTTPServer, FastAPI and the
+  Express bridge (query-string passthrough), with bounded `limit`
+  (default 10, max 50) and stable error envelopes; no new execution authority.
+- Documented the route and a `MemorySearchResponse` schema in
+  `contracts/core-api.openapi.json`.
+- Archived `AUDIT_REPORT_240.md` and `AUDIT_REPORT_241.md` per the
+  ten-report window rule, registered in `archive/manifest.json`.
+
+### Verification
+
+- `python -m unittest tests.test_sqlite_memory_index -v`: 21 passed
+- `python tests/run_all.py`: 1201 total (1190 passed, 11 skipped)
+- `python -m unittest tests.test_api_contract`: 31 passed
+- `python -m compileall -q src tests scripts`: passed
+- `python -m ruff check src tests scripts`: passed
+- `git diff --check`: passed
+- Frontend Vitest `npm test -- --run`: 156 passed
+
+### Files Changed
+
+- `src/core/contracts/memory_search.py`
+- `src/core/brain/read_only_role_tools.py`
+- `src/adapters/sqlite_memory_index.py`
+- `src/app/memory_api.py`
+- `src/main.py`
+- `src/main_fastapi.py`
+- `frontend/server.js`
+- `frontend/server.test.js`
+- `contracts/core-api.openapi.json`
+- `tests/test_sqlite_memory_index.py`
+- `tests/test_api_contract.py`
+- `tests/run_all.py`
+- `docs/reports/AUDIT_REPORT_251.md`
+- `docs/reports/README.md`
+- `docs/reports/archive/README.md`
+- `docs/reports/archive/manifest.json`
+- `docs/reports/archive/AUDIT_REPORT_240.md`
+- `docs/reports/archive/AUDIT_REPORT_241.md`
+- `AGENTS.md`
+- `docs/DEVELOPMENT_GUIDE.md`
+- `CHANGELOG.md`
+
+---
+
 ## Iteration #250 - 2026-09-27
 
 **Protocol**: Dependency-aware workflow DAG scheduler

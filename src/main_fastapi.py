@@ -56,14 +56,28 @@ from adapters.file_run_state_repository import (
     RunStateIntegrityError,
 )
 from adapters.git_workspace import GitWorkspaceInspector
+from adapters.ollama_embedding import embedding_provider_from_env
 from adapters.role_task_record_repository import RoleTaskRecordRepository
+from adapters.sqlite_memory_index import SqliteMemoryIndexError
 from app.memory_api import (
     MEMORY_API_MAX_DIRECTORY_ENTRIES,
     MEMORY_API_MAX_FILE_BYTES,
     MEMORY_API_MAX_FILES,
     MEMORY_API_MAX_TOTAL_BYTES,
+    MemoryBackupFailedError,
+    MemoryBackupNotFoundError,
+    MemorySearchRequestError,
+    MemorySemanticUnavailableError,
+    MemoryTransferRequestError,
+    create_memory_backup_for_api,
+    export_memory_entries_for_api,
+    import_memory_entries_for_api,
+    list_memory_backups_for_api,
     load_memory_entries_for_api,
+    prune_memory_entries_for_api,
     public_memory_entry,
+    restore_memory_backup_for_api,
+    search_memory_entries_for_api,
 )
 from app.run_lifecycle import RunLifecycleCoordinator
 from core.brain.agent_factory import AgentFactory
@@ -84,7 +98,6 @@ from core.brain.role_worker import (
 )
 from core.brain.workflow_dag import (
     FailurePolicy,
-    Workflow,
     WorkflowEngine,
     WorkflowExecutionError,
     WorkflowNode,
@@ -452,6 +465,7 @@ class AppState:
         self.ollama = OllamaManager()
         self.terminal = terminal if terminal is not None else TerminalWorker()
         self.memory_store = MemoryStore(memory_dir=memory_dir)
+        self.embedding_provider = embedding_provider_from_env()
         self.orchestrator = Orchestrator()
         self.role_registry = create_default_registry()
         self.agent_factory = AgentFactory(
@@ -998,6 +1012,46 @@ async def memory_entries(memory_type: Optional[str] = None):
         "entries": [public_memory_entry(entry) for entry in entries]
     }
 
+@app.get("/api/memory/search")
+async def memory_search(
+    q: Optional[str] = None,
+    limit: int = 10,
+    mode: str = "lexical",
+):
+    """Memory search backed by the migratable SQLite metadata index"""
+    try:
+        return search_memory_entries_for_api(
+            state.memory_store,
+            q,
+            limit=limit,
+            mode=mode,
+            embedding_provider=getattr(state, "embedding_provider", None),
+        )
+    except MemorySearchRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": str(error),
+            },
+        ) from error
+    except MemorySemanticUnavailableError as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MEMORY_SEMANTIC_UNAVAILABLE",
+                "message": "Memory semantic search is unavailable",
+            },
+        ) from error
+    except (SqliteMemoryIndexError, OSError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MEMORY_INDEX_UNAVAILABLE",
+                "message": "Memory search index is unavailable",
+            },
+        ) from error
+
 @app.post("/api/memory/store")
 async def memory_store(request: MemoryRequest):
     """Store memory"""
@@ -1022,6 +1076,201 @@ async def memory_store(request: MemoryRequest):
         "id": entry.id,
         "type": entry.type.value,
     }
+
+@app.get("/api/memory/export")
+async def memory_export():
+    """Lossless bounded memory snapshot for migration"""
+    return export_memory_entries_for_api(state.memory_store)
+
+@app.post("/api/memory/import")
+async def memory_import(request: Request):
+    """Import memory records with id-level deduplication"""
+    try:
+        data = await request.json()
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    try:
+        return import_memory_entries_for_api(state.memory_store, data)
+    except MemoryTransferRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": str(error),
+            },
+        ) from error
+    except (TypeError, ValueError, OSError) as error:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "MEMORY_IMPORT_FAILED",
+                "message": "Memory import failed",
+            },
+        ) from error
+
+@app.post("/api/memory/backup")
+async def memory_backup_create(request: Request):
+    """Create a verified memory backup with retention pruning"""
+    try:
+        data = await request.json()
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    max_retained = (
+        data.get("max_retained") if isinstance(data, dict) else None
+    )
+    try:
+        if max_retained is None:
+            return create_memory_backup_for_api(state.memory_store)
+        return create_memory_backup_for_api(
+            state.memory_store,
+            max_retained=max_retained,
+        )
+    except MemoryTransferRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": str(error),
+            },
+        ) from error
+    except MemoryBackupFailedError as error:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "MEMORY_BACKUP_FAILED",
+                "message": "Memory backup could not be created",
+            },
+        ) from error
+
+@app.get("/api/memory/backups")
+async def memory_backups_list():
+    """List existing memory backups with integrity status"""
+    try:
+        return list_memory_backups_for_api(state.memory_store)
+    except OSError as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MEMORY_BACKUP_UNAVAILABLE",
+                "message": "Memory backups are unavailable",
+            },
+        ) from error
+
+@app.post("/api/memory/restore")
+async def memory_restore(request: Request):
+    """Restore a verified backup through idempotent import"""
+    try:
+        data = await request.json()
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    try:
+        return restore_memory_backup_for_api(state.memory_store, data)
+    except MemoryBackupNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MEMORY_BACKUP_NOT_FOUND",
+                "message": str(error),
+            },
+        ) from error
+    except MemoryTransferRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": str(error),
+            },
+        ) from error
+    except MemoryBackupFailedError as error:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "MEMORY_BACKUP_FAILED",
+                "message": "Memory restore failed its integrity check",
+            },
+        ) from error
+
+@app.post("/api/memory/prune")
+async def memory_prune(request: Request):
+    """Apply an explicit, bounded retention policy"""
+    try:
+        data = await request.json()
+    except (ValueError, RecursionError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_JSON",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "Request body must be valid JSON",
+            },
+        ) from error
+    try:
+        return prune_memory_entries_for_api(state.memory_store, data)
+    except MemoryTransferRequestError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": str(error),
+            },
+        ) from error
+    except (TypeError, ValueError, OSError) as error:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "MEMORY_PRUNE_FAILED",
+                "message": "Memory prune failed",
+            },
+        ) from error
 
 @app.delete("/api/memory/probes/{memory_type}/{entry_id}")
 async def memory_probe_delete(

@@ -2,8 +2,8 @@
 
 **项目名称**：小奕 J.A.R.V.I.S. 自主演进引擎
 **项目路径**：`C:\GitHub\贾维斯\`
-**最后整理**：2026-09-18
-**最新功能迭代**：Iteration 249
+**最后整理**：2026-09-30
+**最新功能迭代**：Iteration 257
 
 ## 项目目标
 
@@ -42,7 +42,7 @@ FastAPI 是二选一的 8080 入口。
 
 - 角色任务通过可终止的进程 Worker 执行；固定 Role Worker 内置五个只读工具：`system_status`、`model_list`、`orchestrator_status`、`memory_search` 和 `repository_metadata`。
 - 工具目录、角色授权、Schema、调用次数、字节数和时间预算都由父进程验证；终端、Plugin 生命周期和 HTTP capability token 不属于角色工具目录。
-- MemoryStore 支持有界 Markdown 读写、v1 只读兼容、v2 无损往返、意图日志恢复、压缩合并和删除；`memory_search` 当前是本地有界的词法检索，语义向量检索仍属于 Phase F 后续包。
+- MemoryStore 支持有界 Markdown 读写、v1 只读兼容、v2 无损往返、意图日志恢复、压缩合并和删除；`memory_search` 是确定性词法检索契约（标题 5x/标签 3x/正文 1x、来源引用），Iteration 251 起叠加可迁移的 SQLite 元数据索引并通过 `GET /api/memory/search` 对三服务暴露，Iteration 252 起同一端点支持 FTS5 trigram 全文模式（`mode=fulltext`，BM25 相关性，词项至少 3 字符），Iteration 253 起支持可选语义模式（`mode=semantic`，本地嵌入默认关闭，由 `JARVIS_MEMORY_EMBED_MODEL` 显式启用，覆盖率随响应上报），Iteration 254 起提供有界无损的 `GET /api/memory/export` 与按条目 ID 去重幂等的 `POST /api/memory/import`，Iteration 255 起提供自描述校验备份（`POST /api/memory/backup`、`GET /api/memory/backups`、`POST /api/memory/restore`，内嵌 SHA-256、保留上限清理、合并式非破坏恢复），Markdown 文件仍是权威来源。
 - Capability Registry 只读扫描 Skill、Plugin、Role Tool 和 UI 元数据；FileCapabilityStore 可验证并暂存禁用的 ZIP 版本，不会导入或执行未知包。
 - Plugin 生命周期由父端拥有的 `python_worker` 控制。Broker 默认拒绝；第一方插件默认只获得 `event.emit`，其它只读能力需要明确声明、授权和父端注册。
 - Linux Worker 使用 network namespace/Landlock；Windows 使用 capability-free AppContainer；macOS 使用 Seatbelt。平台强制证据和未验证范围见当前审计报告。
@@ -56,10 +56,10 @@ FastAPI 是二选一的 8080 入口。
 | Phase 9-10 | 已重构 | Solid.js 指挥中心、真实遥测和响应式导航已完成 |
 | Phase 11 | 进行中 | Worker、任务恢复和固定角色工具循环已交付，继续维护边界契约 |
 | Phase 12 | 进行中 | Python 聚合/发现测试与前端 Vitest/Playwright 持续运行 |
-| Phase F | 进行中 | 当前已交付有界词法检索；SQLite、全文和本地嵌入仍待实现 |
+| Phase F | 已完成 | 三模式检索、可迁移索引、导出导入、校验备份恢复、`MemoryRepository` 端口收敛与条目级保留策略均已交付；退出门禁"记忆可解释、可删除、可迁移"达成 |
 
-Iteration 249 是当前审计入口，详情见 `docs/reports/AUDIT_REPORT_249.md`。
-Iteration 240-248 的近期证据保留在报告根目录，Iteration 230-239 位于
+Iteration 257 是当前审计入口，详情见 `docs/reports/AUDIT_REPORT_257.md`。
+Iteration 248-256 的近期证据保留在报告根目录，Iteration 230-247 位于
 `docs/reports/archive/`；更完整的历史以 `CHANGELOG.md` 为准。
 
 ## 目录约定

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import shutil
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -12,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from adapters.git_workspace import GitWorkspaceInspector
+from core.contracts.memory_search import (
+    memory_matches,
+    memory_query_terms,
+    memory_score,
+    memory_snippet_text,
+    memory_source_ids,
+)
 from core.contracts.role_tool_catalog import (
     RoleToolAssembly,
     role_tool_definitions,
@@ -27,83 +33,22 @@ from .role_registry import READ_ONLY_ROLE_TOOLS
 from .role_tools import RoleToolBroker, RoleToolPolicy
 
 MAX_DIRTY_PATHS = 50
-MAX_MEMORY_SNIPPET_CHARS = 512
 MAX_MEMORY_DIRECTORY_ENTRIES = 256
 MAX_MEMORY_FILES = 128
 MAX_MEMORY_FILE_BYTES = 64 * 1024
 MAX_MEMORY_TOTAL_BYTES = 512 * 1024
 MAX_ROLE_NAMES = 50
-MAX_MEMORY_QUERY_CHARS = 256
-MAX_MEMORY_SOURCE_IDS = 8
-MAX_MEMORY_SOURCE_ID_CHARS = 128
-_MEMORY_QUERY_TERM_RE = re.compile(r"[0-9A-Za-z_]+|[一-鿿]")
 
 
 def _memory_query_terms(query: str) -> tuple[str, ...]:
-    normalized = query.strip().casefold()
-    if not normalized or len(normalized) > MAX_MEMORY_QUERY_CHARS:
-        raise RoleToolProtocolError("Memory query must contain 1 to 256 characters")
-    terms = tuple(dict.fromkeys(_MEMORY_QUERY_TERM_RE.findall(normalized)))
-    if not terms:
-        raise RoleToolProtocolError("Memory query must contain searchable terms")
-    return terms
-
-
-def _memory_source_ids(entry: Any) -> list[str]:
-    source_id = entry.metadata.get("source_id")
-    parent_id = entry.parent_id
-    merged_from = entry.metadata.get("merged_from")
-    candidates = [source_id, parent_id]
-    if isinstance(merged_from, (list, tuple)):
-        candidates.extend(merged_from)
-
-    source_ids: list[str] = []
-    for candidate in candidates:
-        if type(candidate) is not str:
-            continue
-        if 0 < len(candidate) <= MAX_MEMORY_SOURCE_ID_CHARS and candidate not in source_ids:
-            source_ids.append(candidate)
-        if len(source_ids) == MAX_MEMORY_SOURCE_IDS:
-            break
-    return source_ids
-
-
-def _memory_score(entry: Any, terms: tuple[str, ...]) -> int:
-    title = entry.title.casefold()
-    content = entry.content.casefold()
-    tags = [tag.casefold() for tag in entry.tags if isinstance(tag, str)]
-    score = 0
-    for term in terms:
-        score += 5 * title.count(term)
-        score += 3 * sum(tag.count(term) for tag in tags)
-        score += content.count(term)
-    return score
-
-
-def _memory_matches(entry: Any, terms: tuple[str, ...]) -> bool:
-    title = entry.title.casefold()
-    content = entry.content.casefold()
-    tags = [tag.casefold() for tag in entry.tags if isinstance(tag, str)]
-    return any(
-        term in title or term in content or any(term in tag for tag in tags)
-        for term in terms
-    )
+    try:
+        return memory_query_terms(query)
+    except ValueError as error:
+        raise RoleToolProtocolError(str(error)) from error
 
 
 def _memory_snippet(entry: Any, terms: tuple[str, ...]) -> str:
-    redacted = str(redact_value(entry.content))
-    redacted_lower = redacted.casefold()
-    positions = [
-        position
-        for position in (redacted_lower.find(term) for term in terms)
-        if position >= 0
-    ]
-    if not positions:
-        return redacted[:MAX_MEMORY_SNIPPET_CHARS]
-    position = min(positions)
-    margin = max(0, (MAX_MEMORY_SNIPPET_CHARS - len(terms[0])) // 2)
-    start = max(0, position - margin)
-    return redacted[start:start + MAX_MEMORY_SNIPPET_CHARS]
+    return memory_snippet_text(str(redact_value(entry.content)), terms)
 
 
 def _redacted(handler: Callable[[dict[str, Any]], object]):
@@ -184,16 +129,16 @@ def create_read_only_role_tool_broker(
             max_total_bytes=MAX_MEMORY_TOTAL_BYTES,
         )
         for entry in sorted(entries, key=lambda item: (item.title, item.id)):
-            if not _memory_matches(entry, terms):
+            if not memory_matches(entry, terms):
                 continue
             matches.append({
                 "id": str(entry.id)[:128],
                 "type": entry.type.value,
                 "title": entry.title[:256],
                 "snippet": _memory_snippet(entry, terms),
-                "score": _memory_score(entry, terms),
+                "score": memory_score(entry, terms),
                 "parent_id": entry.parent_id if entry.parent_id is None else str(entry.parent_id)[:128],
-                "source_ids": _memory_source_ids(entry),
+                "source_ids": memory_source_ids(entry),
             })
             if len(matches) >= limit:
                 break

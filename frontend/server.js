@@ -616,7 +616,35 @@ app.get('/api/memory/entries', async (req, res) => {
   await proxyCoreRequest(req, res, 'memory');
 });
 
+app.get('/api/memory/search', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
 app.post('/api/memory/store', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.get('/api/memory/export', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.post('/api/memory/import', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.post('/api/memory/backup', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.get('/api/memory/backups', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.post('/api/memory/restore', async (req, res) => {
+  await proxyCoreRequest(req, res, 'memory');
+});
+
+app.post('/api/memory/prune', async (req, res) => {
   await proxyCoreRequest(req, res, 'memory');
 });
 
@@ -1126,7 +1154,14 @@ if (process.env.JARVIS_TEST_NO_LISTEN !== '1') {
     console.log('  POST /api/terminal/execute');
     console.log('  GET  /api/plugins');
     console.log('  GET  /api/memory/entries');
+    console.log('  GET  /api/memory/search');
+    console.log('  GET  /api/memory/export');
     console.log('  POST /api/memory/store');
+    console.log('  POST /api/memory/import');
+    console.log('  POST /api/memory/backup');
+    console.log('  GET  /api/memory/backups');
+    console.log('  POST /api/memory/restore');
+    console.log('  POST /api/memory/prune');
     console.log('  GET  /api/events');
   });
 

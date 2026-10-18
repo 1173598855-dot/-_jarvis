@@ -98,6 +98,15 @@ from test_main_fastapi import (
     TestRoleTaskLifecycleEndpoints,
     TestRunRecoveryLifespan,
 )
+from test_memory_repository import TestMemoryRepositoryConformance
+from test_memory_retention import (
+    TestMemoryPrune,
+    TestMemoryStoreDelete,
+)
+from test_memory_transfer import (
+    TestMemoryBackup,
+    TestMemoryTransfer,
+)
 from test_ollama_manager import TestBoundedOllamaResponses, TestTokenUsage
 from test_ollama_manager import TestChat as TestOllamaChat
 from test_ollama_manager_extended import TestOllamaManagerChat
@@ -148,6 +157,13 @@ from test_ruff_check import TestRuffCheckOutputLimits
 from test_run_lifecycle import TestGitWorkspaceInspector, TestRunLifecycleCoordinator
 from test_run_state import TestRunState
 from test_secret_redaction import TestSecretRedaction
+from test_sqlite_memory_index import (
+    TestEmbeddingProviderContract,
+    TestMemorySearchApi,
+    TestMemorySearchContract,
+    TestOllamaEmbeddingProvider,
+    TestSqliteMemoryIndex,
+)
 from test_terminal_executor_extended_v2 import (
     TestTerminalExecutorAuditLog,
     TestTerminalExecutorDeniedCommands,
@@ -378,6 +394,16 @@ AGGREGATE_TEST_CASES = [
     TestContextCompressor,
     TestLLMCompressorHistory,
     TestMemoryStore,
+    TestMemoryTransfer,
+    TestMemoryBackup,
+    TestMemoryRepositoryConformance,
+    TestMemoryPrune,
+    TestMemoryStoreDelete,
+    TestMemorySearchApi,
+    TestMemorySearchContract,
+    TestEmbeddingProviderContract,
+    TestOllamaEmbeddingProvider,
+    TestSqliteMemoryIndex,
     TestEventBusStateBoundaries,
     TestOllamaManager,
     TestAgentProfile,

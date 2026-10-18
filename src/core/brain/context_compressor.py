@@ -1702,6 +1702,83 @@ class MemoryStore:
         )
         return True
 
+    def delete(self, memory_type: MemoryType, entry_id: str) -> bool:
+        """Delete one entry by id through the journalled deletion path.
+
+        Retention and explicit lifecycle callers use this general path.
+        Integration probe entries are refused here on purpose: they leave
+        only through :meth:`delete_probe` and its token check.
+        """
+        with self._mutation_transaction():
+            return self._delete_entry_unlocked_for_retention(
+                memory_type, entry_id
+            )
+
+    def _delete_entry_unlocked_for_retention(
+        self,
+        memory_type: MemoryType,
+        entry_id: str,
+    ) -> bool:
+        if not isinstance(memory_type, MemoryType):
+            return False
+        if not self._is_safe_entry_id(entry_id):
+            return False
+
+        filepath = self.memory_dir / f"{memory_type.value}_{entry_id}.md"
+        try:
+            validated_stat = os.lstat(filepath)
+        except OSError:
+            return False
+        if (
+            not stat.S_ISREG(validated_stat.st_mode)
+            or self._is_reparse_point(validated_stat)
+        ):
+            return False
+        content = self._read_regular_candidate(filepath, normalize_newlines=False)
+        if content is None:
+            return False
+
+        try:
+            entry = self._parse_entry(filepath, content)
+        except (
+            OSError,
+            UnicodeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            RecursionError,
+        ):
+            return False
+        if entry is None or entry.type is not memory_type:
+            return False
+        if "probe_cleanup_token" in entry.metadata:
+            return False
+
+        try:
+            expected_index_stat = self._ensure_regular_index_target()
+            index_content = self._read_index_unlocked()
+        except OSError:
+            return False
+
+        try:
+            current_stat = os.lstat(filepath)
+        except OSError:
+            return False
+        if (
+            not stat.S_ISREG(current_stat.st_mode)
+            or self._is_reparse_point(current_stat)
+            or not self._same_file_snapshot(validated_stat, current_stat)
+        ):
+            return False
+
+        self._publish_entry_deletion_unlocked(
+            filepath,
+            content,
+            expected_index_stat,
+            index_content,
+        )
+        return True
+
     @staticmethod
     def _bounded_positive(value: Optional[int], name: str) -> Optional[int]:
         if value is not None and (type(value) is not int or value < 1):

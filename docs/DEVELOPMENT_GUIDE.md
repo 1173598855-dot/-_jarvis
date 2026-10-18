@@ -1326,6 +1326,8 @@ CI 使用合成帧和受控视频夹具，不依赖真实摄像头。覆盖设�
 
 ### 阶段 F：长期记忆与 RAG
 
+状态：进行中。Iteration 251 在文件权威的 MemoryStore 之上交付了可迁移的 SQLite 元数据索引、共享词法检索契约和三服务 `GET /api/memory/search`；Iteration 252 又在同一索引上交付 FTS5 trigram 全文模式（`mode=fulltext`，BM25 相关性，词项至少 3 字符，v1 索引透明重建到 v2）；Iteration 253 交付可选本地嵌入语义模式（`mode=semantic`，`EmbeddingProvider` 端口加 Ollama 适配器，默认关闭、`JARVIS_MEMORY_EMBED_MODEL` 显式启用，向量按内容哈希判旧并按请求有界补嵌、覆盖率随响应上报）；Iteration 254 交付有界无损的 `GET /api/memory/export` 与按条目 ID 去重幂等的 `POST /api/memory/import`；Iteration 255 交付自描述校验备份与合并式非破坏恢复（内嵌 SHA-256、读取回验、保留上限按微秒戳名称清理）；Iteration 256 冻结 `MemoryRepository` 结构化端口与统一符合性契约，Markdown 存储作为参考实现零改动符合；Iteration 257 交付条目级保留策略（显式、有界、默认关闭的 prune 策略引擎 + 日志化 `MemoryStore.delete`，probe 条目仅保留原 token 生命周期）。文件存储仍是唯一权威来源，退出门禁"记忆可解释、可删除、可迁移"已由本次验证证据达成。
+
 - 抽象 `MemoryRepository`。
 - 引入可迁移的 SQLite 元数据存储。
 - 增加全文检索、来源引用和可选本地嵌入。

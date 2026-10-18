@@ -4,22 +4,21 @@
 
 ## 当前报告
 
-顶层保留 Iteration 240-249，便于从一个固定窗口阅读最新证据。更早的
-Iteration 230-239 已原样移入 [archive/](archive/)，没有从历史台账删除。
+顶层保留 Iteration 248-257，便于从一个固定窗口阅读最新证据。更早的
+Iteration 230-247 已原样移入 [archive/](archive/)，没有从历史台账删除。
 
 | 文档 | 说明 |
 |---|---|
+| [AUDIT_REPORT_257.md](AUDIT_REPORT_257.md) | Entry-level retention policies — Phase F exit gate met |
+| [AUDIT_REPORT_256.md](AUDIT_REPORT_256.md) | MemoryRepository port with unified conformance contract (Phase F) |
+| [AUDIT_REPORT_255.md](AUDIT_REPORT_255.md) | Verified memory backup, inventory and non-destructive restore (Phase F) |
+| [AUDIT_REPORT_254.md](AUDIT_REPORT_254.md) | Bounded memory export/import with id-level deduplication (Phase F) |
+| [AUDIT_REPORT_253.md](AUDIT_REPORT_253.md) | Optional local-embedding semantic memory retrieval (Phase F) |
+| [AUDIT_REPORT_252.md](AUDIT_REPORT_252.md) | Phase F trigram full-text memory retrieval |
+| [AUDIT_REPORT_251.md](AUDIT_REPORT_251.md) | Migratable SQLite memory metadata index (Phase F) |
 | [AUDIT_REPORT_250.md](AUDIT_REPORT_250.md) | Dependency-aware workflow DAG scheduler |
 | [AUDIT_REPORT_249.md](AUDIT_REPORT_249.md) | Bounded provenance-aware memory search |
 | [AUDIT_REPORT_248.md](AUDIT_REPORT_248.md) | Production Linux Terminal Worker kernel-enforcement evidence |
-| [AUDIT_REPORT_247.md](AUDIT_REPORT_247.md) | Locale-independent discovery fixture diagnostics |
-| [AUDIT_REPORT_246.md](AUDIT_REPORT_246.md) | Production Linux Plugin Runtime kernel-enforcement evidence |
-| [AUDIT_REPORT_245.md](AUDIT_REPORT_245.md) | Linux Worker compatibility and real enforcement evidence |
-| [AUDIT_REPORT_244.md](AUDIT_REPORT_244.md) | Direct allowlisted `network.get` egress and proxy isolation |
-| [AUDIT_REPORT_243.md](AUDIT_REPORT_243.md) | macOS Seatbelt enforcement evidence and CI gate |
-| [AUDIT_REPORT_242.md](AUDIT_REPORT_242.md) | Parent-owned OS isolation for the fixed Terminal Worker |
-| [AUDIT_REPORT_241.md](AUDIT_REPORT_241.md) | Parent-owned macOS Seatbelt sandbox for Plugin Workers |
-| [AUDIT_REPORT_240.md](AUDIT_REPORT_240.md) | Production Windows AppContainer launch for Plugin Workers |
 | [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | 当前架构、规模、评分、技术债和风险 |
 | [PHASE6_INSTALLATION_REPORT.md](PHASE6_INSTALLATION_REPORT.md) | Phase 6 安装与环境报告 |
 | [GITHUB_LEARNING_REPORT.md](GITHUB_LEARNING_REPORT.md) | GitHub 学习与项目实践报告 |
